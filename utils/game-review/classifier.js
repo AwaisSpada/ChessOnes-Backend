@@ -11,85 +11,81 @@
  * - Tactical swings
  */
 
+function evalToAbsPawns(evalAfter) {
+  if (typeof evalAfter === "number" && Number.isFinite(evalAfter)) {
+    return Math.abs(evalAfter);
+  }
+  if (!evalAfter || typeof evalAfter !== "object") {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (typeof evalAfter.mate === "number") {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (typeof evalAfter.cp === "number" && Number.isFinite(evalAfter.cp)) {
+    return Math.abs(evalAfter.cp / 100);
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
 /**
- * Classify a move based on centipawn loss (Chess.com style)
- * @param {number} centipawnLoss - Difference between best move and played move
- * @param {Object} context - { hadMate: boolean, missedMate: boolean, isBestMove: boolean, isBookMove: boolean }
- * @returns {string} - Classification label (brilliant, great, best, excellent, good, book, inaccuracy, mistake, blunder)
+ * Strict, gap-free classification with deterministic priority.
+ * @param {number} centipawnLoss
+ * @param {Object} context
+ * @returns {string}
  */
 function classifyMove(centipawnLoss, context = {}) {
   const {
+    moveNumber = Number.POSITIVE_INFINITY,
+    evalAfter = null,
     hadMate = false,
     missedMate = false,
-    isBestMove = false,
-    isBookMove = false,
     tacticalSwing = false,
     isCaptureMove = false,
     isSacrificeMove = false,
+    isBestMove = false,
   } = context;
 
-  // Book move (opening theory) - if it's a known opening move
-  if (isBookMove) {
+  const cpl = Number.isFinite(centipawnLoss) ? centipawnLoss : Number.POSITIVE_INFINITY;
+  const absEvalPawns = evalToAbsPawns(evalAfter);
+
+  if (moveNumber <= 12 && absEvalPawns <= 0.5 && cpl <= 8) {
     return "book";
-  }
-
-  // Best move - played the engine's best move
-  if (isBestMove || centipawnLoss === 0) {
-    return "best";
-  }
-
-  // Missed mate is always a blunder
-  if (missedMate) {
+  } else if (missedMate === true || (hadMate === true && cpl >= 200)) {
     return "blunder";
-  }
-
-  // Had mate opportunity but didn't play it
-  if (hadMate && centipawnLoss >= 200) {
-    return "blunder";
-  }
-
-  // Brilliant move requires tactical impact + material action (capture/sacrifice)
-  // to avoid over-labeling ordinary accurate moves.
-  if (
-    centipawnLoss <= 10 &&
-    centipawnLoss > 0 &&
-    tacticalSwing &&
+  } else if (
+    cpl > 0 &&
+    cpl <= 15 &&
+    tacticalSwing === true &&
     (isCaptureMove || isSacrificeMove)
   ) {
     return "brilliant";
-  }
-
-  // Excellent move - close to best move
-  if (centipawnLoss <= 30 && centipawnLoss > 10) {
+  } else if (isBestMove === true || cpl === 0) {
+    return "best";
+  } else if (cpl <= 35) {
     return "excellent";
-  }
-
-  // Good move - reasonable move
-  if (centipawnLoss < 60 && centipawnLoss > 30) {
+  } else if (cpl <= 75) {
     return "good";
-  }
-
-  // Standard classification for errors
-  if (centipawnLoss >= 300) {
-    return "blunder";
-  } else if (centipawnLoss >= 150) {
-    return "mistake";
-  } else if (centipawnLoss >= 60) {
+  } else if (cpl <= 150) {
     return "inaccuracy";
+  } else if (cpl < 300) {
+    return "mistake";
+  } else if (cpl >= 300) {
+    return "blunder";
   }
 
-  return "excellent";
+  return "blunder";
 }
 
 const CLASSIFICATION_THRESHOLDS = Object.freeze({
   BOOK: 8,
   BOOK_MAX_ABS_EVAL_CP: 50,
   BEST: 0,
-  INACCURACY: 60,
-  MISTAKE: 150,
+  EXCELLENT_MAX_LOSS: 35,
+  GOOD_MAX_LOSS: 75,
+  INACCURACY: 150,
+  MISTAKE: 300,
   BLUNDER: 300,
-  BRILLIANT_MAX_LOSS: 10,
-  EXCELLENT_MAX_LOSS: 30,
+  BRILLIANT_MAX_LOSS: 15,
   TACTICAL_SWING: 200,
 });
 

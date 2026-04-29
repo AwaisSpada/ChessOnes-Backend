@@ -365,6 +365,11 @@ async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, 
           moveNumber <= 12 &&
           evalAfterAbsCp <= CLASSIFICATION_THRESHOLDS.BOOK_MAX_ABS_EVAL_CP &&
           centipawnLoss <= CLASSIFICATION_THRESHOLDS.BOOK;
+        const hadMate = typeof evalBestAfter?.mate === "number" && evalBestAfter.mate > 0;
+        const evalAfterForClassifier = {
+          cp: evalAfterRaw?.cp !== undefined ? (isWhiteMove ? -evalAfterRaw.cp : evalAfterRaw.cp) : undefined,
+          mate: evalAfterRaw?.mate !== undefined ? (isWhiteMove ? -evalAfterRaw.mate : evalAfterRaw.mate) : undefined,
+        };
         
         // Detect tactical material action for "brilliant" gating.
         let isCaptureMove = false;
@@ -381,8 +386,11 @@ async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, 
 
         // Step 9: Classify the move using unified classifier thresholds.
         const label = classifier.classifyMove(centipawnLoss, {
+          moveNumber,
+          evalAfter: evalAfterForClassifier,
           isBestMove,
           isBookMove,
+          hadMate,
           missedMate,
           tacticalSwing,
           isCaptureMove,
@@ -547,87 +555,6 @@ function detectTacticalSwing(evalBefore, evalAfter, isWhiteMove) {
   
   const swing = Math.abs(afterCP - beforeCP);
   return swing >= CLASSIFICATION_THRESHOLDS.TACTICAL_SWING;
-}
-
-/**
- * Classify move based on centipawn loss (Chess.com style)
- * 
- * DETERMINISTIC CLASSIFICATION: Same inputs always produce same output.
- * Based ONLY on:
- * - centipawnLoss (required)
- * - isBestMove (determines "best" or "book")
- * - missedMate (overrides to "blunder")
- * - isBookMove (can promote to "book" if best move)
- * - tacticalSwing (can promote "brilliant" rating)
- * 
- * Order matters: check from best to worst (most specific to least specific).
- * 
- * SAFEGUARD: Only uses FULL engine data. LITE engine results never reach here.
- */
-function classifyMove(centipawnLoss, context = {}) {
-  const { isBestMove, isBookMove, missedMate, tacticalSwing } = context;
-  
-  // ✅ DETERMINISTIC: Best move check (0cp loss or exact match)
-  // If best move AND in opening, mark as book (opening theory)
-  if (isBestMove || centipawnLoss < 1) {
-    if (isBookMove) {
-      return "book";
-    }
-    return "best";
-  }
-  
-  // ✅ DETERMINISTIC: Missed mate is always blunder (highest priority error)
-  if (missedMate) {
-    return "blunder";
-  }
-  
-  // ✅ DETERMINISTIC: Error classifications (worst moves first)
-  // Blunder: 300+ cp loss
-  if (centipawnLoss >= CLASSIFICATION_THRESHOLDS.BLUNDER) {
-    return "blunder";
-  }
-  
-  // Mistake: 100-299 cp loss
-  if (centipawnLoss >= CLASSIFICATION_THRESHOLDS.MISTAKE) {
-    return "mistake";
-  }
-  
-  // Inaccuracy: 50-99 cp loss
-  if (centipawnLoss >= CLASSIFICATION_THRESHOLDS.INACCURACY) {
-    return "inaccuracy";
-  }
-  
-  // ✅ DETERMINISTIC: Good move classifications (best to worst)
-  // Brilliant: 0-5cp loss (with optional tactical swing promotion)
-  if (centipawnLoss <= CLASSIFICATION_THRESHOLDS.BRILLIANT) {
-    // Tactical swing can promote to brilliant (within 5cp)
-    if (tacticalSwing) {
-      return "brilliant";
-    }
-    // Very close to best in opening can be brilliant (1-3cp)
-    if (isBookMove && centipawnLoss <= 3) {
-      return "brilliant";
-    }
-    // Default: falls through to "great" if no swing
-  }
-  
-  // Great: 6-10cp loss
-  if (centipawnLoss <= CLASSIFICATION_THRESHOLDS.GREAT) {
-    return "great";
-  }
-  
-  // Excellent: 11-20cp loss
-  if (centipawnLoss <= CLASSIFICATION_THRESHOLDS.EXCELLENT) {
-    return "excellent";
-  }
-  
-  // Good: 21-49cp loss
-  if (centipawnLoss < CLASSIFICATION_THRESHOLDS.INACCURACY) {
-    return "good";
-  }
-  
-  // Default fallback (should not reach here with proper thresholds)
-  return "good";
 }
 
 /**
