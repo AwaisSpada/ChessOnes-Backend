@@ -1,0 +1,2 @@
+stockfish/Linux/* filter=lfs diff=lfs merge=lfs -text
+stockfish/Windows/* filter=lfs diff=lfs merge=lfs -text
