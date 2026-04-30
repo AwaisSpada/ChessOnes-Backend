@@ -517,4 +517,3 @@ module.exports = {
   checkOpeningBadge,
 };
 
-// 
