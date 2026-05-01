@@ -1,7 +1,7 @@
 /**
  * Quick Review Generator
  * 
- * Generates a quick review using LITE engine (depth 8-10, 500ms per move).
+ * Generates a quick review using LITE engine (default depth 12, 600ms per move).
  * Used for immediate display while full review generates in background.
  */
 
@@ -13,12 +13,14 @@ const { generateGameReview } = require("./index-v2");
  * @returns {Promise<Object>} - Quick review object (same structure as full review)
  */
 async function generateQuickReview(moves, options = {}) {
-  const { depth = 12, movetime = 500 } = options;
+  const { depth = 12, movetime = 600 } = options;
   try {
     console.log(`[QuickReview] Starting quick review generation with LITE engine`);
     console.log(`[QuickReview] Moves: ${moves.length}, Depth: ${depth}, Movetime: ${movetime}ms`);
     
-    // ✅ SAFEGUARD: Wrap in timeout to prevent hanging (max 60 seconds for quick review)
+    // ✅ SAFEGUARD: Dynamic timeout based on game length with a 60s floor.
+    const timeout = Math.max(60000, moves.length * 2000 + 10000);
+
     const quickReviewPromise = generateGameReview({
       moves,
       depth,
@@ -27,7 +29,7 @@ async function generateQuickReview(moves, options = {}) {
     });
     
     const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("Quick review generation timeout (60s)")), 60000);
+      setTimeout(() => reject(new Error(`Review generation timeout (${timeout / 1000}s)`)), timeout);
     });
     
     const review = await Promise.race([quickReviewPromise, timeoutPromise]);
@@ -39,43 +41,11 @@ async function generateQuickReview(moves, options = {}) {
     console.log(`[QuickReview] ✅ Quick review generated successfully`);
     return review;
   } catch (error) {
-    // ✅ SAFEGUARD: Log error but don't crash - return minimal review structure
+    // Never persist a "completed" stub with analyzedMoves: 0 — that makes GET return 200
+    // while the UI looks empty. Callers mark the review failed / keep pending instead.
     console.error(`[QuickReview] ❌ Error generating quick review:`, error.message);
     console.error(`[QuickReview] Stack:`, error.stack);
-    
-    // Return minimal review structure so frontend doesn't crash
-    // This ensures reviewData is never null
-    return {
-      overview: {
-        totalMoves: moves.length,
-        analyzedMoves: 0,
-        accuracy: 0,
-        quality: "unknown",
-        dateAnalyzed: new Date().toISOString(),
-        quickReview: true,
-        reviewType: 'lite',
-        error: error.message,
-      },
-      moves: moves.map((move, index) => ({
-        moveNumber: Math.floor(index / 2) + 1,
-        playedMove: move,
-        player: index % 2 === 0 ? "white" : "black",
-        error: "Quick review generation failed",
-        label: "unknown",
-      })),
-      summary: {
-        accuracy: 0,
-        totalMoves: moves.length,
-      },
-      opening: { name: "Unknown", accuracy: 0 },
-      endgame: { name: "Unknown", accuracy: 0 },
-      suggestions: ["Quick review generation failed. Full review is generating in background."],
-      players: {
-        white: { accuracy: 0, totalMoves: 0 },
-        black: { accuracy: 0, totalMoves: 0 },
-      },
-      evaluationGraph: new Array(moves.length + 1).fill(0),
-    };
+    throw error;
   }
 }
 

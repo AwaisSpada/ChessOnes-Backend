@@ -2,8 +2,8 @@
  * Move Classification Module
  * 
  * Classifies moves based on centipawn loss:
- * - Inaccuracy: 60-149 centipawns
- * - Mistake: 150-299 centipawns
+ * - Inaccuracy: 71-150 centipawns
+ * - Mistake: 151-299 centipawns
  * - Blunder: 300+ centipawns
  * 
  * Also detects:
@@ -15,7 +15,7 @@
  * Classify a move based on centipawn loss (Chess.com style)
  * @param {number} centipawnLoss - Difference between best move and played move
  * @param {Object} context - { hadMate: boolean, missedMate: boolean, isBestMove: boolean, isBookMove: boolean }
- * @returns {string} - Classification label (brilliant, great, best, excellent, good, book, inaccuracy, mistake, blunder)
+ * @returns {string} - Classification label (best, excellent, good, book, inaccuracy, mistake, blunder)
  */
 function classifyMove(centipawnLoss, context = {}) {
   const {
@@ -23,9 +23,6 @@ function classifyMove(centipawnLoss, context = {}) {
     missedMate = false,
     isBestMove = false,
     isBookMove = false,
-    tacticalSwing = false,
-    isCaptureMove = false,
-    isSacrificeMove = false,
   } = context;
 
   // Book move (opening theory) - if it's a known opening move
@@ -48,24 +45,13 @@ function classifyMove(centipawnLoss, context = {}) {
     return "blunder";
   }
 
-  // Brilliant move requires tactical impact + material action (capture/sacrifice)
-  // to avoid over-labeling ordinary accurate moves.
-  if (
-    centipawnLoss > 0 &&
-    centipawnLoss <= 15 &&
-    tacticalSwing &&
-    (isCaptureMove || isSacrificeMove)
-  ) {
-    return "brilliant";
-  }
-
   // Excellent move
   if (centipawnLoss <= 30) {
     return "excellent";
   }
 
   // Good move
-  if (centipawnLoss <= 60) {
+  if (centipawnLoss <= 70) {
     return "good";
   }
 
@@ -84,11 +70,11 @@ const CLASSIFICATION_THRESHOLDS = Object.freeze({
   BOOK_MAX_MOVE_NUMBER: 4,
   BOOK_MAX_ABS_EVAL_PAWNS: 0.3,
   BEST: 0,
-  INACCURACY: 60,
-  MISTAKE: 150,
+  INACCURACY: 71,
+  MISTAKE: 151,
   BLUNDER: 300,
-  BRILLIANT_MAX_LOSS: 15,
   EXCELLENT_MAX_LOSS: 30,
+  GOOD_MAX_LOSS: 70,
   TACTICAL_SWING: 200,
 });
 

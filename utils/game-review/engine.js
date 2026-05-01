@@ -5,7 +5,7 @@
  * 1. FULL Engine: High-depth analysis (depth 18+) for comprehensive game review
  *    - Used once per completed game
  *    - Computes: evalBefore/evalAfter, centipawn loss, best move, alternative lines, eval graph
- * 2. LITE Engine: Low-depth analysis (depth 8-10) for replay-time quick evaluations
+ * 2. LITE Engine: Quick-review analysis (depth/movetime from caller, typical depth 12)
  *    - Used during replay navigation for UX features (arrows, quick eval)
  *    - Results are NOT persisted
  * 
@@ -667,17 +667,15 @@ async function analyzePositionFull(moves = [], options = {}) {
 }
 
 /**
- * Analyze position with LITE engine (low-depth, quick)
+ * Analyze position with LITE engine (quick review depth range)
  * @param {string[]} moves - Array of UCI moves
  * @param {Object} options - { depth: number, movetime: number }
  * @returns {Promise<Object>} - { evaluation, pv, depth, nodes, time, bestMove }
  */
 async function analyzePositionLite(moves = [], options = {}) {
-  // LITE engine: depth 8-10, movetime 500ms
-  const { depth = 8, movetime = 500, multipv = 1, searchMoves = null } = options;
-  
-  // Clamp depth to 8-10 for LITE engine
-  const clampedDepth = Math.max(8, Math.min(10, depth));
+  const { depth = 12, movetime = 600, multipv = 1, searchMoves = null } = options;
+
+  const clampedDepth = Math.max(4, Math.min(20, Math.round(depth)));
   
   let positionCmd = "position startpos";
   if (moves.length > 0) {
@@ -688,7 +686,6 @@ async function analyzePositionLite(moves = [], options = {}) {
     await sendLiteCommand(positionCmd, { timeout: 1000 });
 
     // Use both depth and movetime: search to depth X but stop if movetime exceeded
-    // This ensures LITE engine is fast (500ms limit) but also gets at least depth 8
     let goCmd = `go depth ${clampedDepth} movetime ${movetime}`;
     if (Array.isArray(searchMoves) && searchMoves.length > 0) {
       goCmd += ` searchmoves ${searchMoves.join(" ")}`;

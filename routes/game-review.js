@@ -79,7 +79,7 @@ async function runQuickReviewInBackground(gameId) {
       }
       const reviewPromise = generateQuickReview(uciMoves, {
         depth: 12,
-        movetime: 500,
+        movetime: 600,
       });
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error("Quick review timeout after 60s")), 60000)
@@ -92,7 +92,7 @@ async function runQuickReviewInBackground(gameId) {
       attachMoveTimingsToReview(review, game);
       await storeReview(gameId, review, {
         depth: 12,
-        movetime: 500,
+        movetime: 600,
         engineType: "LITE",
       });
       console.log(`[GameReview] Background quick review completed for game ${gameId}`);
@@ -331,6 +331,14 @@ function enrichReviewWithGameData(review, game, userId) {
   return review;
 }
 
+/** Legacy poison doc: quick-review catch used to persist this as status "completed". */
+function isInvalidCompletedReviewStub(reviewData) {
+  const o = reviewData?.overview;
+  if (!o || typeof o.totalMoves !== "number" || o.totalMoves <= 0) return false;
+  if (typeof o.analyzedMoves !== "number" || o.analyzedMoves !== 0) return false;
+  return typeof o.error === "string" && o.error.length > 0;
+}
+
 /**
  * POST /api/game-review/:gameId
  * Generate game review for a completed game (if not already exists)
@@ -345,7 +353,11 @@ router.post("/:gameId", auth, async (req, res) => {
     const existingReview = await getReview(gameId);
     
     // If review exists and is completed, return it immediately - NEVER regenerate
-    if (existingReview && existingReview.status === "completed") {
+    if (
+      existingReview &&
+      existingReview.status === "completed" &&
+      !isInvalidCompletedReviewStub(existingReview.reviewData)
+    ) {
       console.log(`[GameReview] ✅ SAFEGUARD: Review already exists and is completed for game ${gameId}. Returning stored review.`);
       
       // Load game for metadata
@@ -372,6 +384,12 @@ router.post("/:gameId", auth, async (req, res) => {
         message: "Review retrieved successfully",
         data: { review: enrichedReview },
       });
+    }
+
+    if (existingReview && existingReview.status === "completed" && isInvalidCompletedReviewStub(existingReview.reviewData)) {
+      console.warn(
+        `[GameReview] Completed review is an invalid stub (analyzedMoves 0 + error) for game ${gameId}; allowing regeneration.`
+      );
     }
     
     // ✅ CRITICAL: If review is pending, return "in_progress" - NEVER start new generation
@@ -494,16 +512,15 @@ router.get("/:gameId", auth, async (req, res) => {
       });
     }
     
-    // ✅ If review is pending but has no reviewData, it's still generating (quick review not ready yet)
-    // Return proper status code (202 Accepted) and message
-    if (reviewDoc.status === "pending" && !reviewDoc.reviewData) {
+    // Any pending document means generation in flight (with or without stale reviewData).
+    if (reviewDoc.status === "pending") {
       return res.status(202).json({
         success: false,
         message: "Review is being generated. Please wait and try again later.",
         status: "in_progress",
       });
     }
-    
+
     // ✅ If review exists but has no reviewData (and not pending), it's invalid
     // This should not happen, but handle gracefully
     if (!reviewDoc.reviewData) {
@@ -512,8 +529,6 @@ router.get("/:gameId", auth, async (req, res) => {
         message: "Review not found. Use POST to generate a review.",
       });
     }
-    
-    // ✅ Allow returning pending reviews that HAVE reviewData.
     
     // Load game for metadata with timeout protection
     let game;
@@ -563,6 +578,16 @@ router.get("/:gameId", auth, async (req, res) => {
       game,
       req.user._id
     );
+
+    if (isInvalidCompletedReviewStub(reviewDoc.reviewData)) {
+      return res.status(500).json({
+        success: false,
+        status: "failed",
+        message:
+          enrichedReview?.overview?.error ||
+          "Stored review is invalid. Open the review page again or retry generation.",
+      });
+    }
     
     // Add metadata about review type
     enrichedReview.reviewMetadata = {
@@ -668,10 +693,10 @@ router.get("/:gameId/replay-eval", auth, async (req, res) => {
       });
     }
     
-    // Get quick evaluation using LITE engine (depth 8-10, movetime 500ms)
+    // Get quick evaluation using LITE engine (aligned with stored game review: depth 12, 600ms)
     const evaluation = await getReplayEvaluation(moves, {
-      depth: 8, // LITE engine uses depth 8 (can be 8-10)
-      movetime: 500, // 500ms as specified
+      depth: 12,
+      movetime: 600,
     });
     
     res.json({

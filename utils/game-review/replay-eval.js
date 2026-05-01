@@ -4,9 +4,9 @@
  * Uses LITE engine for quick evaluations during replay navigation.
  * Results are NOT persisted - this is UX-only for live replay features.
  * 
- * Configuration:
- * - Depth: 8-10 (default 8)
- * - Movetime: 500ms
+ * Configuration (defaults align with stored game review):
+ * - Depth: 12 (default)
+ * - Movetime: 600ms
  * - Uses Stockfish 17.1 (same binary as FULL, different process)
  */
 
@@ -15,22 +15,19 @@ const engine = require("./engine");
 /**
  * Get quick evaluation for a position during replay
  * @param {string[]} moves - Array of UCI moves up to current position
- * @param {Object} options - { depth: number (8-10, default 8), movetime: number (default 500) }
+ * @param {Object} options - { depth: number (default 12), movetime: number (default 600) }
  * @returns {Promise<Object>} - { bestMove, evalAfter, evaluation, pv, arrow }
  */
 async function getReplayEvaluation(moves = [], options = {}) {
-  // LITE engine configuration: depth 8-10, movetime 500ms
-  const { depth = 8, movetime = 500 } = options;
+  const { depth = 12, movetime = 600 } = options;
   
   try {
     // Ensure LITE engine is ready (separate process from FULL engine)
     await engine.ensureLiteEngineReady();
     
-    // Analyze current position to get best move and evaluation
-    // analyzePositionLite will clamp depth to 8-10 and use movetime 500ms
-    const result = await engine.analyzePositionLite(moves, { 
-      depth, // Will be clamped to 8-10 in analyzePositionLite
-      movetime 
+    const result = await engine.analyzePositionLite(moves, {
+      depth,
+      movetime,
     });
     
     // Get evaluation after the best move (for arrow suggestion)
@@ -103,7 +100,7 @@ function formatEvaluation(evaluation) {
  */
 async function getBestMoveSuggestion(moves = []) {
   try {
-    const result = await engine.analyzePositionLite(moves, { depth: 10, movetime: 500 });
+    const result = await engine.analyzePositionLite(moves, { depth: 12, movetime: 600 });
     return result.bestMove;
   } catch (error) {
     console.error(`[ReplayEval] Error getting best move suggestion:`, error);

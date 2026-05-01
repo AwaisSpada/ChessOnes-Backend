@@ -14,7 +14,7 @@ const moveSuggestions = require("./move-suggestions");
  * @returns {Promise<Object>} - Complete review object
  */
 async function generateGameReview(options = {}) {
-  const { moves, optionalPgn, depth = 8, movetime = 500, engineType = 'lite' } = options;
+  const { moves, optionalPgn, depth = 12, movetime = 600, engineType = 'lite' } = options;
 
   try {
     console.log(`[GameReview] ========================================`);

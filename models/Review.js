@@ -93,7 +93,16 @@ reviewSchema.pre("save", async function (next) {
     // Document doesn't exist yet, allow save
     return next();
   }
-  
+
+  // Regeneration: tear down a completed review so POST/background can run again (clear stale/corrupt payload).
+  if (
+    originalDoc.status === "completed" &&
+    this.status === "pending" &&
+    (this.reviewData === null || this.reviewData === undefined)
+  ) {
+    return next();
+  }
+
   // Allow transition from pending/failed to completed (reviewData is being set for the first time)
   // This happens when: original status is "pending" or "failed", and we're setting reviewData and status to "completed"
   if ((originalDoc.status === "pending" || originalDoc.status === "failed") && 
@@ -114,7 +123,7 @@ reviewSchema.pre("save", async function (next) {
     
     // For completed reviews, only allow status/error updates
     const allowedUpdates = ["status", "error"];
-    const modifiedPaths = Object.keys(this.getChanges ? this.getChanges() : {});
+    const modifiedPaths = this.modifiedPaths ? this.modifiedPaths() : [];
     const hasDisallowedChanges = modifiedPaths.some(
       (path) => !allowedUpdates.includes(path) && path !== "updatedAt"
     );

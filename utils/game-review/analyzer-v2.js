@@ -146,7 +146,7 @@ function calculateCentipawnLoss(evalBestAfter, evalAfter, isWhiteMove) {
  * @returns {Promise<Object>} - Move analysis result
  */
 async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, options = {}) {
-  const { depth = 8, movetime = 500, engineType = 'lite' } = options;
+  const { depth = 12, movetime = 600, engineType = 'lite' } = options;
   
   const isLite = true; // Quick-review only pipeline (extra child-best search per ply — allow more wall time)
   const moveTimeout = 10000;
@@ -283,7 +283,7 @@ async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, 
             if (!remaining.length) break;
 
             const restricted = await analyzePosition(movesUpToBefore, {
-              movetime: Math.max(movetime, 700),
+              movetime,
               depth: Math.max(depth, 10),
               multipv: 1,
               searchMoves: remaining,
@@ -295,7 +295,7 @@ async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, 
           }
 
           const playedRoot = await analyzePosition(movesUpToBefore, {
-            movetime: Math.max(movetime, 700),
+            movetime,
             depth: Math.max(depth, 10),
             multipv: 1,
             searchMoves: [playedMove],
@@ -305,7 +305,7 @@ async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, 
           const altLinesComputed = [];
           for (const cand of orderedCandidates.slice(0, 3)) {
             const candRoot = await analyzePosition(movesUpToBefore, {
-              movetime: Math.max(movetime, 700),
+              movetime,
               depth: Math.max(depth, 10),
               multipv: 1,
               searchMoves: [cand],
@@ -373,29 +373,12 @@ async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, 
         // hadMate means engine best line had a winning mate for the moving side.
         const hadMate = typeof evalBestAfter?.mate === "number" && evalBestAfter.mate > 0;
         
-        // Detect tactical material action for "brilliant" gating.
-        let isCaptureMove = false;
-        try {
-          const chessForMoveType = new Chess();
-          for (const uci of movesUpToBefore) {
-            chessForMoveType.move(uci, { sloppy: true });
-          }
-          const simulated = chessForMoveType.move(playedMove, { sloppy: true });
-          isCaptureMove = Boolean(simulated && (simulated.captured || simulated.flags?.includes("e")));
-        } catch (_e) {
-          isCaptureMove = false;
-        }
-
         // Step 9: Classify the move using unified classifier thresholds.
         const label = classifier.classifyMove(centipawnLoss, {
           hadMate,
           isBestMove,
           isBookMove,
           missedMate,
-          tacticalSwing,
-          isCaptureMove,
-          // Heuristic: tactical swing + non-capture can still be sacrificial.
-          isSacrificeMove: tacticalSwing && !isCaptureMove,
         });
         
         // Log for debugging - show raw and converted evaluations
@@ -566,14 +549,13 @@ function detectTacticalSwing(evalBefore, evalAfter, isWhiteMove) {
  * - isBestMove (determines "best" or "book")
  * - missedMate (overrides to "blunder")
  * - isBookMove (can promote to "book" if best move)
- * - tacticalSwing (can promote "brilliant" rating)
  * 
  * Order matters: check from best to worst (most specific to least specific).
  * 
  * SAFEGUARD: Only uses FULL engine data. LITE engine results never reach here.
  */
 function classifyMove(centipawnLoss, context = {}) {
-  const { isBestMove, isBookMove, missedMate, tacticalSwing } = context;
+  const { isBestMove, isBookMove, missedMate } = context;
   
   // ✅ DETERMINISTIC: Best move check (0cp loss or exact match)
   // If best move AND in opening, mark as book (opening theory)
@@ -595,46 +577,22 @@ function classifyMove(centipawnLoss, context = {}) {
     return "blunder";
   }
   
-  // Mistake: 100-299 cp loss
+  // Mistake: 151-299 cp loss
   if (centipawnLoss >= CLASSIFICATION_THRESHOLDS.MISTAKE) {
     return "mistake";
   }
   
-  // Inaccuracy: 50-99 cp loss
+  // Inaccuracy: 71-150 cp loss
   if (centipawnLoss >= CLASSIFICATION_THRESHOLDS.INACCURACY) {
     return "inaccuracy";
   }
   
-  // ✅ DETERMINISTIC: Good move classifications (best to worst)
-  // Brilliant: 0-5cp loss (with optional tactical swing promotion)
-  if (centipawnLoss <= CLASSIFICATION_THRESHOLDS.BRILLIANT) {
-    // Tactical swing can promote to brilliant (within 5cp)
-    if (tacticalSwing) {
-      return "brilliant";
-    }
-    // Very close to best in opening can be brilliant (1-3cp)
-    if (isBookMove && centipawnLoss <= 3) {
-      return "brilliant";
-    }
-    // Default: falls through to "great" if no swing
-  }
-  
-  // Great: 6-10cp loss
-  if (centipawnLoss <= CLASSIFICATION_THRESHOLDS.GREAT) {
-    return "great";
-  }
-  
-  // Excellent: 11-20cp loss
+  // Excellent: 1-30 cp loss
   if (centipawnLoss <= CLASSIFICATION_THRESHOLDS.EXCELLENT) {
     return "excellent";
   }
   
-  // Good: 21-49cp loss
-  if (centipawnLoss < CLASSIFICATION_THRESHOLDS.INACCURACY) {
-    return "good";
-  }
-  
-  // Default fallback (should not reach here with proper thresholds)
+  // Good: 31-70 cp loss
   return "good";
 }
 
@@ -662,7 +620,7 @@ async function analyzeGame(moves, options = {}) {
     throw new Error("No moves provided for analysis");
   }
 
-  const { depth = 8, movetime = 500, engineType = 'lite' } = options;
+  const { depth = 12, movetime = 600, engineType = 'lite' } = options;
   const analyzedMoves = [];
   const totalMoves = moves.length;
 

@@ -2,7 +2,7 @@
  * Game Completion Hook Service
  * 
  * Review generation:
- * 1. Quick review (LITE engine, depth 8-10, 500ms) - saved immediately for frontend
+ * 1. Quick review (LITE engine, depth 12, 600ms) - saved immediately for frontend
  * 
  * Runs asynchronously to ensure failures do NOT affect live game completion.
  * This is a read-only operation that does not modify game state.
@@ -200,7 +200,7 @@ async function triggerReviewGeneration(gameId) {
         console.log(`[GameCompletionHook] Stage 1: Generating quick review with LITE engine...`);
         
         // ✅ SAFEGUARD: Generate quick review with error handling (never crash backend)
-        // generateQuickReview itself handles errors and returns minimal review if it fails
+        // generateQuickReview throws on failure so we never persist an empty "completed" stub
         const quickReview = await generateQuickReview(uciMoves);
         
         // ✅ SAFEGUARD: Ensure reviewData is never null
@@ -212,8 +212,8 @@ async function triggerReviewGeneration(gameId) {
         // This allows frontend to fetch it right away
         try {
           await storeReview(gameId, quickReview, {
-            depth: 8,
-            movetime: 500,
+            depth: 12,
+            movetime: 600,
             engineType: "LITE",
           });
           console.log(`[GameCompletionHook] ✅ Stage 1 complete: Quick review saved (status: completed) for game ${gameId}`);
