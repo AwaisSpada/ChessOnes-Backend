@@ -77,14 +77,11 @@ async function runQuickReviewInBackground(gameId) {
         await markReviewFailed(gameId, "Could not convert game moves to UCI format");
         return;
       }
-      const reviewPromise = generateQuickReview(uciMoves, {
+      // Timeout is enforced inside generateQuickReview (move-count based); no second race here.
+      const review = await generateQuickReview(uciMoves, {
         depth: 12,
         movetime: 600,
       });
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Quick review timeout after 60s")), 60000)
-      );
-      const review = await Promise.race([reviewPromise, timeoutPromise]);
 
       if (!review) {
         throw new Error("Quick review generation returned empty response");

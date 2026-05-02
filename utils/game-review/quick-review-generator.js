@@ -7,6 +7,19 @@
 
 const { generateGameReview } = require("./index-v2");
 
+/** Max wall-clock wait for one full quick-review run (prevents extreme plies from blocking the worker for hours). */
+const QUICK_REVIEW_TIMEOUT_MAX_MS = 60 * 60 * 1000; // 1 hour
+
+/**
+ * Wall-clock cap for `generateGameReview` — scales with ply count, min 60s.
+ * @param {number} moveCount
+ * @returns {number}
+ */
+function computeQuickReviewTimeoutMs(moveCount) {
+  const n = typeof moveCount === "number" && moveCount > 0 ? moveCount : 0;
+  return Math.min(QUICK_REVIEW_TIMEOUT_MAX_MS, Math.max(60000, n * 2000 + 10000));
+}
+
 /**
  * Generate quick review using LITE engine
  * @param {string[]} moves - Array of UCI moves
@@ -18,8 +31,10 @@ async function generateQuickReview(moves, options = {}) {
     console.log(`[QuickReview] Starting quick review generation with LITE engine`);
     console.log(`[QuickReview] Moves: ${moves.length}, Depth: ${depth}, Movetime: ${movetime}ms`);
     
-    // ✅ SAFEGUARD: Dynamic timeout based on game length with a 60s floor.
-    const timeout = Math.max(60000, moves.length * 2000 + 10000);
+    const timeout = computeQuickReviewTimeoutMs(moves.length);
+    console.log(
+      `[QuickReview] Full-run timeout cap: ${timeout}ms (${(timeout / 1000).toFixed(0)}s) — formula: max(60s, moves×2s+10s), max ${QUICK_REVIEW_TIMEOUT_MAX_MS / 60000}min`
+    );
 
     const quickReviewPromise = generateGameReview({
       moves,
@@ -51,5 +66,6 @@ async function generateQuickReview(moves, options = {}) {
 
 module.exports = {
   generateQuickReview,
+  computeQuickReviewTimeoutMs,
 };
 
