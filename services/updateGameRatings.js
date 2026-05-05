@@ -21,12 +21,21 @@ async function updateGameRatings(game, io) {
   // Check if game was aborted (no moves made)
   const isAborted = !game.moves || game.moves.length === 0;
   
-  // Only update ratings for multiplayer games, not bot games, and not aborted games
-  if (game.type === "bot" || !game.players.white || !game.players.black || isAborted || !game.category) {
+  // Only update ratings for rated human-vs-human games, not bot/casual/aborted games.
+  if (
+    game.type === "bot" ||
+    game.isRated === false ||
+    !game.players.white ||
+    !game.players.black ||
+    isAborted ||
+    !game.category
+  ) {
     if (isAborted) {
       console.log(`[Rating] Skipping rating update for aborted game ${game.gameId} (no moves made)`);
     } else if (game.type === "bot") {
       console.log(`[Rating] Skipping rating update for bot game ${game.gameId}`);
+    } else if (game.isRated === false) {
+      console.log(`[Rating] Skipping rating update for casual game ${game.gameId}`);
     } else if (!game.category) {
       console.log(`[Rating] Skipping rating update for game ${game.gameId} - no category set`);
     } else {

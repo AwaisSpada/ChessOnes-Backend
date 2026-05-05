@@ -766,6 +766,7 @@ router.post(
     body("friendId").isMongoId(),
     body("gameType").optional().isIn(["blitz", "rapid", "classical"]),
     body("timeControl").optional().isObject(),
+    body("matchType").optional().isIn(["rated", "unrated", "casual"]),
   ],
   async (req, res) => {
     try {
@@ -778,7 +779,9 @@ router.post(
         });
       }
 
-      const { friendId, gameType = "rapid", timeControl } = req.body;
+      const { friendId, gameType = "rapid", timeControl, matchType } = req.body;
+      const normalizedMatchType =
+        matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
 
       if (!req.user.friends.includes(friendId)) {
         return res.status(400).json({
@@ -808,6 +811,7 @@ router.post(
         from: req.user._id,
         to: friendId,
         gameType,
+        matchType: normalizedMatchType,
         timeControl: timeControl || { initial: 600000, increment: 0 },
         createdAt: new Date(),
         expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 minutes

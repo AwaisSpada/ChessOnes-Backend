@@ -149,7 +149,15 @@ async function analyzeMove(movesUpToBefore, playedMove, moveNumber, totalMoves, 
   const { depth = 12, movetime = 600, engineType = 'lite' } = options;
   
   const isLite = true; // Quick-review only pipeline (extra child-best search per ply — allow more wall time)
-  const moveTimeout = 10000;
+  // Dynamic per-move timeout: this analyzer performs multiple engine calls for one played move,
+  // so fixed 10s is too aggressive for higher movetime/depth settings.
+  const normalizedMovetime = Math.max(300, Math.min(8000, Number(movetime) || 600));
+  const normalizedDepth = Math.max(6, Math.min(20, Number(depth) || 12));
+  const depthBoost = 1 + Math.max(0, normalizedDepth - 12) * 0.08;
+  const moveTimeout = Math.max(
+    10000,
+    Math.round(normalizedMovetime * 8 * depthBoost + 5000)
+  );
   
   // Select engine functions based on type
   const engine = require("./engine");

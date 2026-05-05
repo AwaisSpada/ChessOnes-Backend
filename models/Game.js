@@ -12,6 +12,10 @@ const gameSchema = new mongoose.Schema(
       enum: ["bot", "multiplayer", "friend"],
       required: true,
     },
+    isRated: {
+      type: Boolean,
+      default: true,
+    },
     players: {
       white: {
         type: mongoose.Schema.Types.ObjectId,

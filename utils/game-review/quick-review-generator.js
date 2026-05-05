@@ -11,13 +11,26 @@ const { generateGameReview } = require("./index-v2");
 const QUICK_REVIEW_TIMEOUT_MAX_MS = 60 * 60 * 1000; // 1 hour
 
 /**
- * Wall-clock cap for `generateGameReview` — scales with ply count, min 60s.
+ * Wall-clock cap for `generateGameReview`.
+ * Scales with ply count and engine settings (movetime / depth). The analyzer runs several LITE
+ * searches per half-move, so per-ply budget is a multiple of `movetime`, not 2s flat.
  * @param {number} moveCount
+ * @param {{ movetime?: number; depth?: number }} [options]
  * @returns {number}
  */
-function computeQuickReviewTimeoutMs(moveCount) {
+function computeQuickReviewTimeoutMs(moveCount, options = {}) {
   const n = typeof moveCount === "number" && moveCount > 0 ? moveCount : 0;
-  return Math.min(QUICK_REVIEW_TIMEOUT_MAX_MS, Math.max(60000, n * 2000 + 10000));
+  const movetime = Math.max(300, Math.min(8000, Number(options.movetime) || 600));
+  const depth = Math.max(6, Math.min(20, Number(options.depth) || 12));
+  // Analyzer can perform multiple engine calls per ply (before/after + alternatives),
+  // so budget must be materially higher than raw movetime.
+  const analyzerCallsPerPly = 8;
+  const depthBoost = 1 + Math.max(0, depth - 12) * 0.08;
+  const perPlyMs = movetime * analyzerCallsPerPly * depthBoost + 1000;
+  const slackMs = 60000;
+  const minMs = 120000;
+  const raw = n * perPlyMs + slackMs;
+  return Math.min(QUICK_REVIEW_TIMEOUT_MAX_MS, Math.max(minMs, raw));
 }
 
 /**
@@ -31,9 +44,9 @@ async function generateQuickReview(moves, options = {}) {
     console.log(`[QuickReview] Starting quick review generation with LITE engine`);
     console.log(`[QuickReview] Moves: ${moves.length}, Depth: ${depth}, Movetime: ${movetime}ms`);
     
-    const timeout = computeQuickReviewTimeoutMs(moves.length);
+    const timeout = computeQuickReviewTimeoutMs(moves.length, { movetime, depth });
     console.log(
-      `[QuickReview] Full-run timeout cap: ${timeout}ms (${(timeout / 1000).toFixed(0)}s) — formula: max(60s, moves×2s+10s), max ${QUICK_REVIEW_TIMEOUT_MAX_MS / 60000}min`
+      `[QuickReview] Full-run timeout cap: ${timeout}ms (${(timeout / 1000).toFixed(0)}s) — scaled by moves×movetime×depth (cap ${QUICK_REVIEW_TIMEOUT_MAX_MS / 60000}min)`
     );
 
     const quickReviewPromise = generateGameReview({

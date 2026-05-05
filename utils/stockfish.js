@@ -33,6 +33,27 @@ function getStockfishPath() {
 }
 
 const STOCKFISH_PATH = getStockfishPath();
+const BOT_INTELLIGENCE_CONFIG = {
+  eloThresholds: {
+    beginnerMax: 799,
+    highEloMin: 2200,
+  },
+  multiPvWeights: {
+    high: [0.9, 0.07, 0.03], // Top, 2nd, 3rd
+    medium: [0.7, 0.2, 0.1], // Top, 2nd, 3rd
+    beginner: [0.58, 0.27, 0.15], // More 3rd-best variety for low Elo bots
+  },
+  endgame: {
+    pieceCountMax: 10,
+    depthBonus: 2,
+    movetimeMultiplier: 1.35,
+    movetimeCap: 12000,
+    killerInstinct: {
+      cpThreshold: 500, // +5.0 pawns
+      winningMateOnly: true,
+    },
+  },
+};
 
 // Map site ELO to Stockfish configuration.
 // Matches `chess-review-bot/backend/utils/stockfish.js` exactly.
@@ -50,6 +71,8 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
     Math.min(2800, typeof requestedElo === "number" ? Math.round(requestedElo) : 1500)
   );
   const engineElo = Math.max(1320, siteElo);
+  let skillLevel = Math.round(((siteElo - 500) / (2800 - 500)) * 20);
+  skillLevel = Math.max(0, Math.min(20, skillLevel));
 
   let depth;
   if (siteElo <= 600) depth = 1;
@@ -90,6 +113,9 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
 
   // Optional direct custom overrides (if explicitly provided).
   if (customConfig && typeof customConfig === "object") {
+    if (typeof customConfig.skillLevel === "number") {
+      skillLevel = Math.max(0, Math.min(20, Math.round(customConfig.skillLevel)));
+    }
     if (typeof customConfig.depth === "number") {
       depth = Math.max(1, Math.min(40, Math.round(customConfig.depth)));
     }
@@ -103,7 +129,85 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
     }
   }
 
-  return { engineElo, depth, movetime, artificialDelay };
+  return { siteElo, engineElo, skillLevel, depth, movetime, artificialDelay };
+}
+
+function getBoardPhase(board) {
+  const pieceCount = Array.isArray(board) ? board.filter(Boolean).length : 32;
+  if (pieceCount >= 26) return { phase: "opening", pieceCount };
+  if (pieceCount <= 10) return { phase: "endgame", pieceCount };
+  return { phase: "middlegame", pieceCount };
+}
+
+function parseInfoLineForMultiPv(line) {
+  if (!line.startsWith("info ")) return null;
+  const multipvMatch = line.match(/\bmultipv\s+(\d+)/i);
+  const pvMatch = line.match(/\bpv\s+([a-h][1-8][a-h][1-8][nbrq]?)/i);
+  if (!multipvMatch || !pvMatch) return null;
+  const rank = parseInt(multipvMatch[1], 10);
+  if (!Number.isFinite(rank) || rank <= 0) return null;
+  const depthMatch = line.match(/\bdepth\s+(\d+)/i);
+  const cpMatch = line.match(/\bscore\s+cp\s+(-?\d+)/i);
+  const mateMatch = line.match(/\bscore\s+mate\s+(-?\d+)/i);
+  return {
+    rank,
+    uci: pvMatch[1],
+    depth: depthMatch ? parseInt(depthMatch[1], 10) : 0,
+    cp: cpMatch ? parseInt(cpMatch[1], 10) : null,
+    mate: mateMatch ? parseInt(mateMatch[1], 10) : null,
+  };
+}
+
+function selectMoveFromMultiPv(lines, siteElo, killerInstinct) {
+  if (!Array.isArray(lines) || lines.length === 0) {
+    return { selected: null, rank: 1 };
+  }
+  const ordered = [...lines]
+    .filter((l) => l && typeof l.rank === "number" && typeof l.uci === "string")
+    .sort((a, b) => a.rank - b.rank)
+    .slice(0, 3);
+  if (ordered.length === 0) return { selected: null, rank: 1 };
+  if (killerInstinct || ordered.length === 1) {
+    return { selected: ordered[0], rank: ordered[0].rank || 1 };
+  }
+  const { beginnerMax, highEloMin } = BOT_INTELLIGENCE_CONFIG.eloThresholds;
+  const weights =
+    siteElo <= beginnerMax
+      ? BOT_INTELLIGENCE_CONFIG.multiPvWeights.beginner
+      : siteElo >= highEloMin
+        ? BOT_INTELLIGENCE_CONFIG.multiPvWeights.high
+        : BOT_INTELLIGENCE_CONFIG.multiPvWeights.medium;
+  const r = Math.random();
+  let acc = 0;
+  for (let i = 0; i < ordered.length; i++) {
+    acc += weights[i] ?? 0;
+    if (r <= acc) return { selected: ordered[i], rank: ordered[i].rank || i + 1 };
+  }
+  const fallback = ordered[0];
+  return { selected: fallback, rank: fallback.rank || 1 };
+}
+
+function computeDynamicThinkingDelay(baseDelayMs, meta, timeRemaining = null) {
+  if (!Number.isFinite(baseDelayMs) || baseDelayMs <= 0) return 0;
+  const phase = meta?.phase || "middlegame";
+  const topCp = typeof meta?.topCp === "number" ? Math.abs(meta.topCp) : null;
+  const secondCp = typeof meta?.secondCp === "number" ? Math.abs(meta.secondCp) : null;
+  const cpGap =
+    topCp != null && secondCp != null ? Math.abs(topCp - secondCp) : null;
+  const hasMate = typeof meta?.topMate === "number";
+  let factor = 1;
+  if (phase === "opening") factor = 0.75;
+  else if (phase === "endgame") factor = 0.65;
+  else factor = 1.15;
+  if (phase === "middlegame" && (cpGap == null || cpGap < 35)) factor *= 1.2;
+  if (hasMate || (topCp != null && topCp >= 500)) factor *= 0.6;
+  if (meta?.selectedRank && meta.selectedRank > 1) factor *= 1.12;
+  let delay = Math.round(baseDelayMs * factor);
+  if (typeof timeRemaining === "number" && timeRemaining > 0) {
+    if (timeRemaining < 30000) delay = Math.min(delay, 120);
+    else if (timeRemaining < 60000) delay = Math.min(delay, 280);
+  }
+  return Math.max(0, delay);
 }
 
 // Helper to convert board index (0..63) to algebraic square like "e4"
@@ -352,7 +456,7 @@ function uciToBoardIndices(uci) {
 
 let engineProcess = null;
 let engineReady = false;
-let pendingRequest = null; // { resolve, reject, timeoutId }
+let pendingRequest = null; // { resolve, reject, timeoutId, multiPvLines: Map<number, ...>, config }
 
 function initEngine() {
   if (engineProcess) {
@@ -439,20 +543,60 @@ function initEngine() {
           engineReady = true;
         }
 
+        if (pendingRequest && line.startsWith("info ")) {
+          const parsed = parseInfoLineForMultiPv(line);
+          if (parsed && pendingRequest.multiPvLines) {
+            const prev = pendingRequest.multiPvLines.get(parsed.rank);
+            if (!prev || (parsed.depth || 0) >= (prev.depth || 0)) {
+              pendingRequest.multiPvLines.set(parsed.rank, parsed);
+            }
+          }
+        }
+
         if (line.startsWith("bestmove") && pendingRequest) {
           // Parse "bestmove e7e8q" or "bestmove e7e8q ponder ..."
           const parts = line.split(" ");
-          const move = parts[1]; // Get the move (e.g., "e7e8q")
+          const bestMoveUci = parts[1]; // Get the move (e.g., "e7e8q")
           const req = pendingRequest;
           pendingRequest = null;
           clearTimeout(req.timeoutId);
 
           try {
-            const indices = uciToBoardIndices(move);
+            const multiPv = Array.from(req.multiPvLines?.values?.() || [])
+              .sort((a, b) => a.rank - b.rank)
+              .slice(0, 3);
+            const top = multiPv[0] || null;
+            const topCp = typeof top?.cp === "number" ? top.cp : null;
+            const topMate = typeof top?.mate === "number" ? top.mate : null;
+            const killerCfg = BOT_INTELLIGENCE_CONFIG.endgame.killerInstinct;
+            const killerInstinct =
+              (typeof topMate === "number" &&
+                (killerCfg.winningMateOnly ? topMate > 0 : topMate !== 0)) ||
+              (typeof topCp === "number" && topCp >= killerCfg.cpThreshold);
+            const { selected, rank } = selectMoveFromMultiPv(
+              multiPv,
+              req.config?.siteElo || 1500,
+              killerInstinct
+            );
+            const chosenUci = selected?.uci || bestMoveUci;
+            const indices = uciToBoardIndices(chosenUci);
             if (!indices) {
-              req.reject(new Error("Invalid bestmove from Stockfish: " + move));
+              req.reject(new Error("Invalid bestmove from Stockfish: " + chosenUci));
             } else {
-              req.resolve(indices);
+              req.resolve({
+                move: indices,
+                meta: {
+                  phase: req.config?.phase || "middlegame",
+                  pieceCount: req.config?.pieceCount ?? null,
+                  selectedRank: rank || 1,
+                  topCp,
+                  topMate,
+                  secondCp:
+                    typeof multiPv[1]?.cp === "number" ? multiPv[1].cp : null,
+                  usedMultiPv: multiPv.length > 1,
+                  killerInstinct,
+                },
+              });
             }
           } catch (err) {
             req.reject(err);
@@ -581,22 +725,22 @@ async function getBestMoveFromEngine(
     throw new Error("Stockfish engine is busy");
   }
 
-  const { engineElo, movetime, depth } = getStockfishConfig(
+  const { siteElo, engineElo, skillLevel, movetime, depth } = getStockfishConfig(
     elo || 1500,
     timeRemaining,
     customConfig
   );
-  const requestedElo =
-    customConfig &&
-    typeof customConfig === "object" &&
-    typeof customConfig.elo === "number"
-      ? customConfig.elo
-      : elo || 1500;
-  const siteElo = Math.max(
-    500,
-    Math.min(2800, typeof requestedElo === "number" ? Math.round(requestedElo) : 1500)
-  );
-
+  const { phase, pieceCount } = getBoardPhase(board);
+  let effectiveDepth = depth;
+  let effectiveMovetime = movetime;
+  const endgameCfg = BOT_INTELLIGENCE_CONFIG.endgame;
+  if (phase === "endgame" || pieceCount <= endgameCfg.pieceCountMax) {
+    effectiveDepth = Math.min(40, depth + endgameCfg.depthBonus);
+    effectiveMovetime = Math.min(
+      endgameCfg.movetimeCap,
+      Math.round(movetime * endgameCfg.movetimeMultiplier)
+    );
+  }
   const fen = boardToFEN(board, currentTurn, moveHistory);
   const sharedIncrement =
     customConfig &&
@@ -644,7 +788,7 @@ async function getBestMoveFromEngine(
     hasExplicitWhiteTime ||
     hasExplicitBlackTime;
 
-  const fallbackClock = Math.max(1000, movetime * 10);
+  const fallbackClock = Math.max(1000, effectiveMovetime * 10);
   const normalizedTimeRemaining =
     typeof timeRemaining === "number" && timeRemaining > 0
       ? Math.round(timeRemaining)
@@ -669,9 +813,15 @@ async function getBestMoveFromEngine(
       reject(new Error("Stockfish move timeout"));
     }, isTimedGame
       ? Math.min(45000, Math.max(4000, Math.floor(normalizedTimeRemaining * 0.25) + 2000))
-      : Math.min(15000, Math.max(4000, movetime * 3)));
+      : Math.min(30000, Math.max(6000, effectiveMovetime * 4)));
 
-    pendingRequest = { resolve, reject, timeoutId };
+    pendingRequest = {
+      resolve,
+      reject,
+      timeoutId,
+      multiPvLines: new Map(),
+      config: { siteElo, phase, pieceCount },
+    };
   });
 
   // Send new-game / options and position
@@ -680,11 +830,13 @@ async function getBestMoveFromEngine(
   // Configure engine strength similar to how chess.com/lichess do:
   engineProcess.stdin.write("setoption name UCI_LimitStrength value true\n");
   engineProcess.stdin.write(`setoption name UCI_Elo value ${engineElo}\n`);
+  engineProcess.stdin.write(`setoption name Skill Level value ${skillLevel}\n`);
+  engineProcess.stdin.write("setoption name MultiPV value 3\n");
   // Optional baseline engine config
   engineProcess.stdin.write("setoption name Threads value 1\n");
   engineProcess.stdin.write("setoption name Hash value 16\n");
   console.log(
-    `[Stockfish][UCI] Elo: ${siteElo} -> Target: ${engineElo}, Depth: ${depth}, Movetime: ${movetime}`
+    `[Stockfish][UCI] Elo: ${siteElo} -> Target: ${engineElo}, Skill: ${skillLevel}, Depth: ${effectiveDepth}, Movetime: ${effectiveMovetime}, Phase: ${phase}`
   );
   engineProcess.stdin.write(`position fen ${fen}\n`);
   if (isTimedGame) {
@@ -692,10 +844,10 @@ async function getBestMoveFromEngine(
       `[Stockfish][UCI] Clock: W:${whiteTime}ms+${whiteInc} B:${blackTime}ms+${blackInc} | Limit: depth ${depth}`
     );
     engineProcess.stdin.write(
-      `go depth ${depth} wtime ${whiteTime} btime ${blackTime} winc ${whiteInc} binc ${blackInc}\n`
+      `go depth ${effectiveDepth} wtime ${whiteTime} btime ${blackTime} winc ${whiteInc} binc ${blackInc}\n`
     );
   } else {
-    engineProcess.stdin.write(`go depth ${depth} movetime ${movetime}\n`);
+    engineProcess.stdin.write(`go depth ${effectiveDepth} movetime ${effectiveMovetime}\n`);
   }
 
   return promise;
@@ -711,7 +863,7 @@ async function getBestMove(
   customConfig = null
 ) {
   try {
-    const indices = await getBestMoveFromEngine(
+    const engineResult = await getBestMoveFromEngine(
       board,
       currentTurn,
       moveHistory,
@@ -726,16 +878,23 @@ async function getBestMove(
       timeRemaining,
       customConfig
     );
+    const selectedMove =
+      engineResult && engineResult.move ? engineResult.move : engineResult;
+    const dynamicDelay = computeDynamicThinkingDelay(
+      artificialDelay,
+      engineResult?.meta || null,
+      timeRemaining
+    );
     const normalizedClock =
       typeof timeRemaining === "number" && timeRemaining > 0 ? timeRemaining : 0;
     console.log(
-      `[Stockfish] Delay: ${artificialDelay}ms | Clock: ${normalizedClock}ms`
+      `[Stockfish] Delay: ${dynamicDelay}ms (base ${artificialDelay}ms) | Clock: ${normalizedClock}ms`
     );
-    if (artificialDelay > 0) {
-      await new Promise((resolve) => setTimeout(resolve, artificialDelay));
+    if (dynamicDelay > 0) {
+      await new Promise((resolve) => setTimeout(resolve, dynamicDelay));
     }
 
-    return indices;
+    return selectedMove;
   } catch (err) {
     console.error("Stockfish error, using fallback move:", err.message);
     return getFallbackMove(board, currentTurn);

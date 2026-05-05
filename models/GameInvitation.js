@@ -33,6 +33,11 @@ const invitationSchema = new mongoose.Schema(
       enum: ["bullet", "blitz", "rapid", "classical"],
       default: "blitz",
     },
+    matchType: {
+      type: String,
+      enum: ["rated", "unrated"],
+      default: "rated",
+    },
     timeControl: {
       initial: {
         type: Number,

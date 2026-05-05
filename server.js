@@ -248,6 +248,7 @@ async function createMatchmakingGame(player1, player2, category) {
     const game = new Game({
       gameId: gameId,
       type: "multiplayer", // Rated multiplayer game
+      isRated: true,
       players: {
         white: player1.userId,
         black: player2.userId,
@@ -814,7 +815,7 @@ io.on("connection", (socket) => {
   // Handle sending invitation via WebSocket
   socket.on("send-invite", async (payload) => {
     try {
-      const { friendId, gameType, timeControl } = payload || {};
+      const { friendId, gameType, timeControl, matchType } = payload || {};
       if (!friendId) {
         socket.emit("invite-error", {
           message: "Friend ID is required",
@@ -882,6 +883,9 @@ io.on("connection", (socket) => {
         classical: { initial: 900000, increment: 10 },
       };
       const normalizedGameType = gameType?.toLowerCase() || "blitz";
+      const normalizedMatchType =
+        matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
+      const isRated = normalizedMatchType === "rated";
       const resolvedTimeControl =
         timeControl ||
         DEFAULT_TIME_CONTROLS[normalizedGameType] ||
@@ -892,6 +896,7 @@ io.on("connection", (socket) => {
       const game = new Game({
         gameId: gameId,
         type: "friend",
+        isRated,
         players: {
           white: sender._id,
           black: opponent._id,
@@ -918,6 +923,7 @@ io.on("connection", (socket) => {
         toUser: opponent._id,
         toEmail: opponent.email,
         gameType: normalizedGameType,
+        matchType: normalizedMatchType,
         timeControl: resolvedTimeControl,
         expiresAt,
         gameId: gameId,
@@ -933,6 +939,7 @@ io.on("connection", (socket) => {
         token: invitation.token,
         status: invitation.status,
         gameType: invitation.gameType,
+        matchType: invitation.matchType || "rated",
         timeControl: invitation.timeControl,
         expiresAt: invitation.expiresAt,
         createdAt: invitation.createdAt,
@@ -1050,6 +1057,7 @@ io.on("connection", (socket) => {
         const newGame = new Game({
           gameId: newGameId,
           type: "friend",
+          isRated: originalGame.isRated !== false,
           players: {
             white: originalGame.players.black,
             black: originalGame.players.white,
@@ -1079,6 +1087,7 @@ io.on("connection", (socket) => {
           type: "rematch",
           status: "accepted",
           gameType: rematchRequest.gameType || "blitz",
+          matchType: originalGame.isRated === false ? "unrated" : "rated",
           timeControl: rematchRequest.timeControl || originalGame.timeControl,
           gameId: newGameId,
           originalGameId,
@@ -1190,6 +1199,7 @@ io.on("connection", (socket) => {
         token: invitation.token,
         status: invitation.status,
         gameType: invitation.gameType,
+        matchType: invitation.matchType || "rated",
         timeControl: invitation.timeControl,
         gameId: game.gameId,
         from: {

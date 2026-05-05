@@ -31,13 +31,47 @@ const { getReplayEvaluation } = require("../utils/game-review/replay-eval");
 
 const router = express.Router();
 const reviewJobsInProgress = new Set();
+const customReviewJobs = new Map();
+const CUSTOM_REVIEW_JOB_TTL_MS = 10 * 60 * 1000;
 
-async function runQuickReviewInBackground(gameId) {
+function cleanupCustomReviewJob(jobId) {
+  if (!jobId) return;
+  setTimeout(() => {
+    customReviewJobs.delete(jobId);
+  }, CUSTOM_REVIEW_JOB_TTL_MS);
+}
+
+function clampReviewDepth(d) {
+  const n = Number(d);
+  if (!Number.isFinite(n)) return 12;
+  return Math.max(6, Math.min(20, Math.round(n)));
+}
+
+function clampReviewMovetime(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return 600;
+  return Math.max(300, Math.min(8000, Math.round(n)));
+}
+
+function createCustomReviewJobId(gameId) {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `${gameId}-${Date.now()}-${rand}`;
+}
+
+/**
+ * @param {string} gameId
+ * @param {{ depth?: number; movetime?: number }} [engineOptions] Defaults: depth 12, movetime 600 (LITE).
+ */
+async function runQuickReviewInBackground(gameId, engineOptions = {}) {
   if (reviewJobsInProgress.has(gameId)) {
     return;
   }
+  const depth = clampReviewDepth(engineOptions.depth);
+  const movetime = clampReviewMovetime(engineOptions.movetime);
   reviewJobsInProgress.add(gameId);
-  console.log(`[GameReview] Background quick review started for game ${gameId}`);
+  console.log(
+    `[GameReview] Background quick review started for game ${gameId} (depth=${depth}, movetime=${movetime}ms)`
+  );
 
   setImmediate(async () => {
     try {
@@ -79,8 +113,8 @@ async function runQuickReviewInBackground(gameId) {
       }
       // Timeout is enforced inside generateQuickReview (move-count based); no second race here.
       const review = await generateQuickReview(uciMoves, {
-        depth: 12,
-        movetime: 600,
+        depth,
+        movetime,
       });
 
       if (!review) {
@@ -88,8 +122,8 @@ async function runQuickReviewInBackground(gameId) {
       }
       attachMoveTimingsToReview(review, game);
       await storeReview(gameId, review, {
-        depth: 12,
-        movetime: 600,
+        depth,
+        movetime,
         engineType: "LITE",
       });
       console.log(`[GameReview] Background quick review completed for game ${gameId}`);
@@ -335,6 +369,253 @@ function isInvalidCompletedReviewStub(reviewData) {
   if (typeof o.analyzedMoves !== "number" || o.analyzedMoves !== 0) return false;
   return typeof o.error === "string" && o.error.length > 0;
 }
+
+/**
+ * POST /api/game-review/:gameId/custom-review
+ * Starts a temporary custom review run (not persisted to Review collection).
+ */
+router.post("/:gameId/custom-review", auth, async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const depth = clampReviewDepth(req.body?.depth);
+    const movetime = clampReviewMovetime(req.body?.movetime);
+
+    const game = await Game.findOne({ gameId })
+      .populate("players.white players.black", "username fullName avatar rating isDeleted")
+      .populate("bot", "name photoUrl difficulty elo");
+
+    if (!game) {
+      return res.status(404).json({ success: false, message: "Game not found" });
+    }
+
+    const isPlayer =
+      (game.players.white &&
+        game.players.white._id &&
+        game.players.white._id.equals(req.user._id)) ||
+      (game.players.black &&
+        game.players.black._id &&
+        game.players.black._id.equals(req.user._id));
+
+    if (!isPlayer) {
+      return res.status(403).json({ success: false, message: "You can only review your own games" });
+    }
+
+    if (game.status !== "completed") {
+      return res.status(400).json({
+        success: false,
+        message: "Game must be completed before generating custom review",
+      });
+    }
+
+    if (!game.moves || game.moves.length === 0) {
+      return res.status(400).json({ success: false, message: "Game has no moves to review" });
+    }
+
+    const jobId = createCustomReviewJobId(gameId);
+    const startedAt = new Date().toISOString();
+    customReviewJobs.set(jobId, {
+      status: "in_progress",
+      gameId,
+      userId: String(req.user._id),
+      startedAt,
+      depth,
+      movetime,
+      review: null,
+      error: null,
+      completedAt: null,
+    });
+
+    setImmediate(async () => {
+      try {
+        const uciMoves = convertGameMovesToUCI(game.moves);
+        if (uciMoves.length === 0) {
+          throw new Error("Could not convert game moves to UCI format");
+        }
+
+        const review = await generateQuickReview(uciMoves, { depth, movetime });
+        const enriched = enrichReviewWithGameData(review, game, req.user._id);
+        enriched.reviewMetadata = {
+          status: "completed",
+          engineType: "LITE",
+          isQuickReview: true,
+          generatedAt: new Date().toISOString(),
+          depth,
+          movetime,
+        };
+
+        customReviewJobs.set(jobId, {
+          ...customReviewJobs.get(jobId),
+          status: "completed",
+          review: enriched,
+          completedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        customReviewJobs.set(jobId, {
+          ...customReviewJobs.get(jobId),
+          status: "failed",
+          error: error?.message || "Custom review generation failed",
+          completedAt: new Date().toISOString(),
+        });
+      } finally {
+        cleanupCustomReviewJob(jobId);
+      }
+    });
+
+    return res.status(202).json({
+      success: true,
+      status: "in_progress",
+      jobId,
+      depth,
+      movetime,
+      startedAt,
+    });
+  } catch (error) {
+    console.error(`[GameReview] Custom review start error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to start custom review",
+    });
+  }
+});
+
+/**
+ * GET /api/game-review/:gameId/custom-review/:jobId
+ * Poll temporary custom review job status/result.
+ */
+router.get("/:gameId/custom-review/:jobId", auth, async (req, res) => {
+  try {
+    const { gameId, jobId } = req.params;
+    const job = customReviewJobs.get(jobId);
+
+    if (!job || job.gameId !== gameId) {
+      return res.status(404).json({
+        success: false,
+        message: "Custom review job not found or expired",
+      });
+    }
+
+    if (job.userId !== String(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only access your own custom review jobs",
+      });
+    }
+
+    if (job.status === "in_progress") {
+      return res.status(202).json({
+        success: true,
+        status: "in_progress",
+        jobId,
+        depth: job.depth,
+        movetime: job.movetime,
+        startedAt: job.startedAt,
+      });
+    }
+
+    if (job.status === "failed") {
+      return res.status(500).json({
+        success: false,
+        status: "failed",
+        jobId,
+        message: job.error || "Custom review generation failed",
+      });
+    }
+
+    return res.json({
+      success: true,
+      status: "completed",
+      jobId,
+      data: {
+        review: job.review,
+      },
+    });
+  } catch (error) {
+    console.error(`[GameReview] Custom review poll error:`, error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to get custom review status",
+    });
+  }
+});
+
+/**
+ * POST /api/game-review/:gameId/regenerate
+ * User-requested LITE re-run with custom depth / movetime. Does not change the default on-game-end flow.
+ */
+router.post("/:gameId/regenerate", auth, async (req, res) => {
+  try {
+    const { gameId } = req.params;
+    const depth = clampReviewDepth(req.body?.depth);
+    const movetime = clampReviewMovetime(req.body?.movetime);
+
+    console.log(
+      `[GameReview] Regenerate (user) gameId=${gameId} user=${req.user._id} depth=${depth} movetime=${movetime}ms`
+    );
+
+    const regenerationStartedAt = new Date().toISOString();
+
+    if (reviewJobsInProgress.has(gameId)) {
+      return res.status(202).json({
+        success: true,
+        status: "in_progress",
+        message: "Review generation is already in progress for this game.",
+        depth,
+        movetime,
+        regenerationStartedAt,
+      });
+    }
+
+    const game = await Game.findOne({ gameId })
+      .populate("players.white players.black", "username fullName avatar rating isDeleted")
+      .populate("bot", "name photoUrl difficulty elo");
+
+    if (!game) {
+      return res.status(404).json({ success: false, message: "Game not found" });
+    }
+
+    const isPlayer =
+      (game.players.white &&
+        game.players.white._id &&
+        game.players.white._id.equals(req.user._id)) ||
+      (game.players.black &&
+        game.players.black._id &&
+        game.players.black._id.equals(req.user._id));
+
+    if (!isPlayer) {
+      return res.status(403).json({ success: false, message: "You can only review your own games" });
+    }
+
+    if (game.status !== "completed") {
+      return res.status(400).json({
+        success: false,
+        message: "Game must be completed before regenerating a review",
+      });
+    }
+
+    if (!game.moves || game.moves.length === 0) {
+      return res.status(400).json({ success: false, message: "Game has no moves to review" });
+    }
+
+    await markReviewPending(gameId);
+    runQuickReviewInBackground(gameId, { depth, movetime });
+
+    return res.status(202).json({
+      success: true,
+      status: "in_progress",
+      message: "Review is being regenerated with your engine settings",
+      depth,
+      movetime,
+      regenerationStartedAt,
+    });
+  } catch (error) {
+    console.error(`[GameReview] Regenerate error:`, error);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to start review regeneration",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    });
+  }
+});
 
 /**
  * POST /api/game-review/:gameId
