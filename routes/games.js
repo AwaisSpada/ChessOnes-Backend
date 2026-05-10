@@ -20,6 +20,20 @@ const router = express.Router();
 // Evaluation history storage per game (for smoothing and momentum tracking)
 const gameEvaluationHistory = new Map(); // gameId -> { previousEval, previousSign, confirmCount, wasInCheck, checkEscapeConfirmCount, pendingEvaluation, kingUnderAttackCounter, unchangedEvalCount }
 
+/** Serialize per-game mutations so rapid undo cannot interleave splices / saves. */
+const _perGameMutationChain = new Map();
+function serializePerGameMutation(gameId, fn) {
+  const prev = _perGameMutationChain.get(gameId) || Promise.resolve();
+  const next = prev.catch(() => {}).then(fn);
+  _perGameMutationChain.set(gameId, next);
+  next.finally(() => {
+    if (_perGameMutationChain.get(gameId) === next) {
+      _perGameMutationChain.delete(gameId);
+    }
+  });
+  return next;
+}
+
 // Material calculation removed - using pure Stockfish evaluation only
 
 /**
@@ -2133,224 +2147,230 @@ router.post(
 // @desc    Undo the last move(s) in the game
 // @access  Private
 router.post("/:gameId/undo", auth, requirePoliciesAccepted, async (req, res) => {
+  const gameId = req.params.gameId;
   try {
-    const game = await Game.findOne({ gameId: req.params.gameId });
+    const outcome = await serializePerGameMutation(gameId, async () => {
+      const game = await Game.findOne({ gameId: req.params.gameId });
 
-    if (!game) {
-      return res.status(404).json({
-        success: false,
-        message: "Game not found",
-      });
-    }
+      if (!game) {
+        return {
+          kind: "reject",
+          status: 404,
+          body: { success: false, message: "Game not found" },
+        };
+      }
 
-    if (game.status !== "active") {
-      return res.status(400).json({
-        success: false,
-        message: "Game is not active",
-      });
-    }
+      if (game.status !== "active") {
+        return {
+          kind: "reject",
+          status: 400,
+          body: { success: false, message: "Game is not active" },
+        };
+      }
 
-    // Check if user is part of this game
-    const isWhitePlayer =
-      game.players.white && game.players.white.equals(req.user._id);
-    const isBlackPlayer =
-      game.players.black && game.players.black.equals(req.user._id);
+      // Check if user is part of this game
+      const isWhitePlayer =
+        game.players.white && game.players.white.equals(req.user._id);
+      const isBlackPlayer =
+        game.players.black && game.players.black.equals(req.user._id);
 
-    if (!isWhitePlayer && !isBlackPlayer) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not a player in this game",
-      });
-    }
+      if (!isWhitePlayer && !isBlackPlayer) {
+        return {
+          kind: "reject",
+          status: 403,
+          body: { success: false, message: "You are not a player in this game" },
+        };
+      }
 
-    // Check if it's the player's turn (can only undo on your turn)
-    const playerColor = isWhitePlayer ? "white" : "black";
-    if (game.currentTurn !== playerColor) {
-      return res.status(400).json({
-        success: false,
-        message: "Can only undo on your turn",
-      });
-    }
+      // Check if it's the player's turn (can only undo on your turn)
+      const playerColor = isWhitePlayer ? "white" : "black";
+      if (game.currentTurn !== playerColor) {
+        return {
+          kind: "reject",
+          status: 400,
+          body: { success: false, message: "Can only undo on your turn" },
+        };
+      }
 
-    // For bot games, undo both user's move and bot's move (2 moves)
-    // For multiplayer games, undo only the last move (1 move)
-    const movesToUndo = game.type === "bot" ? 2 : 1;
+      // For bot games, undo both user's move and bot's move (2 moves)
+      // For multiplayer games, undo only the last move (1 move)
+      const movesToUndo = game.type === "bot" ? 2 : 1;
 
-    if (!game.moves || game.moves.length < movesToUndo) {
-      return res.status(400).json({
-        success: false,
-        message: "Not enough moves to undo",
-      });
-    }
+      if (!game.moves || game.moves.length < movesToUndo) {
+        return {
+          kind: "reject",
+          status: 400,
+          body: { success: false, message: "Not enough moves to undo" },
+        };
+      }
 
-    // Remove the last move(s) from history
-    const removedMoves = game.moves.splice(-movesToUndo);
+      // Remove the last move(s) from history
+      game.moves.splice(-movesToUndo);
 
-    // Reconstruct board and positionHistory from remaining moves
-    // Start with initial board
-    const initialBoard = Array(64).fill(null);
-    // Set up initial position
-    const initialPieces = [
-      "r",
-      "n",
-      "b",
-      "q",
-      "k",
-      "b",
-      "n",
-      "r", // rank 8 (black)
-      "p",
-      "p",
-      "p",
-      "p",
-      "p",
-      "p",
-      "p",
-      "p", // rank 7 (black)
-      ...Array(32).fill(null), // ranks 6-3 (empty)
-      "P",
-      "P",
-      "P",
-      "P",
-      "P",
-      "P",
-      "P",
-      "P", // rank 2 (white)
-      "R",
-      "N",
-      "B",
-      "Q",
-      "K",
-      "B",
-      "N",
-      "R", // rank 1 (white)
-    ];
+      // Reconstruct board and positionHistory from remaining moves
+      const initialPieces = [
+        "r",
+        "n",
+        "b",
+        "q",
+        "k",
+        "b",
+        "n",
+        "r",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        "p",
+        ...Array(32).fill(null),
+        "P",
+        "P",
+        "P",
+        "P",
+        "P",
+        "P",
+        "P",
+        "P",
+        "R",
+        "N",
+        "B",
+        "Q",
+        "K",
+        "B",
+        "N",
+        "R",
+      ];
 
-    let reconstructedBoard = [...initialPieces];
-    game.positionHistory = [];
-    let currentTurn = "white"; // Game starts with white to move
+      let reconstructedBoard = [...initialPieces];
+      game.positionHistory = [];
+      let currentTurn = "white";
 
-    // Add initial position to history
-    const initialPositionHash =
-      JSON.stringify(reconstructedBoard) + "|" + currentTurn;
-    game.positionHistory.push(initialPositionHash);
+      const initialPositionHash =
+        JSON.stringify(reconstructedBoard) + "|" + currentTurn;
+      game.positionHistory.push(initialPositionHash);
 
-    // Apply all remaining moves to reconstruct board and positionHistory
-    for (const move of game.moves) {
-      const { from, to, piece, captured } = move;
-      const movingPiece = reconstructedBoard[from];
+      for (const move of game.moves) {
+        const { from, to } = move;
+        if (typeof from !== "number" || typeof to !== "number") {
+          console.warn("[undo] skip malformed move", move);
+          continue;
+        }
+        const movingPiece = reconstructedBoard[from];
+        if (!movingPiece) {
+          console.warn("[undo] no piece at from; skip replay", { from, to });
+          continue;
+        }
 
-      if (movingPiece) {
-        // Handle castling
         if (
           movingPiece.toLowerCase() === "k" &&
           Math.abs((to % 8) - (from % 8)) === 2
         ) {
-          const fromCol = from % 8;
           const toCol = to % 8;
           const row = Math.floor(from / 8);
-
           reconstructedBoard[to] = movingPiece;
           reconstructedBoard[from] = null;
-
-          // Move rook
           if (toCol === 6) {
-            // King-side castling
             reconstructedBoard[row * 8 + 5] = reconstructedBoard[row * 8 + 7];
             reconstructedBoard[row * 8 + 7] = null;
           } else if (toCol === 2) {
-            // Queen-side castling
             reconstructedBoard[row * 8 + 3] = reconstructedBoard[row * 8 + 0];
             reconstructedBoard[row * 8 + 0] = null;
           }
         } else {
-          // Regular move
           reconstructedBoard[to] = movingPiece;
           reconstructedBoard[from] = null;
         }
-      }
 
-      // Switch turn after each move
-      currentTurn = currentTurn === "white" ? "black" : "white";
-
-      // Add position hash after this move
-      const positionHash =
-        JSON.stringify(reconstructedBoard) + "|" + currentTurn;
-      game.positionHistory.push(positionHash);
-    }
-
-    // Update board and current turn
-    game.board = reconstructedBoard;
-
-    // Set current turn back to the player who made the move that was undone
-    // If we undid 2 moves (bot game), turn goes back to the user
-    // If we undid 1 move (multiplayer), turn goes back to the opponent
-    if (movesToUndo === 2) {
-      // Bot game: undid user move + bot move, so it's user's turn again
-      game.currentTurn = playerColor;
-    } else {
-      // Multiplayer: undid one move, so it's opponent's turn
-      game.currentTurn = playerColor === "white" ? "black" : "white";
-    }
-
-    await game.save();
-
-    // Emit undo event to other players
-    req.app.get("io").to(req.params.gameId).emit("move-undone", {
-      gameId: req.params.gameId,
-      board: game.board,
-      currentTurn: game.currentTurn,
-      movesRemoved: movesToUndo,
-    });
-
-    // Trigger evaluation for advantage bar after undo
-    // This ensures the bar shows the correct evaluation for the position we undid to
-    setImmediate(async () => {
-      try {
-        const { getPositionEvaluation, boardToFEN } = require("../utils/stockfish");
-        const currentGame = await Game.findOne({ gameId: req.params.gameId });
-        
-        if (!currentGame || currentGame.status !== 'active') {
-          return; // Game ended or not found, skip evaluation
-        }
-        
-        const fen = boardToFEN(currentGame.board, currentGame.currentTurn, currentGame.moves || []);
-        const rawEval = await getPositionEvaluation(fen);
-        
-        const processedEval = processEvaluationForAdvantageBar(
-          rawEval,
-          req.params.gameId,
-          currentGame.status,
-          currentGame.currentTurn
+        currentTurn = currentTurn === "white" ? "black" : "white";
+        game.positionHistory.push(
+          JSON.stringify(reconstructedBoard) + "|" + currentTurn
         );
-        
-        const evalDisplay = processedEval.isMate
-          ? `Mate (${processedEval.pawnEval > 0 ? 'White' : 'Black'})` 
-          : `${processedEval.pawnEval.toFixed(2)} pawns (${processedEval.normalized.toFixed(1)}%)`;
-        console.log(`[AdvantageBar] 📡 Emitting advantage-score after undo to game ${req.params.gameId}: ${evalDisplay}`);
-        
-        req.app.get("io").to(req.params.gameId).emit("advantage-score", {
-          gameId: req.params.gameId,
-          score: processedEval.score,
-          mate: processedEval.mate,
-        });
-      } catch (err) {
-        console.error(`[AdvantageBar] ❌ Evaluation failed after undo for game ${req.params.gameId}:`, err.message);
       }
-    });
 
-    res.json({
-      success: true,
-      message: "Move(s) undone successfully",
-      data: {
+      game.board = reconstructedBoard;
+
+      if (movesToUndo === 2) {
+        game.currentTurn = playerColor;
+      } else {
+        game.currentTurn = playerColor === "white" ? "black" : "white";
+      }
+
+      await game.save();
+
+      req.app.get("io").to(req.params.gameId).emit("move-undone", {
+        gameId: req.params.gameId,
         board: game.board,
         currentTurn: game.currentTurn,
         movesRemoved: movesToUndo,
-      },
+      });
+
+      setImmediate(async () => {
+        try {
+          const { getPositionEvaluation, boardToFEN } = require("../utils/stockfish");
+          const currentGame = await Game.findOne({ gameId: req.params.gameId });
+
+          if (!currentGame || currentGame.status !== "active") {
+            return;
+          }
+
+          const fen = boardToFEN(
+            currentGame.board,
+            currentGame.currentTurn,
+            currentGame.moves || []
+          );
+          const rawEval = await getPositionEvaluation(fen);
+
+          const processedEval = processEvaluationForAdvantageBar(
+            rawEval,
+            req.params.gameId,
+            currentGame.status,
+            currentGame.currentTurn
+          );
+
+          const evalDisplay = processedEval.isMate
+            ? `Mate (${processedEval.pawnEval > 0 ? "White" : "Black"})`
+            : `${processedEval.pawnEval.toFixed(2)} pawns (${processedEval.normalized.toFixed(1)}%)`;
+          console.log(
+            `[AdvantageBar] 📡 Emitting advantage-score after undo to game ${req.params.gameId}: ${evalDisplay}`
+          );
+
+          req.app.get("io").to(req.params.gameId).emit("advantage-score", {
+            gameId: req.params.gameId,
+            score: processedEval.score,
+            mate: processedEval.mate,
+          });
+        } catch (err) {
+          console.error(
+            `[AdvantageBar] ❌ Evaluation failed after undo for game ${req.params.gameId}:`,
+            err.message
+          );
+        }
+      });
+
+      return {
+        kind: "ok",
+        body: {
+          success: true,
+          message: "Move(s) undone successfully",
+          data: {
+            board: game.board,
+            currentTurn: game.currentTurn,
+            movesRemoved: movesToUndo,
+          },
+        },
+      };
     });
+
+    if (outcome.kind === "reject") {
+      return res.status(outcome.status).json(outcome.body);
+    }
+    return res.json(outcome.body);
   } catch (error) {
     console.error("Undo move error:", error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: "Server error",
     });
