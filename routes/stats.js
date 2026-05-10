@@ -7,6 +7,84 @@ const auth = require("../middleware/auth")
 
 const router = express.Router()
 
+const SUPPORTED_TYPES = new Set(["bullet", "blitz", "rapid", "all"])
+const PERIOD_TO_MS = {
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "1m": 30 * 24 * 60 * 60 * 1000,
+  "3m": 90 * 24 * 60 * 60 * 1000,
+  all: null,
+}
+
+function normalizeReason(reason) {
+  if (!reason) return "other"
+  const raw = String(reason).toLowerCase().trim()
+  const aliases = {
+    "draw-by-agreement": "draw-agreement",
+  }
+  return aliases[raw] || raw
+}
+
+function reasonLabel(reason) {
+  const labels = {
+    checkmate: "Checkmate",
+    timeout: "Timeout",
+    resignation: "Resignation",
+    disconnect: "Disconnect",
+    stalemate: "Stalemate",
+    "draw-agreement": "Draw Agreement",
+    "threefold-repetition": "Threefold Repetition",
+    "insufficient-material": "Insufficient Material",
+    other: "Other",
+  }
+  return labels[reason] || "Other"
+}
+
+function getOutcomeForUser(game, userId) {
+  const whiteId = game?.players?.white ? String(game.players.white) : null
+  const blackId = game?.players?.black ? String(game.players.black) : null
+  const uid = String(userId)
+  const side = whiteId === uid ? "white" : blackId === uid ? "black" : null
+  if (!side) return null
+
+  const winner = game?.result?.winner
+  if (!winner || winner === "draw") return { side, outcome: "draw" }
+  return { side, outcome: winner === side ? "win" : "loss" }
+}
+
+function currentRatingForType(user, type) {
+  const bullet = Math.round(Number(user?.ratings?.bullet?.rating ?? 1500))
+  const blitz = Math.round(Number(user?.ratings?.blitz?.rating ?? 1500))
+  const rapid = Math.round(Number(user?.ratings?.rapid?.rating ?? 1500))
+  if (type === "bullet") return bullet
+  if (type === "blitz") return blitz
+  if (type === "rapid") return rapid
+  return Math.round((bullet + blitz + rapid) / 3)
+}
+
+function buildRatingHistory(gamesAsc, currentRating) {
+  const deltaFor = (outcome) => (outcome === "win" ? 8 : outcome === "loss" ? -8 : 0)
+  const totalDelta = gamesAsc.reduce((sum, g) => sum + deltaFor(g.outcome), 0)
+  let rating = currentRating - totalDelta
+  const rows = [{ date: null, rating }]
+  for (const g of gamesAsc) {
+    rating += deltaFor(g.outcome)
+    rows.push({
+      date: g.date.toISOString(),
+      rating,
+      outcome: g.outcome,
+      reason: g.reason,
+    })
+  }
+
+  if (rows.length <= 140) return rows
+  const step = Math.ceil(rows.length / 140)
+  const sampled = []
+  for (let i = 0; i < rows.length; i += step) sampled.push(rows[i])
+  const last = rows[rows.length - 1]
+  if (sampled[sampled.length - 1] !== last) sampled.push(last)
+  return sampled
+}
+
 // @route   GET /api/stats/player/:userId
 // @desc    Get player statistics
 // @access  Private
@@ -15,7 +93,10 @@ router.get("/player/:userId", auth, async (req, res) => {
     const { userId } = req.params
 
     // Check if user can access these stats
-    if (userId !== req.user._id.toString() && !req.user.friends.includes(userId)) {
+    const isFriend = Array.isArray(req.user.friends)
+      ? req.user.friends.some((fid) => String(fid) === String(userId))
+      : false
+    if (userId !== req.user._id.toString() && !isFriend) {
       return res.status(403).json({
         success: false,
         message: "Access denied",
@@ -273,5 +354,122 @@ router.post(
     }
   },
 )
+
+// @route   GET /api/stats/:userId?type=rapid&period=7d
+// @desc    Aggregated per-user stats for stats page
+// @access  Private
+router.get("/:userId", auth, async (req, res) => {
+  try {
+    const { userId } = req.params
+    const typeRaw = String(req.query.type || "rapid").toLowerCase()
+    const periodRaw = String(req.query.period || "7d").toLowerCase()
+    const type = SUPPORTED_TYPES.has(typeRaw) ? typeRaw : "rapid"
+    const period = Object.prototype.hasOwnProperty.call(PERIOD_TO_MS, periodRaw) ? periodRaw : "7d"
+
+    // Keep same access policy as existing stats routes.
+    const isFriend = Array.isArray(req.user.friends)
+      ? req.user.friends.some((fid) => String(fid) === String(userId))
+      : false
+    if (userId !== req.user._id.toString() && !isFriend) {
+      return res.status(403).json({
+        success: false,
+        message: "Access denied",
+      })
+    }
+
+    const user = await User.findById(userId).select("ratings")
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      })
+    }
+
+    const sinceMs = PERIOD_TO_MS[period]
+    const since = sinceMs == null ? null : new Date(Date.now() - sinceMs)
+    const query = {
+      status: "completed",
+      $or: [{ "players.white": userId }, { "players.black": userId }],
+      ...(type !== "all" ? { category: type } : {}),
+      ...(since ? { updatedAt: { $gte: since } } : {}),
+    }
+
+    const games = await Game.find(query)
+      .select("players result category updatedAt")
+      .sort({ updatedAt: 1 })
+      .lean()
+
+    const normalized = []
+    for (const g of games) {
+      const mapped = getOutcomeForUser(g, userId)
+      if (!mapped) continue
+      normalized.push({
+        outcome: mapped.outcome,
+        reason: normalizeReason(g?.result?.reason),
+        date: g.updatedAt ? new Date(g.updatedAt) : new Date(),
+      })
+    }
+
+    const totals = {
+      total: normalized.length,
+      wins: normalized.filter((g) => g.outcome === "win").length,
+      losses: normalized.filter((g) => g.outcome === "loss").length,
+      draws: normalized.filter((g) => g.outcome === "draw").length,
+    }
+    const pct = (v) => (totals.total > 0 ? Number(((v / totals.total) * 100).toFixed(1)) : 0)
+
+    const byOutcomeReason = {
+      win: new Map(),
+      loss: new Map(),
+      draw: new Map(),
+    }
+    for (const g of normalized) {
+      const key = g.reason || "other"
+      const bucket = byOutcomeReason[g.outcome]
+      bucket.set(key, (bucket.get(key) || 0) + 1)
+    }
+    const breakdownFor = (bucketName, totalForBucket) => {
+      const map = byOutcomeReason[bucketName]
+      return [...map.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .map(([reason, count]) => ({
+          reason,
+          label: reasonLabel(reason),
+          count,
+          percentage: totalForBucket > 0 ? Number(((count / totalForBucket) * 100).toFixed(1)) : 0,
+        }))
+    }
+
+    const currentRating = currentRatingForType(user, type)
+    const ratingHistory = buildRatingHistory(normalized, currentRating)
+
+    return res.json({
+      success: true,
+      data: {
+        userId,
+        type,
+        period,
+        summary: {
+          ...totals,
+          winPercentage: pct(totals.wins),
+          lossPercentage: pct(totals.losses),
+          drawPercentage: pct(totals.draws),
+        },
+        ratingHistory,
+        outcomeBreakdown: {
+          wins: breakdownFor("win", totals.wins),
+          losses: breakdownFor("loss", totals.losses),
+          draws: breakdownFor("draw", totals.draws),
+        },
+      },
+    })
+  } catch (error) {
+    console.error("Get detailed stats error:", error)
+    return res.status(500).json({
+      success: false,
+      message: "Server error",
+    })
+  }
+})
 
 module.exports = router

@@ -17,8 +17,9 @@ const ratingSystem = new Glicko2({
 });
 
 /**
- * Determine time control category from game time control
- * 
+ * Determine time control category from initial clock (increment ignored).
+ * Bullet: under 3 min. Blitz: 3 min up to (not including) 10 min. Rapid: 10+ min.
+ *
  * @param {Number} initialTime - Initial time in milliseconds
  * @returns {String} - 'bullet', 'blitz', 'rapid', or 'un-timed'
  */
@@ -31,7 +32,7 @@ function getTimeControlCategory(initialTime) {
 
   if (minutes < 3) {
     return "bullet";
-  } else if (minutes <= 10) {
+  } else if (minutes < 10) {
     return "blitz";
   } else {
     return "rapid";

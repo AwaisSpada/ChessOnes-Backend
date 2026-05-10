@@ -877,10 +877,10 @@ io.on("connection", (socket) => {
       // Create game
       const gameId = Math.random().toString(36).substr(2, 9);
       const DEFAULT_TIME_CONTROLS = {
-        bullet: { initial: 120000, increment: 1 },
-        blitz: { initial: 300000, increment: 3 },
-        rapid: { initial: 600000, increment: 5 },
-        classical: { initial: 900000, increment: 10 },
+        bullet: { initial: 60000, increment: 1000 },
+        blitz: { initial: 180000, increment: 2000 },
+        rapid: { initial: 600000, increment: 0 },
+        classical: { initial: 900000, increment: 10000 },
       };
       const normalizedGameType = gameType?.toLowerCase() || "blitz";
       const normalizedMatchType =

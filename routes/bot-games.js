@@ -5,6 +5,7 @@ const Bot = require("../models/Bot");
 const User = require("../models/User");
 const auth = require("../middleware/auth");
 const requirePoliciesAccepted = require("../middleware/requirePoliciesAccepted");
+const { applyFischerIncrementToMover } = require("../utils/clockIncrement");
 
 const router = express.Router();
 
@@ -448,6 +449,7 @@ router.post(
 
             currentGame.board = botBoard;
             currentGame.moves.push(botMove);
+            applyFischerIncrementToMover(currentGame, "white");
             currentGame.currentTurn = "black";
 
             await currentGame.save();

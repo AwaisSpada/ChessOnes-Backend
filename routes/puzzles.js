@@ -367,31 +367,64 @@ router.post("/:id/attempt", auth, async (req, res) => {
   }
 });
 
-// Get user's puzzle statistics
+const PUZZLE_PERIOD_TO_MS = {
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "1m": 30 * 24 * 60 * 60 * 1000,
+  "3m": 90 * 24 * 60 * 60 * 1000,
+  all: null,
+};
+
+// Get user's puzzle statistics (optional ?period=7d|1m|3m|all for windowed counts)
 router.get("/stats/user", auth, async (req, res) => {
   try {
     const userId = req.user._id || req.user.id;
+    const periodRaw = String(req.query.period || "all").toLowerCase();
+    const period = Object.prototype.hasOwnProperty.call(PUZZLE_PERIOD_TO_MS, periodRaw) ? periodRaw : "all";
+    const sinceMs = PUZZLE_PERIOD_TO_MS[period];
+    const since = sinceMs == null ? null : new Date(Date.now() - sinceMs);
 
-    const stats = await PuzzleAttempt.aggregate([
-      { $match: { user: new mongoose.Types.ObjectId(userId) } },
-      {
-        $group: {
-          _id: null,
-          totalAttempts: { $sum: 1 },
-          solved: { $sum: { $cond: ["$solved", 1, 0] } },
-          totalTime: { $sum: "$timeSpent" },
+    const uidObj = new mongoose.Types.ObjectId(userId);
+
+    const lifetimeMatch = { user: uidObj };
+    const periodMatch =
+      since == null ? lifetimeMatch : { user: uidObj, updatedAt: { $gte: since } };
+
+    const [lifetime, inWindow] = await Promise.all([
+      PuzzleAttempt.aggregate([
+        { $match: lifetimeMatch },
+        {
+          $group: {
+            _id: null,
+            totalPuzzles: { $sum: 1 },
+            solved: { $sum: { $cond: ["$solved", 1, 0] } },
+            failed: { $sum: { $cond: [{ $eq: ["$solved", false] }, 1, 0] } },
+            totalTime: { $sum: "$timeSpent" },
+            totalMoveAttempts: { $sum: "$attempts" },
+          },
         },
-      },
+      ]),
+      PuzzleAttempt.aggregate([
+        { $match: periodMatch },
+        {
+          $group: {
+            _id: null,
+            inPeriodPuzzles: { $sum: 1 },
+            inPeriodSolved: { $sum: { $cond: ["$solved", 1, 0] } },
+            inPeriodFailed: { $sum: { $cond: [{ $eq: ["$solved", false] }, 1, 0] } },
+            inPeriodTime: { $sum: "$timeSpent" },
+            inPeriodRatingDelta: { $sum: { $ifNull: ["$ratingChange", 0] } },
+          },
+        },
+      ]),
     ]);
 
-    // Get today's solved puzzles count
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const todayEnd = new Date();
     todayEnd.setHours(23, 59, 59, 999);
-    
+
     const todaySolved = await PuzzleAttempt.countDocuments({
-      user: new mongoose.Types.ObjectId(userId),
+      user: uidObj,
       solved: true,
       updatedAt: {
         $gte: todayStart,
@@ -401,17 +434,32 @@ router.get("/stats/user", auth, async (req, res) => {
 
     const user = await User.findById(userId).select("puzzleRating puzzleStreak");
 
+    const L = lifetime[0] || {};
+    const P = inWindow[0] || {};
+
+    const totalPuzzles = L.totalPuzzles || 0;
+    const solved = L.solved || 0;
     const result = {
-      puzzleRating: user.puzzleRating || 100,
-      totalAttempts: stats[0]?.totalAttempts || 0,
-      solved: stats[0]?.solved || 0,
-      totalTime: stats[0]?.totalTime || 0,
-      accuracy:
-        stats[0]?.totalAttempts > 0
-          ? ((stats[0].solved / stats[0].totalAttempts) * 100).toFixed(1)
-          : 0,
+      period,
+      puzzleRating: user?.puzzleRating ?? 100,
+      totalPuzzles,
+      solved,
+      failed: L.failed || 0,
+      totalTime: L.totalTime || 0,
+      totalMoveAttempts: L.totalMoveAttempts || 0,
+      accuracy: totalPuzzles > 0 ? Number(((solved / totalPuzzles) * 100).toFixed(1)) : 0,
       todayCompleted: todaySolved || 0,
-      streak: user.puzzleStreak || 0,
+      streak: user?.puzzleStreak ?? 0,
+      inPeriod: {
+        puzzlesTouched: P.inPeriodPuzzles || 0,
+        solved: P.inPeriodSolved || 0,
+        failed: P.inPeriodFailed || 0,
+        timeSpent: P.inPeriodTime || 0,
+        /** Sum of stored ratingChange on attempts updated in window (approximation). */
+        ratingDeltaSum: Math.round(Number(P.inPeriodRatingDelta || 0)),
+      },
+      /** Skip is client-only navigation; not persisted. */
+      skippedTracked: false,
     };
 
     res.json({

@@ -13,6 +13,7 @@ const {
   isInsufficientMaterial,
   getAllLegalMoves,
 } = require("../utils/chess-engine");
+const { applyFischerIncrementToMover } = require("../utils/clockIncrement");
 
 const router = express.Router();
 
@@ -585,6 +586,7 @@ router.post(
           // End the game immediately
           game.board = newBoard;
           game.moves.push(move);
+          applyFischerIncrementToMover(game, playerColor);
           game.status = "completed";
           // Clean up evaluation history when game ends
           gameEvaluationHistory.delete(req.params.gameId);
@@ -797,6 +799,7 @@ router.post(
 
       game.board = newBoard;
       game.moves.push(move);
+      applyFischerIncrementToMover(game, playerColor);
       const nextTurn = game.currentTurn === "white" ? "black" : "white";
       game.currentTurn = nextTurn;
 
@@ -1588,8 +1591,10 @@ router.post(
             // Must check before board is updated
             const botWasInCheckBeforeMove = isKingInCheck(currentGame.board, botIsWhite);
             
+            const botMoverSide = currentGame.currentTurn;
             currentGame.board = botBoard;
             currentGame.moves.push(botMove);
+            applyFischerIncrementToMover(currentGame, botMoverSide);
             const nextTurn =
               currentGame.currentTurn === "white" ? "black" : "white";
             currentGame.currentTurn = nextTurn;

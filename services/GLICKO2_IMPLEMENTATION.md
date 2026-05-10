@@ -90,12 +90,12 @@ Convenience function that extracts rating data from user objects and determines 
 
 ### `getTimeControlCategory(initialTime)`
 
-Determines the time control category from initial time.
+Determines the time control category from **initial clock only** (milliseconds).
 
 **Parameters:**
 - `initialTime`: Number - Initial time in milliseconds
 
-**Returns:** "bullet", "blitz", or "rapid"
+**Returns:** `"un-timed"` when `initialTime === 0`; otherwise `"bullet"` if under 3 minutes, `"blitz"` if at least 3 minutes and under 10 minutes, `"rapid"` if 10 minutes or more. Increment is ignored for category.
 
 ## Integration Points
 

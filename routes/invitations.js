@@ -14,10 +14,10 @@ const { getPublicFrontendUrl } = require("../utils/frontendUrl");
 const router = express.Router();
 
 const DEFAULT_TIME_CONTROLS = {
-  bullet: { initial: 120000, increment: 1 },
-  blitz: { initial: 300000, increment: 3 },
-  rapid: { initial: 600000, increment: 5 },
-  classical: { initial: 900000, increment: 10 },
+  bullet: { initial: 60000, increment: 1000 },
+  blitz: { initial: 180000, increment: 2000 },
+  rapid: { initial: 600000, increment: 0 },
+  classical: { initial: 900000, increment: 10000 },
 };
 
 const INVITE_EXPIRATION_MS = 15 * 60 * 1000;
