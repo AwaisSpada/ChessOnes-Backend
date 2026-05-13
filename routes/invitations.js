@@ -41,11 +41,16 @@ function resolveTimeControl(gameType, maybeControl = {}) {
 }
 
 function formatInvitation(invitation) {
+  const matchType = invitation.matchType || "rated";
   return {
     id: invitation._id,
     token: invitation.token,
     status: invitation.status,
     gameType: invitation.gameType,
+    matchType,
+    gameFormat: "friend",
+    inviterSide: "white",
+    inviteeSide: "black",
     timeControl: invitation.timeControl,
     expiresAt: invitation.expiresAt,
     createdAt: invitation.createdAt,
@@ -135,6 +140,7 @@ router.post(
       .normalizeEmail(),
     body("gameType").optional().isString(),
     body("timeControl").optional().isObject(),
+    body("matchType").optional().isIn(["rated", "unrated", "casual"]),
   ],
   async (req, res) => {
     try {
@@ -147,7 +153,10 @@ router.post(
         });
       }
 
-      const { email, gameType, timeControl } = req.body;
+      const { email, gameType, timeControl, matchType } = req.body;
+      const normalizedMatchType =
+        matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
+      const isRated = normalizedMatchType === "rated";
       const normalizedEmail = email.toLowerCase();
       const opponent = await User.findOne({ email: normalizedEmail });
 
@@ -194,6 +203,7 @@ router.post(
       const game = new Game({
         gameId: gameId,
         type: "friend",
+        isRated,
         players: {
           white: req.user._id,
           black: opponent._id,
@@ -215,6 +225,7 @@ router.post(
         toUser: opponent._id,
         toEmail: normalizedEmail,
         gameType: normalizedGameType,
+        matchType: normalizedMatchType,
         timeControl: resolvedTimeControl,
         expiresAt,
         gameId: gameId, // Store gameId in invitation
@@ -264,6 +275,7 @@ router.post(
     body("friendId").isMongoId().withMessage("friendId is required"),
     body("gameType").optional().isString(),
     body("timeControl").optional().isObject(),
+    body("matchType").optional().isIn(["rated", "unrated", "casual"]),
   ],
   async (req, res) => {
     try {
@@ -276,7 +288,10 @@ router.post(
         });
       }
 
-      const { friendId, gameType, timeControl } = req.body;
+      const { friendId, gameType, timeControl, matchType } = req.body;
+      const normalizedMatchType =
+        matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
+      const isRated = normalizedMatchType === "rated";
 
       if (friendId === req.user._id.toString()) {
         return res.status(400).json({
@@ -334,6 +349,7 @@ router.post(
       const game = new Game({
         gameId: gameId,
         type: "friend",
+        isRated,
         players: {
           white: req.user._id,
           black: opponent._id,
@@ -355,6 +371,7 @@ router.post(
         toUser: opponent._id,
         toEmail: opponent.email,
         gameType: normalizedGameType,
+        matchType: normalizedMatchType,
         timeControl: resolvedTimeControl,
         expiresAt,
         gameId: gameId, // Store gameId in invitation
@@ -439,10 +456,25 @@ router.get("/", auth, async (req, res) => {
         .populate([
           { path: "fromUser", select: "username fullName avatar rating country" },
         ]);
-      
+
+      const originalIds = [
+        ...new Set(rematches.map((r) => r.originalGameId).filter(Boolean)),
+      ];
+      const origGames =
+        originalIds.length > 0
+          ? await Game.find({ gameId: { $in: originalIds } })
+              .select("gameId isRated")
+              .lean()
+          : [];
+      const ratedByOrig = new Map(
+        origGames.map((g) => [g.gameId, g.isRated !== false])
+      );
+
       rematchRequests = await Promise.all(
         rematches.map(async (req) => {
           const effectiveStatus = await resolveRematchEffectiveStatus(req, now);
+          const origRated = ratedByOrig.get(req.originalGameId);
+          const matchType = origRated === false ? "unrated" : "rated";
           return {
             id: req._id,
             token: `rematch_${req._id}`, // Use a token-like identifier
@@ -451,6 +483,8 @@ router.get("/", auth, async (req, res) => {
             effectiveStatus,
             isActionable: effectiveStatus === "pending",
             gameType: req.gameType || "blitz",
+            matchType,
+            gameFormat: "rematch",
             timeControl: req.timeControl || { initial: 300000, increment: 3 },
             expiresAt: new Date(req.createdAt.getTime() + 24 * 60 * 60 * 1000),
             createdAt: req.createdAt,

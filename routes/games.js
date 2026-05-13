@@ -1924,6 +1924,7 @@ router.post(
       "draw-agreement",
       "draw-by-agreement",
       "insufficient-material",
+      "first-move-abandon",
     ]),
   ],
   async (req, res) => {
@@ -1938,6 +1939,7 @@ router.post(
       }
 
       const { result } = req.body;
+      const skipStats = result.reason === "first-move-abandon";
       const game = await Game.findOne({ gameId: req.params.gameId }).populate(
         "players.white players.black"
       );
@@ -1982,19 +1984,27 @@ router.post(
       }
 
       // Update game
-      game.status = "completed";
+      if (result.reason === "first-move-abandon") {
+        game.status = "abandoned";
+      } else {
+        game.status = "completed";
+      }
       // Clean up evaluation history when game ends
       gameEvaluationHistory.delete(req.params.gameId);
       game.result = result;
+      game.markModified("result");
+      game.markModified("status");
       await game.save();
 
       // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
-      try {
-        const { triggerReviewGeneration } = require("../utils/game-review/game-completion-hook");
-        triggerReviewGeneration(game.gameId);
-      } catch (error) {
-        // Don't fail game completion if review hook fails
-        console.error(`[GameReview] Error triggering review generation hook:`, error);
+      if (!skipStats) {
+        try {
+          const { triggerReviewGeneration } = require("../utils/game-review/game-completion-hook");
+          triggerReviewGeneration(game.gameId);
+        } catch (error) {
+          // Don't fail game completion if review hook fails
+          console.error(`[GameReview] Error triggering review generation hook:`, error);
+        }
       }
 
       // Reload game to ensure all fields (including category) are present
@@ -2013,7 +2023,7 @@ router.post(
       const gameTime = Date.now() - gameForRating.createdAt.getTime();
       const gameCategory = gameForRating.category; // bullet, blitz, or rapid
 
-      if (gameForRating.players.white) {
+      if (!skipStats && gameForRating.players.white) {
         const whiteStats = await Stats.findOne({
           user: gameForRating.players.white._id,
         });
@@ -2030,7 +2040,7 @@ router.post(
         }
       }
 
-      if (gameForRating.players.black && gameForRating.type !== "bot") {
+      if (!skipStats && gameForRating.players.black && gameForRating.type !== "bot") {
         const blackStats = await Stats.findOne({
           user: gameForRating.players.black._id,
         });
@@ -2048,7 +2058,7 @@ router.post(
       }
 
       // For bot games, also update stats for the user (bot games only have one human player)
-      if (gameForRating.type === "bot" && gameForRating.players.white) {
+      if (!skipStats && gameForRating.type === "bot" && gameForRating.players.white) {
         const userStats = await Stats.findOne({
           user: gameForRating.players.white._id,
         });
@@ -2062,7 +2072,7 @@ router.post(
           await userStats.updateAfterGame(gameForRating.type, userResult, gameTime, gameCategory);
           console.log(`[Game End] Updated bot game user stats with category: ${gameCategory}`);
         }
-      } else if (gameForRating.type === "bot" && gameForRating.players.black) {
+      } else if (!skipStats && gameForRating.type === "bot" && gameForRating.players.black) {
         const userStats = await Stats.findOne({
           user: gameForRating.players.black._id,
         });
@@ -2085,6 +2095,7 @@ router.post(
 
       // Check badges for ALL game types (including bot games)
       // This ensures badges are awarded regardless of game type
+      if (!skipStats) {
       try {
         const { checkAndAwardBadges } = require("../services/achievementService");
         
@@ -2108,6 +2119,7 @@ router.post(
         }
       } catch (badgeError) {
         console.error("[Game End] Error checking badges:", badgeError);
+      }
       }
 
       // Update player status
@@ -2699,7 +2711,13 @@ router.get("/user/:userId", auth, async (req, res) => {
     };
 
     if (status !== "all") {
-      query.status = status;
+      // "completed" is used by home/profile history; include abandoned so first-move
+      // abort rows appear and can be labeled ABANDONED (not WIN/LOSS).
+      if (status === "completed") {
+        query.status = { $in: ["completed", "abandoned"] };
+      } else {
+        query.status = status;
+      }
     }
 
     const limitNum = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 200);

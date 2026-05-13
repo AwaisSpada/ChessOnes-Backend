@@ -149,6 +149,7 @@ const gameSchema = new mongoose.Schema(
           "disconnect",
           "threefold-repetition",
           "insufficient-material",
+          "first-move-abandon",
         ],
       },
     },

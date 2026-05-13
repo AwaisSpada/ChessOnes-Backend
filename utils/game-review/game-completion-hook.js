@@ -13,6 +13,38 @@ const { Chess } = require("chess.js");
 const { storeReview, markReviewPending, markReviewFailed, getReview } = require("./review-storage");
 const Game = require("../../models/Game");
 
+/** chess.js FEN field 2 must be exactly `w` or `b` (not "white"/"black"). */
+function turnWordToSideChar(turn) {
+  if (turn === "black" || turn === "b") return "b";
+  return "w";
+}
+
+function normalizeSideToMoveToken(raw) {
+  if (raw == null) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (s === "w" || s === "white") return "w";
+  if (s === "b" || s === "black") return "b";
+  return null;
+}
+
+/**
+ * Returns a chess.js–loadable FEN string, or null if the string cannot be fixed.
+ */
+function sanitizeInitialFenForChessJs(fen) {
+  if (!fen || typeof fen !== "string") return null;
+  const parts = fen.trim().split(/\s+/).filter((p) => p.length > 0);
+  if (parts.length < 2) return null;
+  const side = normalizeSideToMoveToken(parts[1]);
+  if (!side) return null;
+  parts[1] = side;
+  const candidate = parts.join(" ");
+  try {
+    return new Chess(candidate).fen();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Convert game moves from database format to UCI format.
  * Uses orientation + side-to-move candidate scoring and never throws on invalid moves.
@@ -51,14 +83,21 @@ function convertGameMovesToUCI(moves, context = {}) {
     });
 
   const buildInitialFen = (turn) => {
+    const sideChar = turnWordToSideChar(turn);
     if (context.initialFen && typeof context.initialFen === "string") {
-      return context.initialFen;
+      const cleaned = sanitizeInitialFenForChessJs(context.initialFen);
+      if (cleaned) return cleaned;
     }
-    return `rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR ${turn} KQkq - 0 1`;
+    return `rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR ${sideChar} KQkq - 0 1`;
   };
 
   const scoreCandidate = (uciMoves, turn) => {
-    const chess = new Chess(buildInitialFen(turn));
+    let chess;
+    try {
+      chess = new Chess(buildInitialFen(turn));
+    } catch (fenErr) {
+      return { legalCount: 0, invalidMove: `fen:${fenErr?.message || "load"}` };
+    }
     let legalCount = 0;
     let invalidMove = null;
     for (const uci of uciMoves) {

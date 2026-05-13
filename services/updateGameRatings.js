@@ -18,6 +18,11 @@ async function updateGameRatings(game, io) {
     result: game.result,
   });
 
+  if (game.result?.reason === "first-move-abandon") {
+    console.log(`[Rating] Skipping rating update for first-move abandon ${game.gameId}`);
+    return;
+  }
+
   // Check if game was aborted (no moves made)
   const isAborted = !game.moves || game.moves.length === 0;
   
