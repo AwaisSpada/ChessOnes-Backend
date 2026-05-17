@@ -4,8 +4,8 @@
   "description": "Chess application backend with Express and MongoDB",
   "main": "server.js",
   "scripts": {
-   "start": "ls -lh ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2 && node server.js",
-  "dev": "ls -lh ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2 || dir stockfish\\Linux && node server.js",
+    "start": "ls -lh ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2 && node server.js",
+    "dev": "ls -lh ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2 || dir stockfish\\Linux && node server.js",
     "test": "jest",
     "postinstall": "node scripts/setup-stockfish.js"
   },
@@ -26,7 +26,8 @@
     "multer": "^1.4.5-lts.1",
     "nodemailer": "^7.0.10",
     "socket.io": "^4.7.4",
-    "stockfish.js": "^10.0.2"
+    "stockfish.js": "^10.0.2",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "jest": "^29.7.0",

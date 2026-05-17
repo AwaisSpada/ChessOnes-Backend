@@ -113,6 +113,17 @@ const userSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    /** Daily puzzle streak (separate from rated puzzles). */
+    dailyPuzzleStreak: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    /** Last UTC date (YYYY-MM-DD) that counted toward daily puzzle streak. */
+    dailyPuzzleLastStreakDate: {
+      type: String,
+      default: null,
+    },
     preferences: {
       theme: {
         type: String,

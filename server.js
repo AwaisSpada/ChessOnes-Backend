@@ -114,13 +114,26 @@ mongoose
   })
   .then(() => {
     console.log("✅ MongoDB connected successfully");
-    // Verify puzzle count on connection
+    // Verify puzzle counts on connection
     const Puzzle = require("./models/Puzzle");
-    Puzzle.countDocuments().then((count) => {
-      console.log(`📊 Puzzles in database: ${count}`);
-    }).catch((err) => {
-      console.error("Error counting puzzles:", err);
-    });
+    const DailyPuzzle = require("./models/DailyPuzzle");
+    Promise.all([
+      Puzzle.countDocuments(),
+      DailyPuzzle.countDocuments(),
+      DailyPuzzle.countDocuments({ usedOnDateKey: null }),
+    ])
+      .then(([puzzleCount, dailyCount, dailyUnused]) => {
+        console.log(`📊 Puzzles in database: ${puzzleCount}`);
+        console.log(
+          `📊 Daily puzzles in database: ${dailyCount} (${dailyUnused} unused in pool)`,
+        );
+      })
+      .catch((err) => {
+        console.error("Error counting puzzles:", err);
+      });
+
+    const { startDailyPuzzleMidnightScheduler } = require("./utils/daily-puzzle-cron");
+    startDailyPuzzleMidnightScheduler();
   })
   .catch((err) => console.error("MongoDB connection error:", err));
 
@@ -129,6 +142,7 @@ app.use("/api/auth", require("./routes/auth"));
 app.use("/api/users", require("./routes/users"));
 app.use("/api/games", require("./routes/games"));
 app.use("/api/friends", require("./routes/friends"));
+app.use("/api/messenger", require("./routes/messenger"));
 app.use("/api/stats", require("./routes/stats"));
 app.use("/api/bot", require("./routes/bot")); // legacy simple bot endpoints
 app.use("/api/bots", require("./routes/bots")); // new Bot definitions for Bot Battles
@@ -136,6 +150,7 @@ app.use("/api/bot-games", require("./routes/bot-games")); // Bot game creation
 app.use("/api/invitations", require("./routes/invitations"));
 app.use("/api/game-review", require("./routes/game-review")); // Game review analysis
 app.use("/api/puzzles", require("./routes/puzzles")); // Puzzles endpoints
+app.use("/api/daily-puzzle", require("./routes/daily-puzzle")); // Daily puzzle (isolated)
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
 app.use("/api/public", require("./routes/public")); // Contact + newsletter (public, uses sendMail)
 
