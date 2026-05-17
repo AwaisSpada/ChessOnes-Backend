@@ -1155,6 +1155,10 @@ io.on("connection", (socket) => {
           newColor: toId === newWhiteId ? "white" : "black",
         });
 
+        gameReadyState.set(newGameId, {});
+        io.to(`user:${fromId}`).emit("ready:reset", { gameId: newGameId });
+        io.to(`user:${toId}`).emit("ready:reset", { gameId: newGameId });
+
         // Confirm to acceptor (keeps existing dashboard UX consistent)
         socket.emit("invite-accepted", {
           gameId: newGameId,
@@ -1759,13 +1763,15 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Update rematch request status
+      // Update rematch request status (acceptor may be either fromUser or toUser)
       const RematchRequest = require("./models/RematchRequest");
       const rematchRequest = await RematchRequest.findOne({
         originalGameId: gameId,
-        fromUser: isWhite ? game.players.white?._id : game.players.black?._id,
-        toUser: isWhite ? game.players.black?._id : game.players.white?._id,
         status: "pending",
+        $or: [
+          { fromUser: senderId, toUser: opponentId },
+          { fromUser: opponentId, toUser: senderId },
+        ],
       });
       
       // Create new game with SWAPPED colors
@@ -1808,6 +1814,30 @@ io.on("connection", (socket) => {
       console.log(`✅ Rematch accepted: New game ${newGameId} created (colors swapped)`);
       console.log(`   Previous: White=${game.players.white?._id}, Black=${game.players.black?._id}`);
       console.log(`   New: White=${newGame.players.white}, Black=${newGame.players.black}`);
+
+      gameReadyState.set(newGameId, {});
+
+      const detachFromOldGameRoom = (userIdToLeave) => {
+        const socketsForUser = onlineUsers.get(userIdToLeave);
+        if (!socketsForUser) return;
+        socketsForUser.forEach((socketId) => {
+          const s = io.sockets.sockets.get(socketId);
+          if (!s) return;
+          s.leave(gameId);
+          const socketSet = gameRoomSockets.get(gameId);
+          if (socketSet) {
+            socketSet.delete(socketId);
+            if (socketSet.size === 0) gameRoomSockets.delete(gameId);
+          }
+        });
+        const userSet = gameRoomUsers.get(gameId);
+        if (userSet) {
+          userSet.delete(userIdToLeave.toString());
+          if (userSet.size === 0) gameRoomUsers.delete(gameId);
+        }
+      };
+      detachFromOldGameRoom(senderId);
+      detachFromOldGameRoom(opponentId);
 
       // Notify both players with new gameId and their new colors
       const senderNewColor = isWhite ? "black" : "white";  // Sender swaps color
@@ -1872,6 +1902,8 @@ io.on("connection", (socket) => {
         gameId: newGameId,
         userId: opponentId,
       });
+
+      io.to(newGameId).emit("ready:reset", { gameId: newGameId });
     } catch (err) {
       console.error("rematch:accept socket handler error:", err);
       socket.emit("rematch:error", {
