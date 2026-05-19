@@ -20,6 +20,18 @@ const {
   getCalendarForUser,
   computeDisplayStreak,
 } = require("../utils/daily-puzzle-service");
+const { initLaunchDateKey } = require("../utils/daily-puzzle-launch");
+
+let launchInitPromise = null;
+function ensureLaunchDateReady() {
+  if (!launchInitPromise) {
+    launchInitPromise = initLaunchDateKey().catch((err) => {
+      launchInitPromise = null;
+      throw err;
+    });
+  }
+  return launchInitPromise;
+}
 
 function serializePuzzle(puzzle) {
   if (!puzzle) return null;
@@ -39,6 +51,7 @@ function serializePuzzle(puzzle) {
  */
 router.get("/", optionalAuth, async (req, res) => {
   try {
+    await ensureLaunchDateReady();
     const dateKey = String(req.query.date || todayDateKey());
     if (!isValidDateKey(dateKey)) {
       return res.status(400).json({ success: false, message: "Invalid date" });
@@ -87,6 +100,7 @@ router.get("/", optionalAuth, async (req, res) => {
       data: {
         dateKey,
         todayDateKey: todayDateKey(),
+        launchDateKey: getLaunchDateKey(),
         puzzle: serializePuzzle(populated.puzzle),
         solved: Boolean(progress?.solved),
         solvedAt: progress?.solvedAt || null,
@@ -203,6 +217,7 @@ router.get("/stats/user", auth, async (req, res) => {
  */
 router.get("/calendar", optionalAuth, async (req, res) => {
   try {
+    await ensureLaunchDateReady();
     const today = todayDateKey();
     const fromKey = String(req.query.from || addDaysToDateKey(today, -90));
     const toKey = String(req.query.to || today);

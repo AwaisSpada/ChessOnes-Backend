@@ -133,7 +133,9 @@ mongoose
       });
 
     const { startDailyPuzzleMidnightScheduler } = require("./utils/daily-puzzle-cron");
-    startDailyPuzzleMidnightScheduler();
+    startDailyPuzzleMidnightScheduler().catch((err) => {
+      console.error("[Daily Puzzle] scheduler startup failed:", err);
+    });
   })
   .catch((err) => console.error("MongoDB connection error:", err));
 

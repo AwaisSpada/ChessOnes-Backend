@@ -1,5 +1,9 @@
 const { ensureAssignmentForDate } = require("./daily-puzzle-service");
 const {
+  initLaunchDateKey,
+  backfillDailyPuzzlesSinceLaunch,
+} = require("./daily-puzzle-launch");
+const {
   todayDateKey,
   getLaunchDateKey,
   msUntilNextUtcMidnight,
@@ -20,7 +24,10 @@ async function assignTodayDailyPuzzle() {
  * At each UTC midnight, assign that calendar day's puzzle from the DailyPuzzle pool.
  * Also assigns today once on startup if today >= launch and not yet assigned.
  */
-function startDailyPuzzleMidnightScheduler() {
+async function startDailyPuzzleMidnightScheduler() {
+  await initLaunchDateKey();
+  await backfillDailyPuzzlesSinceLaunch();
+
   const launch = getLaunchDateKey();
   console.log(`📅 Daily puzzle launch date (UTC): ${launch}`);
 

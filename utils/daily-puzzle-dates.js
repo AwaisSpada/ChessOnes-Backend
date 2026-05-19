@@ -32,11 +32,21 @@ function isValidDateKey(dateKey) {
   return /^\d{4}-\d{2}-\d{2}$/.test(dateKey) && !Number.isNaN(parseDateKey(dateKey).getTime());
 }
 
+/** Set at startup from env or earliest assignment in DB (see daily-puzzle-launch.js). */
+let launchDateKeyCache = null;
+
+function setLaunchDateKeyCache(dateKey) {
+  if (dateKey && isValidDateKey(dateKey)) {
+    launchDateKeyCache = dateKey;
+  }
+}
+
 /**
  * First calendar day the daily puzzle feature is live (YYYY-MM-DD, UTC).
- * Set DAILY_PUZZLE_LAUNCH_DATE in .env when you ship the feature.
+ * Prefer DAILY_PUZZLE_LAUNCH_DATE in .env; else earliest assignment date after init.
  */
 function getLaunchDateKey() {
+  if (launchDateKeyCache) return launchDateKeyCache;
   const fromEnv = process.env.DAILY_PUZZLE_LAUNCH_DATE;
   if (fromEnv && isValidDateKey(fromEnv)) return fromEnv;
   return todayDateKey();
@@ -62,6 +72,7 @@ module.exports = {
   isFutureDateKey,
   isValidDateKey,
   getLaunchDateKey,
+  setLaunchDateKeyCache,
   isBeforeLaunchDateKey,
   msUntilNextUtcMidnight,
 };
