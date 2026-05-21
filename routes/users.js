@@ -30,7 +30,147 @@ const upload = multer({
   },
 });
 
+const UserReport = require("../models/UserReport");
+const {
+  isValidReportReason,
+  getCategoryLabel,
+  getReasonLabel,
+} = require("../utils/report-reasons");
+const { userHasBlocked } = require("../utils/user-blocks");
+const {
+  sendMail,
+  getContactInboxEmail,
+  buildUserReportEmail,
+  CHESSONES_FROM_SUPPORT,
+} = require("../utils/sendMail");
+
 const router = express.Router();
+
+// @route   POST /api/users/report
+router.post(
+  "/report",
+  auth,
+  [
+    body("reportedUserId").isMongoId(),
+    body("category").isIn(["abuse", "fair_play", "account_profile", "other"]),
+    body("reasonId").isString().trim().notEmpty(),
+    body("details").optional().isString().trim().isLength({ max: 2000 }),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid report",
+          errors: errors.array(),
+        });
+      }
+
+      const { reportedUserId, category, reasonId, details } = req.body;
+      if (reportedUserId === req.user._id.toString()) {
+        return res.status(400).json({
+          success: false,
+          message: "You cannot report yourself",
+        });
+      }
+
+      if (!isValidReportReason(reasonId, category)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid report reason for category",
+        });
+      }
+
+      if (reasonId === "other" && !(details || "").trim()) {
+        return res.status(400).json({
+          success: false,
+          message: "Please describe the issue",
+        });
+      }
+
+      const [reporter, reported] = await Promise.all([
+        User.findById(req.user._id).select(
+          "username fullName email"
+        ),
+        User.findById(reportedUserId).select("username fullName email _id"),
+      ]);
+
+      if (!reported) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found",
+        });
+      }
+
+      const trimmedDetails = (details || "").trim();
+
+      await UserReport.create({
+        reporter: req.user._id,
+        reportedUser: reportedUserId,
+        category,
+        reasonId,
+        details: trimmedDetails,
+      });
+
+      const reporterDisplay =
+        reporter?.fullName || reporter?.username || "Unknown user";
+      const reportedDisplay =
+        reported.fullName || reported.username || "Unknown user";
+      const categoryLabel = getCategoryLabel(category);
+      const reasonLabel = getReasonLabel(reasonId);
+
+      try {
+        const inbox = getContactInboxEmail();
+        const html = buildUserReportEmail({
+          reporterName: reporterDisplay,
+          reporterUsername: reporter?.username,
+          reporterEmail: reporter?.email,
+          reporterId: req.user._id.toString(),
+          reportedName: reportedDisplay,
+          reportedUsername: reported.username,
+          reportedId: reportedUserId,
+          categoryLabel,
+          reasonLabel,
+          details: trimmedDetails,
+        });
+        const text = [
+          `User report — ${reporterDisplay} reported ${reportedDisplay}`,
+          "",
+          `Reporter: ${reporterDisplay} (@${reporter?.username || "—"}) <${reporter?.email || "—"}>`,
+          `Reporter ID: ${req.user._id}`,
+          "",
+          `Reported: ${reportedDisplay} (@${reported.username || "—"})`,
+          `Reported ID: ${reportedUserId}`,
+          "",
+          `Category: ${categoryLabel}`,
+          `Reason: ${reasonLabel}`,
+          trimmedDetails ? `\nDetails:\n${trimmedDetails}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        await sendMail({
+          to: inbox,
+          from: CHESSONES_FROM_SUPPORT,
+          subject: `[ChessOnes Report] ${reporterDisplay} → ${reportedDisplay}`,
+          text,
+          html,
+        });
+      } catch (mailErr) {
+        console.error("Report notification email failed:", mailErr);
+      }
+
+      return res.json({
+        success: true,
+        message: "Report submitted. Our team will review it.",
+      });
+    } catch (error) {
+      console.error("Report user error:", error);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
 
 // @route   GET /api/users/profile
 // @desc    Get user profile (own profile if no userId query param, other user if userId provided)
@@ -72,12 +212,23 @@ router.get("/profile", auth, async (req, res) => {
 
     const stats = await Stats.findOne({ user: targetUserId });
 
+    let isBlockedByMe = false;
+    let hasBlockedMe = false;
+    if (!isOwnProfile) {
+      const meDoc = await User.findById(req.user._id).select("blockedUsers").lean();
+      const themDoc = await User.findById(targetUserId).select("blockedUsers").lean();
+      isBlockedByMe = userHasBlocked(meDoc, targetStr);
+      hasBlockedMe = userHasBlocked(themDoc, myIdStr);
+    }
+
     res.json({
       success: true,
       data: {
         user,
         stats,
         isOwnProfile,
+        isBlockedByMe,
+        hasBlockedMe,
       },
     });
   } catch (error) {

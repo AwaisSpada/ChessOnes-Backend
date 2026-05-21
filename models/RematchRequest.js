@@ -41,6 +41,10 @@ const rematchRequestSchema = new mongoose.Schema(
       enum: ["bullet", "blitz", "rapid", "classical"],
       default: "blitz",
     },
+    isRated: {
+      type: Boolean,
+      default: true,
+    },
     isClearedByRecipient: {
       type: Boolean,
       default: false,

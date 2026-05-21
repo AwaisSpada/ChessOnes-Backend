@@ -1,4 +1,5 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const { body, validationResult } = require("express-validator");
 const crypto = require("crypto");
 const User = require("../models/User");
@@ -11,6 +12,7 @@ const {
 } = require("../utils/sendMail");
 const { getPublicFrontendUrl } = require("../utils/frontendUrl");
 const auth = require("../middleware/auth");
+const { usersAreBlocked, applyBlock } = require("../utils/user-blocks");
 
 const router = express.Router();
 
@@ -391,7 +393,7 @@ router.post(
     auth,
     body("userId").isMongoId(), // sender (the logged-in user id from frontend)
     body("friendId").isMongoId(), // receiver or sender depending on action
-    body("action").isIn(["send", "accept", "decline"]),
+    body("action").isIn(["send", "accept", "decline", "cancel"]),
   ],
   async (req, res) => {
     try {
@@ -424,6 +426,13 @@ router.post(
       }
 
       // ====== ACTION HANDLING ======
+      if (await usersAreBlocked(userId, friendId)) {
+        return res.status(403).json({
+          success: false,
+          message: "You cannot interact with this user",
+        });
+      }
+
       if (action === "send") {
         // check if already friends
         if (sender.friends.includes(friendId)) {
@@ -544,6 +553,35 @@ router.post(
         return res.json({
           success: true,
           message: "Friend request declined",
+        });
+      }
+
+      if (action === "cancel") {
+        const requestIndex = receiver.friendRequests.findIndex(
+          (req) => req.from.toString() === userId && req.status === "pending"
+        );
+
+        if (requestIndex === -1) {
+          return res.status(400).json({
+            success: false,
+            message: "No pending friend request to cancel",
+          });
+        }
+
+        receiver.friendRequests.splice(requestIndex, 1);
+        await receiver.save();
+
+        req.app
+          .get("io")
+          ?.to(`user:${friendId}`)
+          .emit("friend-request-update", {
+            from: { id: userId },
+            status: "cancelled",
+          });
+
+        return res.json({
+          success: true,
+          message: "Friend request cancelled",
         });
       }
     } catch (error) {
@@ -708,6 +746,67 @@ router.post(
   }
 );
 
+// @route   GET /api/friends/blocked
+router.get("/blocked", auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id)
+      .populate("blockedUsers", "username fullName avatar status rating country")
+      .select("blockedUsers");
+    return res.json({
+      success: true,
+      data: { blocked: user?.blockedUsers || [] },
+    });
+  } catch (error) {
+    console.error("Get blocked users error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// @route   POST /api/friends/block
+// @body    { userId: string }
+router.post("/block", auth, async (req, res) => {
+  try {
+    const targetId = req.body?.userId;
+    if (!targetId) {
+      return res.status(400).json({ success: false, message: "userId is required" });
+    }
+    const result = await applyBlock(req.user._id, targetId);
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message || "Could not block user",
+      });
+    }
+    req.app
+      .get("io")
+      ?.to(`user:${targetId}`)
+      .emit("user-blocked", { blockedBy: req.user._id.toString() });
+    return res.json({ success: true, message: "User blocked" });
+  } catch (error) {
+    console.error("Block user error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// @route   DELETE /api/friends/block/:userId
+router.delete("/block/:userId", auth, async (req, res) => {
+  try {
+    const { userId: targetId } = req.params;
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    user.blockedUsers = (user.blockedUsers || []).filter(
+      (id) => id.toString() !== targetId
+    );
+    await user.save();
+    return res.json({ success: true, message: "User unblocked" });
+  } catch (error) {
+    console.error("Unblock user error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // @route   DELETE /api/friends/:friendId
 // @desc    Remove friend
 // @access  Private
@@ -783,10 +882,10 @@ router.post(
       const normalizedMatchType =
         matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
 
-      if (!req.user.friends.includes(friendId)) {
-        return res.status(400).json({
+      if (await usersAreBlocked(req.user._id.toString(), friendId)) {
+        return res.status(403).json({
           success: false,
-          message: "User is not in your friends list",
+          message: "Cannot challenge this user",
         });
       }
 
@@ -888,6 +987,9 @@ router.get("/search", auth, async (req, res) => {
     const currentUserId = req.user._id;
     const searchQuery = query.trim();
 
+    const me = await User.findById(currentUserId).select("blockedUsers friends").lean();
+    const myBlockedIds = (me?.blockedUsers || []).map((id) => id.toString());
+
     // Build search conditions - search in username, email, and fullName
     const searchConditions = {
       $or: [
@@ -895,12 +997,19 @@ router.get("/search", auth, async (req, res) => {
         { email: { $regex: searchQuery, $options: "i" } },
         { fullName: { $regex: searchQuery, $options: "i" } },
       ],
-      _id: { $ne: currentUserId }, // Exclude current user
+      _id: { $ne: currentUserId },
+      blockedUsers: { $ne: currentUserId },
     };
+    if (myBlockedIds.length) {
+      searchConditions._id = {
+        $ne: currentUserId,
+        $nin: myBlockedIds.map((id) => new mongoose.Types.ObjectId(id)),
+      };
+    }
 
     // Find users matching the search
     const users = await User.find(searchConditions)
-      .select("username fullName email avatar rating status country friendRequests")
+      .select("username fullName email avatar rating status country friendRequests blockedUsers")
       .limit(20) // Limit results
       .lean(); // Use lean() for better performance
 
@@ -912,16 +1021,31 @@ router.get("/search", auth, async (req, res) => {
     const currentUserWithRequests = await User.findById(currentUserId)
       .select("friendRequests")
       .lean();
-    const pendingRequestFromIds =
-      currentUserWithRequests?.friendRequests
-        ?.filter((req) => req.status === "pending")
-        .map((req) => req.from.toString()) || [];
+    const pendingIncomingByFromId = new Map();
+    for (const req of currentUserWithRequests?.friendRequests || []) {
+      if (req.status === "pending" && req.from) {
+        const fromId = req.from.toString();
+        const reqId = req._id ? req._id.toString() : null;
+        if (reqId) pendingIncomingByFromId.set(fromId, reqId);
+      }
+    }
 
     // Format users with friend status
-    const formattedUsers = users.map((user) => {
+    const myIdStr = currentUserId.toString();
+    const formattedUsers = users
+      .filter((user) => {
+        const uid = user._id.toString();
+        if (myBlockedIds.includes(uid)) return false;
+        const blockedMe = (user.blockedUsers || []).some(
+          (id) => id.toString() === myIdStr
+        );
+        return !blockedMe;
+      })
+      .map((user) => {
       const userId = user._id.toString();
       const isFriend = friendIds.includes(userId);
-      const hasPendingRequest = pendingRequestFromIds.includes(userId);
+      const incomingRequestId = pendingIncomingByFromId.get(userId) || null;
+      const hasPendingRequest = !!incomingRequestId;
       // Outgoing request: current user already sent request to this searched user.
       const requestSent =
         Array.isArray(user.friendRequests) &&
@@ -943,6 +1067,7 @@ router.get("/search", auth, async (req, res) => {
         isFriend,
         requestSent,
         hasPendingRequest,
+        incomingRequestId,
       };
     });
 

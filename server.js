@@ -867,6 +867,14 @@ io.on("connection", (socket) => {
         return;
       }
 
+      const { usersAreBlocked } = require("./utils/user-blocks");
+      if (await usersAreBlocked(sender._id.toString(), friendId)) {
+        socket.emit("invite-error", {
+          message: "Cannot challenge this user",
+        });
+        return;
+      }
+
       if (sender.hasAcceptedPolicies !== true) {
         socket.emit("invite-error", {
           code: "POLICY_ACCEPTANCE_REQUIRED",
@@ -1595,6 +1603,7 @@ io.on("connection", (socket) => {
       // Get time control from the game (reuse same time control)
       const timeControl = game.timeControl || { initial: 300000, increment: 3 };
       const gameType = game.gameType || "blitz";
+      const rematchIsRated = game.isRated !== false;
       
       // Create new rematch request
       const rematchRequest = await RematchRequest.create({
@@ -1605,6 +1614,7 @@ io.on("connection", (socket) => {
         status: "pending",
         timeControl: timeControl,
         gameType: gameType,
+        isRated: rematchIsRated,
       });
       
       await rematchRequest.populate([
@@ -1617,6 +1627,7 @@ io.on("connection", (socket) => {
         token: `rematch_${rematchRequest._id}`,
         type: "rematch",
         gameType: rematchRequest.gameType || "blitz",
+        matchType: rematchIsRated ? "rated" : "unrated",
         timeControl: rematchRequest.timeControl || timeControl,
         gameId: gameId,
         originalGameId: gameId,
@@ -1776,12 +1787,14 @@ io.on("connection", (socket) => {
         ],
       });
       
-      // Create new game with SWAPPED colors
+      // Create new game with SWAPPED colors (same rated/casual as original)
       const { setGameCategory } = require("./services/ratingEngine");
+      const rematchIsRated = game.isRated !== false;
       const newGameId = Math.random().toString(36).substr(2, 9);
       const newGame = new Game({
         gameId: newGameId,
-        type: "friend",
+        type: game.type === "multiplayer" ? "multiplayer" : "friend",
+        isRated: rematchIsRated,
         players: {
           // Swap colors: previous white becomes black, previous black becomes white
           white: isWhite ? opponentId : senderId,   // If sender was white, opponent becomes white; if sender was black, sender becomes white
@@ -1804,16 +1817,21 @@ io.on("connection", (socket) => {
         await rematchRequest.save();
         
         // Emit challenge:update to remove from notifications
-        io.to(`user:${opponentId}`).emit("challenge:update", {
+        const rematchUpdate = {
           id: rematchRequest._id,
           token: `rematch_${rematchRequest._id}`,
           type: "rematch",
           status: "accepted",
           gameId: newGameId,
-        });
+          matchType: rematchIsRated ? "rated" : "unrated",
+        };
+        io.to(`user:${senderId}`).emit("challenge:update", rematchUpdate);
+        io.to(`user:${opponentId}`).emit("challenge:update", rematchUpdate);
       }
 
-      console.log(`✅ Rematch accepted: New game ${newGameId} created (colors swapped)`);
+      console.log(
+        `✅ Rematch accepted: New game ${newGameId} created (colors swapped, ${rematchIsRated ? "rated" : "casual"})`
+      );
       console.log(`   Previous: White=${game.players.white?._id}, Black=${game.players.black?._id}`);
       console.log(`   New: White=${newGame.players.white}, Black=${newGame.players.black}`);
 

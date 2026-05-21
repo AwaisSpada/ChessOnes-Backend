@@ -347,6 +347,90 @@ function buildNewsletterSignupEmail({ subscriberEmail }) {
   });
 }
 
+/**
+ * Internal notification: user reported another user (HTML for team inbox).
+ */
+function buildUserReportEmail({
+  reporterName,
+  reporterUsername,
+  reporterEmail,
+  reporterId,
+  reportedName,
+  reportedUsername,
+  reportedId,
+  categoryLabel,
+  reasonLabel,
+  details,
+}) {
+  const safeReporter = escapeHtml(reporterName);
+  const safeReporterUser = escapeHtml(reporterUsername || "—");
+  const safeReporterEmail = escapeHtml(reporterEmail || "—");
+  const safeReporterId = escapeHtml(reporterId);
+  const safeReported = escapeHtml(reportedName);
+  const safeReportedUser = escapeHtml(reportedUsername || "—");
+  const safeReportedId = escapeHtml(reportedId);
+  const safeCategory = escapeHtml(categoryLabel);
+  const safeReason = escapeHtml(reasonLabel);
+  const safeDetails = details
+    ? escapeHtml(details).replace(/\n/g, "<br/>")
+    : "";
+
+  const detailsBlock = safeDetails
+    ? `
+        <tr>
+          <td style="padding: 12px 28px 0 28px; font-size: 14px; line-height: 22px; color: #94a3b8;">
+            <strong style="color:#e2e8f0;">Additional details:</strong>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 28px 16px 28px; font-size: 14px; line-height: 22px; color: #cbd5e1;">
+            ${safeDetails}
+          </td>
+        </tr>`
+    : "";
+
+  const bodyHtml = `
+        <tr>
+          <td style="padding: 8px 28px 0 28px; font-size: 16px; line-height: 24px; color: #e2e8f0;">
+            <strong style="color:#f8fafc;">${safeReporter}</strong> reported <strong style="color:#f8fafc;">${safeReported}</strong> on ChessOnes.
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 16px 28px 0 28px; font-size: 14px; line-height: 22px; color: #94a3b8;">
+            <strong style="color:#e2e8f0;">Reporter</strong><br/>
+            Name: ${safeReporter}<br/>
+            Username: @${safeReporterUser}<br/>
+            Email: ${safeReporterEmail}<br/>
+            User ID: ${safeReporterId}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 12px 28px 0 28px; font-size: 14px; line-height: 22px; color: #94a3b8;">
+            <strong style="color:#e2e8f0;">Reported user</strong><br/>
+            Name: ${safeReported}<br/>
+            Username: @${safeReportedUser}<br/>
+            User ID: ${safeReportedId}
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 16px 28px 0 28px; font-size: 14px; line-height: 22px; color: #94a3b8;">
+            <strong style="color:#e2e8f0;">Category:</strong> ${safeCategory}<br/>
+            <strong style="color:#e2e8f0;">Reason:</strong> ${safeReason}
+          </td>
+        </tr>
+        ${detailsBlock}
+        <tr>
+          <td style="padding: 8px 28px 24px 28px; font-size: 13px; line-height: 20px; color: #64748b;">
+            Submitted ${new Date().toUTCString()}
+          </td>
+        </tr>`;
+
+  return renderChessOnesEmailLayout({
+    headline: "User report",
+    bodyHtml,
+  });
+}
+
 module.exports = {
   sendMail,
   CHESSONES_FROM_NOREPLY,
@@ -357,4 +441,5 @@ module.exports = {
   buildPasswordResetEmail,
   buildContactInquiryEmail,
   buildNewsletterSignupEmail,
+  buildUserReportEmail,
 };

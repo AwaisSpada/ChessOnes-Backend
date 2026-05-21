@@ -176,6 +176,7 @@ router.post(
             status: user.status,
             country: user.country,
             hasAcceptedPolicies: user.hasAcceptedPolicies === true,
+            hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
           },
         },
       });
@@ -292,7 +293,8 @@ router.post(
               status: "online",
               country: user.country,
               role: user.role || "USER", // Include role for admin check
-            hasAcceptedPolicies: user.hasAcceptedPolicies === true,
+              hasAcceptedPolicies: user.hasAcceptedPolicies === true,
+              hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
             },
           },
         });
@@ -321,6 +323,7 @@ router.post(
             country: user.country,
             role: user.role || "USER", // Include role for admin check
             hasAcceptedPolicies: user.hasAcceptedPolicies === true,
+            hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
           },
         },
       })
@@ -817,6 +820,7 @@ router.post("/social", async (req, res) => {
           status: user.status,
           country: user.country,
           hasAcceptedPolicies: user.hasAcceptedPolicies === true,
+          hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
         },
       },
     });
@@ -879,6 +883,56 @@ router.post(
       return res.status(500).json({
         success: false,
         message: "Server error while accepting policies",
+      });
+    }
+  }
+);
+
+// @route   POST /api/auth/accept-messenger-terms
+// @desc    Persist first-time Messenger feature acknowledgment
+// @access  Private
+router.post(
+  "/accept-messenger-terms",
+  [auth, body("confirmed").custom((v) => v === true)],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Messenger terms confirmation is required",
+          errors: errors.array(),
+        });
+      }
+
+      if (req.user.hasAcceptedMessengerTerms === true) {
+        return res.json({
+          success: true,
+          message: "Messenger terms already accepted",
+          data: {
+            hasAcceptedMessengerTerms: true,
+            acceptedMessengerTermsAt: req.user.acceptedMessengerTermsAt,
+          },
+        });
+      }
+
+      req.user.hasAcceptedMessengerTerms = true;
+      req.user.acceptedMessengerTermsAt = new Date();
+      await req.user.save();
+
+      return res.json({
+        success: true,
+        message: "Messenger terms accepted successfully",
+        data: {
+          hasAcceptedMessengerTerms: true,
+          acceptedMessengerTermsAt: req.user.acceptedMessengerTermsAt,
+        },
+      });
+    } catch (error) {
+      console.error("Accept messenger terms error:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Server error while accepting messenger terms",
       });
     }
   }

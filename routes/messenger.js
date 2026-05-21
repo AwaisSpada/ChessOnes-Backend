@@ -4,6 +4,7 @@ const auth = require("../middleware/auth");
 const User = require("../models/User");
 const MessengerConversation = require("../models/MessengerConversation");
 const MessengerMessage = require("../models/MessengerMessage");
+const { usersAreBlocked } = require("../utils/user-blocks");
 
 const router = express.Router();
 
@@ -11,21 +12,102 @@ const MAX_BODY = 2000;
 const PAGE_SIZE_DEFAULT = 50;
 const PAGE_SIZE_MAX = 100;
 
-async function areFriends(userId, peerId) {
-  const user = await User.findById(userId).select("friends").lean();
-  if (!user?.friends?.length) return false;
-  const p = peerId.toString();
-  return user.friends.some((fid) => fid.toString() === p);
+function requireMessengerTerms(req, res, next) {
+  if (req.user?.hasAcceptedMessengerTerms === true) {
+    return next();
+  }
+  return res.status(403).json({
+    success: false,
+    code: "MESSENGER_TERMS_REQUIRED",
+    message: "Please accept Messenger terms before using messaging.",
+  });
+}
+
+const messengerAuth = [auth, requireMessengerTerms];
+
+/** Any registered user except self; blocked pairs cannot message. */
+async function canMessagePeer(userId, peerId) {
+  if (!mongoose.Types.ObjectId.isValid(peerId)) return false;
+  const myStr = userId.toString();
+  const peerStr = peerId.toString();
+  if (peerStr === myStr) return false;
+  if (await usersAreBlocked(userId, peerId)) return false;
+  const peer = await User.findById(peerId).select("_id").lean();
+  return !!peer;
+}
+
+function viewerIsUserA(conv, viewerId) {
+  return conv.userA.toString() === viewerId.toString();
 }
 
 function unreadForViewer(conv, viewerId) {
   const vid = viewerId.toString();
   if (!conv.lastMessageAt || !conv.lastMessageSenderId) return false;
+  const clearedAt = historyClearedAtForViewer(conv, viewerId);
+  if (clearedAt && new Date(conv.lastMessageAt) <= clearedAt) return false;
   if (conv.lastMessageSenderId.toString() === vid) return false;
-  const isA = conv.userA.toString() === vid;
+  const isA = viewerIsUserA(conv, viewerId);
   const readAt = isA ? conv.lastReadAtUserA : conv.lastReadAtUserB;
   if (!readAt) return true;
   return new Date(conv.lastMessageAt) > new Date(readAt);
+}
+
+function archivedForViewer(conv, viewerId) {
+  const isA = viewerIsUserA(conv, viewerId);
+  return isA ? !!conv.archivedForUserA : !!conv.archivedForUserB;
+}
+
+function deletedForViewer(conv, viewerId) {
+  const isA = viewerIsUserA(conv, viewerId);
+  return isA ? !!conv.deletedForUserA : !!conv.deletedForUserB;
+}
+
+function setArchivedForViewer(conv, viewerId, value) {
+  if (viewerIsUserA(conv, viewerId)) {
+    conv.archivedForUserA = value;
+  } else {
+    conv.archivedForUserB = value;
+  }
+}
+
+function clearDeletedFlags(conv) {
+  conv.deletedForUserA = false;
+  conv.deletedForUserB = false;
+}
+
+function historyClearedAtForViewer(conv, viewerId) {
+  const isA = viewerIsUserA(conv, viewerId);
+  const at = isA ? conv.historyClearedAtUserA : conv.historyClearedAtUserB;
+  return at ? new Date(at) : null;
+}
+
+function setHistoryClearedAtForViewer(conv, viewerId, when) {
+  if (viewerIsUserA(conv, viewerId)) {
+    conv.historyClearedAtUserA = when;
+  } else {
+    conv.historyClearedAtUserB = when;
+  }
+}
+
+async function refreshConversationPreview(conv) {
+  const last = await MessengerMessage.findOne({ conversation: conv._id })
+    .sort({ createdAt: -1 })
+    .lean();
+  if (!last) {
+    conv.lastMessageAt = null;
+    conv.lastMessageSnippet = "";
+    conv.lastMessageSenderId = null;
+  } else {
+    conv.lastMessageAt = last.createdAt || new Date();
+    conv.lastMessageSnippet = (last.body || "").slice(0, 160);
+    conv.lastMessageSenderId = last.sender;
+  }
+  await conv.save();
+}
+
+async function getFriendConversation(myId, peerId) {
+  const [ua, ub] = MessengerConversation.orderParticipantIds(myId, peerId);
+  return MessengerConversation.findOne({ userA: ua, userB: ub });
 }
 
 /** @param {import("express").Request} req */
@@ -42,7 +124,7 @@ function emitMessengerToUser(req, userId, payload) {
 // @route   GET /api/messenger/unread-count
 // @desc    Number of friend conversations with unread incoming messages
 // @access  Private
-router.get("/unread-count", auth, async (req, res) => {
+router.get("/unread-count", messengerAuth, async (req, res) => {
   try {
     const myId = req.user._id;
     const user = await User.findById(myId).select("friends").lean();
@@ -60,6 +142,9 @@ router.get("/unread-count", auth, async (req, res) => {
 
     let n = 0;
     for (const c of convs) {
+      if (deletedForViewer(c, myId)) continue;
+      if (archivedForViewer(c, myId)) continue;
+      if (!c.lastMessageAt) continue;
       if (unreadForViewer(c, myId)) n += 1;
     }
 
@@ -73,7 +158,7 @@ router.get("/unread-count", auth, async (req, res) => {
 // @route   GET /api/messenger/inbox
 // @desc    Friends list with last DM preview (DB-backed)
 // @access  Private
-router.get("/inbox", auth, async (req, res) => {
+router.get("/inbox", messengerAuth, async (req, res) => {
   try {
     const myId = req.user._id;
     const user = await User.findById(myId)
@@ -85,38 +170,56 @@ router.get("/inbox", auth, async (req, res) => {
       .lean();
 
     const friends = user?.friends || [];
-    const friendIds = friends.map((f) => f._id);
+    const peerById = new Map(friends.map((f) => [f._id.toString(), f]));
 
     const convs = await MessengerConversation.find({
-      $or: [
-        { userA: myId, userB: { $in: friendIds } },
-        { userB: myId, userA: { $in: friendIds } },
-      ],
+      $or: [{ userA: myId }, { userB: myId }],
     }).lean();
 
-    const convByPeer = new Map();
+    const missingPeerIds = new Set();
     for (const c of convs) {
       const other =
         c.userA.toString() === myId.toString() ? c.userB : c.userA;
-      convByPeer.set(other.toString(), c);
+      const pid = other.toString();
+      if (!peerById.has(pid)) missingPeerIds.add(pid);
+    }
+    if (missingPeerIds.size > 0) {
+      const extras = await User.find({
+        _id: { $in: [...missingPeerIds] },
+      })
+        .select("username fullName avatar status rating")
+        .lean();
+      for (const u of extras) {
+        peerById.set(u._id.toString(), u);
+      }
     }
 
-    const rows = friends.map((f) => {
-      const pid = f._id.toString();
-      const c = convByPeer.get(pid);
-      const hasUnread = c ? unreadForViewer(c, myId) : false;
-      return {
+    const rows = [];
+
+    for (const c of convs) {
+      if (!c.lastMessageAt) continue;
+      if (deletedForViewer(c, myId)) continue;
+      const clearedAt = historyClearedAtForViewer(c, myId);
+      if (clearedAt && new Date(c.lastMessageAt) <= clearedAt) continue;
+
+      const other =
+        c.userA.toString() === myId.toString() ? c.userB : c.userA;
+      const pid = other.toString();
+      if (!(await canMessagePeer(myId, pid))) continue;
+      const f = peerById.get(pid);
+      if (!f) continue;
+
+      rows.push({
         peerId: pid,
-        conversationId: c?._id?.toString() ?? null,
+        conversationId: c._id.toString(),
         name: f.fullName || f.username || "Player",
         avatar: f.avatar || undefined,
-        lastMessage: c?.lastMessageSnippet || "",
-        lastMessageAt: c?.lastMessageAt
-          ? new Date(c.lastMessageAt).toISOString()
-          : null,
-        hasUnread,
-      };
-    });
+        lastMessage: c.lastMessageSnippet || "",
+        lastMessageAt: new Date(c.lastMessageAt).toISOString(),
+        hasUnread: unreadForViewer(c, myId),
+        archived: archivedForViewer(c, myId),
+      });
+    }
 
     rows.sort((a, b) => {
       const ta = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
@@ -136,7 +239,7 @@ router.get("/inbox", auth, async (req, res) => {
 
 // @route   GET /api/messenger/peers/:peerId/messages
 // @access  Private (marks thread read for current user)
-router.get("/peers/:peerId/messages", auth, async (req, res) => {
+router.get("/peers/:peerId/messages", messengerAuth, async (req, res) => {
   try {
     const myId = req.user._id;
     const { peerId } = req.params;
@@ -147,11 +250,11 @@ router.get("/peers/:peerId/messages", auth, async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid peer" });
     }
 
-    const ok = await areFriends(myId, peerId);
+    const ok = await canMessagePeer(myId, peerId);
     if (!ok) {
       return res.status(403).json({
         success: false,
-        message: "You can only message friends",
+        message: "Cannot message this user",
       });
     }
 
@@ -162,6 +265,10 @@ router.get("/peers/:peerId/messages", auth, async (req, res) => {
     });
 
     if (!conv) {
+      return res.json({ success: true, data: { messages: [] } });
+    }
+
+    if (deletedForViewer(conv, myId)) {
       return res.json({ success: true, data: { messages: [] } });
     }
 
@@ -179,10 +286,14 @@ router.get("/peers/:peerId/messages", auth, async (req, res) => {
     );
     const before = req.query.before;
     const q = { conversation: conv._id };
+    const clearedAt = historyClearedAtForViewer(conv, myId);
+    if (clearedAt) {
+      q.createdAt = { $gt: clearedAt };
+    }
     if (before && mongoose.Types.ObjectId.isValid(before)) {
       const anchor = await MessengerMessage.findById(before).select("createdAt").lean();
       if (anchor?.createdAt) {
-        q.createdAt = { $lt: anchor.createdAt };
+        q.createdAt = { ...(q.createdAt || {}), $lt: anchor.createdAt };
       }
     }
 
@@ -209,16 +320,16 @@ router.get("/peers/:peerId/messages", auth, async (req, res) => {
 // @route   POST /api/messenger/peers/:peerId/read
 // @desc    Mark conversation read (e.g. while viewing live messages)
 // @access  Private
-router.post("/peers/:peerId/read", auth, async (req, res) => {
+router.post("/peers/:peerId/read", messengerAuth, async (req, res) => {
   try {
     const myId = req.user._id;
     const { peerId } = req.params;
     if (!mongoose.Types.ObjectId.isValid(peerId) || peerId === myId.toString()) {
       return res.status(400).json({ success: false, message: "Invalid peer" });
     }
-    const ok = await areFriends(myId, peerId);
+    const ok = await canMessagePeer(myId, peerId);
     if (!ok) {
-      return res.status(403).json({ success: false, message: "You can only message friends" });
+      return res.status(403).json({ success: false, message: "Cannot message this user" });
     }
     const [ua, ub] = MessengerConversation.orderParticipantIds(myId, peerId);
     const conv = await MessengerConversation.findOne({ userA: ua, userB: ub });
@@ -241,7 +352,7 @@ router.post("/peers/:peerId/read", auth, async (req, res) => {
 
 // @route   POST /api/messenger/peers/:peerId/messages
 // @access  Private
-router.post("/peers/:peerId/messages", auth, async (req, res) => {
+router.post("/peers/:peerId/messages", messengerAuth, async (req, res) => {
   try {
     const myId = req.user._id;
     const { peerId } = req.params;
@@ -262,15 +373,16 @@ router.post("/peers/:peerId/messages", auth, async (req, res) => {
       return res.status(400).json({ success: false, message: "Message too long" });
     }
 
-    const ok = await areFriends(myId, peerId);
+    const ok = await canMessagePeer(myId, peerId);
     if (!ok) {
       return res.status(403).json({
         success: false,
-        message: "You can only message friends",
+        message: "Cannot message this user",
       });
     }
 
     const conv = await MessengerConversation.findOrCreateForUsers(myId, peerId);
+    clearDeletedFlags(conv);
 
     const msg = await MessengerMessage.create({
       conversation: conv._id,
@@ -318,6 +430,141 @@ router.post("/peers/:peerId/messages", auth, async (req, res) => {
     });
   } catch (error) {
     console.error("[Messenger] send error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// @route   POST /api/messenger/peers/:peerId/archive
+// @body    { archived: boolean }
+router.post("/peers/:peerId/archive", messengerAuth, async (req, res) => {
+  try {
+    const myId = req.user._id;
+    const { peerId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(peerId) || peerId === myId.toString()) {
+      return res.status(400).json({ success: false, message: "Invalid peer" });
+    }
+    const ok = await canMessagePeer(myId, peerId);
+    if (!ok) {
+      return res.status(403).json({ success: false, message: "Cannot message this user" });
+    }
+    const archived = !!req.body?.archived;
+    const conv = await getFriendConversation(myId, peerId);
+    if (!conv) {
+      return res.json({ success: true, data: { archived } });
+    }
+    setArchivedForViewer(conv, myId, archived);
+    await conv.save();
+    return res.json({ success: true, data: { archived } });
+  } catch (error) {
+    console.error("[Messenger] archive error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// @route   POST /api/messenger/peers/:peerId/unread
+// @desc    Mark conversation unread for current user
+router.post("/peers/:peerId/unread", messengerAuth, async (req, res) => {
+  try {
+    const myId = req.user._id;
+    const { peerId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(peerId) || peerId === myId.toString()) {
+      return res.status(400).json({ success: false, message: "Invalid peer" });
+    }
+    const ok = await canMessagePeer(myId, peerId);
+    if (!ok) {
+      return res.status(403).json({ success: false, message: "Cannot message this user" });
+    }
+    const conv = await getFriendConversation(myId, peerId);
+    if (!conv || !conv.lastMessageAt) {
+      return res.json({ success: true, data: { ok: true } });
+    }
+    if (viewerIsUserA(conv, myId)) {
+      conv.lastReadAtUserA = null;
+    } else {
+      conv.lastReadAtUserB = null;
+    }
+    await conv.save();
+    return res.json({ success: true, data: { ok: true } });
+  } catch (error) {
+    console.error("[Messenger] unread error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// @route   DELETE /api/messenger/peers/:peerId/conversation
+// @desc    Hide chat for current user only (peer still sees thread)
+router.delete("/peers/:peerId/conversation", messengerAuth, async (req, res) => {
+  try {
+    const myId = req.user._id;
+    const { peerId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(peerId) || peerId === myId.toString()) {
+      return res.status(400).json({ success: false, message: "Invalid peer" });
+    }
+    const ok = await canMessagePeer(myId, peerId);
+    if (!ok) {
+      return res.status(403).json({ success: false, message: "Cannot message this user" });
+    }
+    let conv = await getFriendConversation(myId, peerId);
+    if (!conv) {
+      conv = await MessengerConversation.findOrCreateForUsers(myId, peerId);
+    }
+    const now = new Date();
+    setHistoryClearedAtForViewer(conv, myId, now);
+    if (viewerIsUserA(conv, myId)) {
+      conv.deletedForUserA = true;
+    } else {
+      conv.deletedForUserB = true;
+    }
+    await conv.save();
+    return res.json({ success: true, data: { ok: true } });
+  } catch (error) {
+    console.error("[Messenger] delete conversation error:", error);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// @route   DELETE /api/messenger/messages/:messageId
+router.delete("/messages/:messageId", messengerAuth, async (req, res) => {
+  try {
+    const myId = req.user._id;
+    const { messageId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ success: false, message: "Invalid message" });
+    }
+    const msg = await MessengerMessage.findById(messageId);
+    if (!msg) {
+      return res.status(404).json({ success: false, message: "Message not found" });
+    }
+    const conv = await MessengerConversation.findById(msg.conversation);
+    if (!conv) {
+      return res.status(404).json({ success: false, message: "Conversation not found" });
+    }
+    const peerId =
+      conv.userA.toString() === myId.toString()
+        ? conv.userB.toString()
+        : conv.userA.toString();
+    const ok = await canMessagePeer(myId, peerId);
+    if (!ok) {
+      return res.status(403).json({ success: false, message: "Not allowed" });
+    }
+    if (msg.sender.toString() !== myId.toString()) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only delete your own messages",
+      });
+    }
+    await MessengerMessage.deleteOne({ _id: msg._id });
+    await refreshConversationPreview(conv);
+    const payload = {
+      type: "message-deleted",
+      messageId: messageId.toString(),
+      conversationId: conv._id.toString(),
+    };
+    emitMessengerToUser(req, peerId, { ...payload, inboxPeerId: myId.toString() });
+    emitMessengerToUser(req, myId.toString(), { ...payload, inboxPeerId: peerId });
+    return res.json({ success: true, data: { ok: true, conversationId: conv._id.toString() } });
+  } catch (error) {
+    console.error("[Messenger] delete message error:", error);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 });

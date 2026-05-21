@@ -27,6 +27,14 @@ const messengerConversationSchema = new mongoose.Schema(
     lastReadAtUserA: { type: Date, default: null },
     /** Last time userB opened this thread (GET messages). */
     lastReadAtUserB: { type: Date, default: null },
+    archivedForUserA: { type: Boolean, default: false },
+    archivedForUserB: { type: Boolean, default: false },
+    /** User hid/deleted chat from inbox; restored when a new message arrives. */
+    deletedForUserA: { type: Boolean, default: false },
+    deletedForUserB: { type: Boolean, default: false },
+    /** Hide messages at or before this time for userA (set on delete-chat). */
+    historyClearedAtUserA: { type: Date, default: null },
+    historyClearedAtUserB: { type: Date, default: null },
   },
   { timestamps: true }
 );

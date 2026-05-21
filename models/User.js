@@ -164,6 +164,12 @@ const userSchema = new mongoose.Schema(
         ref: "User",
       },
     ],
+    blockedUsers: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
     friendRequests: [
       {
         from: {
@@ -232,6 +238,15 @@ const userSchema = new mongoose.Schema(
       index: true,
     },
     acceptedPoliciesAt: {
+      type: Date,
+      default: null,
+    },
+    hasAcceptedMessengerTerms: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    acceptedMessengerTermsAt: {
       type: Date,
       default: null,
     },
