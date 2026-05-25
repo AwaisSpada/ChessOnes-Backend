@@ -31,6 +31,7 @@ const upload = multer({
 });
 
 const UserReport = require("../models/UserReport");
+const { OTHER_USER_FIELDS } = require("../utils/userProjections");
 const {
   isValidReportReason,
   getCategoryLabel,
@@ -46,10 +47,31 @@ const {
 
 const router = express.Router();
 
+// Up to 5 evidence images, each ≤5MB (multer.fileFilter inherited from `upload`)
+const MAX_REPORT_EVIDENCE_IMAGES = 5;
+const reportEvidenceUpload = upload.array(
+  "evidenceImages",
+  MAX_REPORT_EVIDENCE_IMAGES
+);
+
 // @route   POST /api/users/report
 router.post(
   "/report",
   auth,
+  (req, res, next) => {
+    reportEvidenceUpload(req, res, (err) => {
+      if (err) {
+        const message =
+          err && err.code === "LIMIT_FILE_SIZE"
+            ? "Each evidence image must be 5MB or smaller"
+            : err && err.code === "LIMIT_UNEXPECTED_FILE"
+            ? `You can attach at most ${MAX_REPORT_EVIDENCE_IMAGES} evidence images`
+            : err?.message || "Failed to read uploaded images";
+        return res.status(400).json({ success: false, message });
+      }
+      next();
+    });
+  },
   [
     body("reportedUserId").isMongoId(),
     body("category").isIn(["abuse", "fair_play", "account_profile", "other"]),
@@ -57,6 +79,7 @@ router.post(
     body("details").optional().isString().trim().isLength({ max: 2000 }),
   ],
   async (req, res) => {
+    const uploadedPublicIds = [];
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
@@ -90,9 +113,7 @@ router.post(
       }
 
       const [reporter, reported] = await Promise.all([
-        User.findById(req.user._id).select(
-          "username fullName email"
-        ),
+        User.findById(req.user._id).select("username fullName email"),
         User.findById(reportedUserId).select("username fullName email _id"),
       ]);
 
@@ -105,12 +126,51 @@ router.post(
 
       const trimmedDetails = (details || "").trim();
 
+      // Upload any attached evidence images to Cloudinary (no face crop;
+      // keep original aspect ratio so screenshots are readable for moderators).
+      const evidenceImages = [];
+      const files = Array.isArray(req.files) ? req.files : [];
+      if (files.length > MAX_REPORT_EVIDENCE_IMAGES) {
+        return res.status(400).json({
+          success: false,
+          message: `You can attach at most ${MAX_REPORT_EVIDENCE_IMAGES} evidence images`,
+        });
+      }
+      for (const file of files) {
+        const uploadResult = await uploadImage(
+          file.buffer,
+          `chessones/user-reports/${req.user._id}`,
+          null,
+          {
+            transformation: [
+              {
+                width: 1600,
+                height: 1600,
+                crop: "limit",
+                quality: "auto",
+                fetch_format: "auto",
+              },
+            ],
+          }
+        );
+        if (uploadResult?.public_id) {
+          uploadedPublicIds.push(uploadResult.public_id);
+        }
+        if (uploadResult?.secure_url) {
+          evidenceImages.push({
+            url: uploadResult.secure_url,
+            publicId: uploadResult.public_id || "",
+          });
+        }
+      }
+
       await UserReport.create({
         reporter: req.user._id,
         reportedUser: reportedUserId,
         category,
         reasonId,
         details: trimmedDetails,
+        evidenceImages,
       });
 
       const reporterDisplay =
@@ -133,7 +193,15 @@ router.post(
           categoryLabel,
           reasonLabel,
           details: trimmedDetails,
+          evidenceImages,
         });
+        const evidenceLines = evidenceImages.length
+          ? [
+              "",
+              `Evidence images (${evidenceImages.length}):`,
+              ...evidenceImages.map((img, idx) => `  ${idx + 1}. ${img.url}`),
+            ]
+          : [];
         const text = [
           `User report — ${reporterDisplay} reported ${reportedDisplay}`,
           "",
@@ -146,6 +214,7 @@ router.post(
           `Category: ${categoryLabel}`,
           `Reason: ${reasonLabel}`,
           trimmedDetails ? `\nDetails:\n${trimmedDetails}` : "",
+          ...evidenceLines,
         ]
           .filter(Boolean)
           .join("\n");
@@ -167,6 +236,15 @@ router.post(
       });
     } catch (error) {
       console.error("Report user error:", error);
+      // Best-effort cleanup of any images we uploaded before the failure so we
+      // don't leave orphaned files in Cloudinary.
+      for (const publicId of uploadedPublicIds) {
+        try {
+          await deleteImage(publicId);
+        } catch (cleanupErr) {
+          console.error("Cleanup of report image failed:", cleanupErr);
+        }
+      }
       return res.status(500).json({ success: false, message: "Server error" });
     }
   }
@@ -193,11 +271,13 @@ router.get("/profile", auth, async (req, res) => {
         .populate("friends", "username fullName avatar status rating")
         .populate("badges.badgeId", "name description imageUrl");
     } else {
-      // Public profile for other users (no password, no friends list populated with full data)
+      // Public profile for other users — explicit allow-list (see
+      // utils/userProjections). Sensitive fields like email, preferences,
+      // friendRequests, blockedUsers, oauth provider, role, suspension and
+      // policy-acceptance flags never reach the client this way.
       user = await User.findById(targetUserId)
-        .select("-password -email")
+        .select(OTHER_USER_FIELDS)
         .populate("badges.badgeId", "name description imageUrl");
-      // Only populate basic friend info
       if (user && user.friends && user.friends.length > 0) {
         await user.populate("friends", "username fullName avatar status rating");
       }

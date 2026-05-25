@@ -361,6 +361,7 @@ function buildUserReportEmail({
   categoryLabel,
   reasonLabel,
   details,
+  evidenceImages = [],
 }) {
   const safeReporter = escapeHtml(reporterName);
   const safeReporterUser = escapeHtml(reporterUsername || "—");
@@ -385,6 +386,38 @@ function buildUserReportEmail({
         <tr>
           <td style="padding: 8px 28px 16px 28px; font-size: 14px; line-height: 22px; color: #cbd5e1;">
             ${safeDetails}
+          </td>
+        </tr>`
+    : "";
+
+  const safeEvidence = Array.isArray(evidenceImages)
+    ? evidenceImages
+        .map((img) => (img && img.url ? escapeHtml(img.url) : ""))
+        .filter(Boolean)
+    : [];
+  const evidenceBlock = safeEvidence.length
+    ? `
+        <tr>
+          <td style="padding: 12px 28px 0 28px; font-size: 14px; line-height: 22px; color: #94a3b8;">
+            <strong style="color:#e2e8f0;">Evidence (${safeEvidence.length} image${safeEvidence.length === 1 ? "" : "s"}):</strong>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding: 8px 28px 16px 28px;">
+            <table cellpadding="0" cellspacing="0" role="presentation" style="border-collapse: separate; border-spacing: 8px 8px;">
+              <tr>
+                ${safeEvidence
+                  .map(
+                    (url) => `
+                <td style="padding: 0; vertical-align: top;">
+                  <a href="${url}" target="_blank" rel="noopener noreferrer" style="display: inline-block; border-radius: 10px; overflow: hidden; border: 1px solid rgba(56,189,248,0.25);">
+                    <img src="${url}" alt="Evidence" width="180" style="display: block; width: 180px; height: auto; border: 0; outline: none;" />
+                  </a>
+                </td>`
+                  )
+                  .join("")}
+              </tr>
+            </table>
           </td>
         </tr>`
     : "";
@@ -419,6 +452,7 @@ function buildUserReportEmail({
           </td>
         </tr>
         ${detailsBlock}
+        ${evidenceBlock}
         <tr>
           <td style="padding: 8px 28px 24px 28px; font-size: 13px; line-height: 20px; color: #64748b;">
             Submitted ${new Date().toUTCString()}

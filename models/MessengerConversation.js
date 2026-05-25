@@ -17,7 +17,10 @@ const messengerConversationSchema = new mongoose.Schema(
       required: true,
     },
     lastMessageAt: { type: Date, default: null },
-    lastMessageSnippet: { type: String, default: "", maxlength: 200 },
+    // Stored as an encrypted envelope (see utils/messageCrypto). The plaintext
+    // is sliced to 160 chars before encryption, so the envelope is ~280 chars;
+    // we keep some slack for the prefix/iv/tag so the column has no hard cap.
+    lastMessageSnippet: { type: String, default: "" },
     lastMessageSenderId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

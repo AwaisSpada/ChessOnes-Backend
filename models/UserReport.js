@@ -29,6 +29,16 @@ const userReportSchema = new mongoose.Schema(
       default: "",
       maxlength: 2000,
     },
+    evidenceImages: {
+      type: [
+        {
+          url: { type: String, required: true },
+          publicId: { type: String, default: "" },
+          _id: false,
+        },
+      ],
+      default: [],
+    },
     status: {
       type: String,
       enum: ["pending", "reviewed", "dismissed"],

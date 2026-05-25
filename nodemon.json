@@ -1,0 +1,22 @@
+{
+  "watch": [
+    "server.js",
+    "routes",
+    "models",
+    "middleware",
+    "utils",
+    "services",
+    "sockets",
+    "config"
+  ],
+  "ext": "js,json",
+  "ignore": [
+    "node_modules",
+    "stockfish",
+    "scripts",
+    "logs",
+    "*.test.js",
+    "tmp"
+  ],
+  "delay": 200
+}

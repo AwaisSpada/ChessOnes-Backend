@@ -5,6 +5,7 @@ const User = require("../models/User");
 const MessengerConversation = require("../models/MessengerConversation");
 const MessengerMessage = require("../models/MessengerMessage");
 const { usersAreBlocked } = require("../utils/user-blocks");
+const { encrypt, decrypt } = require("../utils/messageCrypto");
 
 const router = express.Router();
 
@@ -90,7 +91,12 @@ function setHistoryClearedAtForViewer(conv, viewerId, when) {
 }
 
 async function refreshConversationPreview(conv) {
-  const last = await MessengerMessage.findOne({ conversation: conv._id })
+  // Only consider live (non-soft-deleted) messages for the inbox preview so
+  // both participants see the chat as if the deleted message never happened.
+  const last = await MessengerMessage.findOne({
+    conversation: conv._id,
+    deletedAt: null,
+  })
     .sort({ createdAt: -1 })
     .lean();
   if (!last) {
@@ -98,8 +104,10 @@ async function refreshConversationPreview(conv) {
     conv.lastMessageSnippet = "";
     conv.lastMessageSenderId = null;
   } else {
+    const plain = decrypt(last.body || "");
     conv.lastMessageAt = last.createdAt || new Date();
-    conv.lastMessageSnippet = (last.body || "").slice(0, 160);
+    // Snippet is stored encrypted; decrypt on read in the inbox endpoint.
+    conv.lastMessageSnippet = encrypt((plain || "").slice(0, 160));
     conv.lastMessageSenderId = last.sender;
   }
   await conv.save();
@@ -214,7 +222,7 @@ router.get("/inbox", messengerAuth, async (req, res) => {
         conversationId: c._id.toString(),
         name: f.fullName || f.username || "Player",
         avatar: f.avatar || undefined,
-        lastMessage: c.lastMessageSnippet || "",
+        lastMessage: decrypt(c.lastMessageSnippet || ""),
         lastMessageAt: new Date(c.lastMessageAt).toISOString(),
         hasUnread: unreadForViewer(c, myId),
         archived: archivedForViewer(c, myId),
@@ -285,7 +293,9 @@ router.get("/peers/:peerId/messages", messengerAuth, async (req, res) => {
       PAGE_SIZE_MAX
     );
     const before = req.query.before;
-    const q = { conversation: conv._id };
+    // Hide soft-deleted messages from the regular UI for both participants;
+    // they remain visible only in the admin investigation tool.
+    const q = { conversation: conv._id, deletedAt: null };
     const clearedAt = historyClearedAtForViewer(conv, myId);
     if (clearedAt) {
       q.createdAt = { $gt: clearedAt };
@@ -306,7 +316,7 @@ router.get("/peers/:peerId/messages", messengerAuth, async (req, res) => {
     const messages = chronological.map((m) => ({
       id: m._id.toString(),
       senderId: m.sender.toString(),
-      body: m.body,
+      body: decrypt(m.body || ""),
       createdAt: new Date(m.createdAt).getTime(),
     }));
 
@@ -384,6 +394,7 @@ router.post("/peers/:peerId/messages", messengerAuth, async (req, res) => {
     const conv = await MessengerConversation.findOrCreateForUsers(myId, peerId);
     clearDeletedFlags(conv);
 
+    // Model's pre-validate hook AES-256-GCM encrypts `body` before insert.
     const msg = await MessengerMessage.create({
       conversation: conv._id,
       sender: myId,
@@ -391,7 +402,7 @@ router.post("/peers/:peerId/messages", messengerAuth, async (req, res) => {
     });
 
     conv.lastMessageAt = msg.createdAt || new Date();
-    conv.lastMessageSnippet = trimmed.slice(0, 160);
+    conv.lastMessageSnippet = encrypt(trimmed.slice(0, 160));
     conv.lastMessageSenderId = myId;
     await conv.save();
 
@@ -553,7 +564,13 @@ router.delete("/messages/:messageId", messengerAuth, async (req, res) => {
         message: "You can only delete your own messages",
       });
     }
-    await MessengerMessage.deleteOne({ _id: msg._id });
+    if (!msg.deletedAt) {
+      // Soft-delete so the row + ciphertext stay for moderator investigation
+      // (per Privacy Policy §11) but both participants stop seeing it.
+      msg.deletedAt = new Date();
+      msg.deletedBy = myId;
+      await msg.save();
+    }
     await refreshConversationPreview(conv);
     const payload = {
       type: "message-deleted",

@@ -15,21 +15,31 @@ cloudinary.config({
  * @param {string} publicId - Public ID for the image (optional)
  * @returns {Promise<Object>} Cloudinary upload result
  */
-const uploadImage = async (imageBuffer, folder = "avatars", publicId = null) => {
+const AVATAR_TRANSFORMATION = [
+  {
+    width: 400,
+    height: 400,
+    crop: "fill",
+    gravity: "face",
+    quality: "auto",
+    fetch_format: "auto",
+  },
+];
+
+const uploadImage = async (
+  imageBuffer,
+  folder = "avatars",
+  publicId = null,
+  options = {}
+) => {
   return new Promise((resolve, reject) => {
     const uploadOptions = {
       folder: folder,
       resource_type: "image",
-      transformation: [
-        {
-          width: 400,
-          height: 400,
-          crop: "fill",
-          gravity: "face",
-          quality: "auto",
-          fetch_format: "auto",
-        },
-      ],
+      transformation:
+        options.transformation !== undefined
+          ? options.transformation
+          : AVATAR_TRANSFORMATION,
     };
 
     if (publicId) {

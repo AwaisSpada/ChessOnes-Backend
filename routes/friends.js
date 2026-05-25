@@ -1055,12 +1055,17 @@ router.get("/search", auth, async (req, res) => {
             req?.from?.toString() === currentUserId.toString()
         );
 
+      // Note: `email` is intentionally NOT included in the response. The DB
+      // query still matches by email substring (so users can find a friend by
+      // typing their email), but we never leak the email back to the
+      // requester — this stops anyone from harvesting addresses through the
+      // search box. See utils/userProjections for the full sensitive-field
+      // policy.
       return {
         id: user._id,
         _id: user._id,
         username: user.username,
         fullName: user.fullName,
-        email: user.email,
         avatar: user.avatar,
         rating: user.rating,
         status: user.status,

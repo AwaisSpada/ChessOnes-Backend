@@ -1,10 +1,14 @@
 const express = require("express");
+const mongoose = require("mongoose");
 const { body, validationResult } = require("express-validator");
 const multer = require("multer");
 const User = require("../models/User");
 const News = require("../models/News");
 const Badge = require("../models/Badge");
 const Stats = require("../models/Stats");
+const MessengerConversation = require("../models/MessengerConversation");
+const MessengerMessage = require("../models/MessengerMessage");
+const AdminMessageAccessLog = require("../models/AdminMessageAccessLog");
 const auth = require("../middleware/auth");
 const isAdmin = require("../middleware/isAdmin");
 const {
@@ -12,6 +16,7 @@ const {
   deleteImage,
   extractPublicId,
 } = require("../utils/cloudinary");
+const { decrypt } = require("../utils/messageCrypto");
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
@@ -810,6 +815,238 @@ router.delete("/badges/:badgeId", async (req, res) => {
     });
   }
 });
+
+// ========== MESSENGER INVESTIGATION ==========
+// Privacy Policy §11: admins may access message content to investigate abuse,
+// safety, or legal matters. Every fetch is logged in AdminMessageAccessLog
+// (admin id, conversation id, reason, IP, UA, message count, timestamp).
+
+/**
+ * @route GET /api/admin/messenger/conversations
+ *
+ * List conversations newest-first. Optional `search` filters by either
+ * participant's username/fullName/email. Pagination: ?page=&limit=.
+ */
+router.get("/messenger/conversations", async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 20, 1),
+      100
+    );
+    const skip = (page - 1) * limit;
+    const search = (req.query.search || "").toString().trim();
+
+    let participantFilter = null;
+    if (search) {
+      const regex = new RegExp(
+        search.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&"),
+        "i"
+      );
+      const matchedUsers = await User.find({
+        $or: [{ username: regex }, { fullName: regex }, { email: regex }],
+      })
+        .select("_id")
+        .lean();
+      const ids = matchedUsers.map((u) => u._id);
+      participantFilter = ids.length
+        ? { $or: [{ userA: { $in: ids } }, { userB: { $in: ids } }] }
+        : { _id: { $exists: false } }; // no matches → empty result
+    }
+
+    const baseFilter = {
+      lastMessageAt: { $ne: null },
+      ...(participantFilter || {}),
+    };
+
+    const [total, conversations] = await Promise.all([
+      MessengerConversation.countDocuments(baseFilter),
+      MessengerConversation.find(baseFilter)
+        .sort({ lastMessageAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate("userA", "username fullName avatar email")
+        .populate("userB", "username fullName avatar email")
+        .lean(),
+    ]);
+
+    const ids = conversations.map((c) => c._id);
+    // Get total + deleted counts in a single aggregation so the admin row
+    // can show, e.g. "42 messages · 3 deleted".
+    const counts = ids.length
+      ? await MessengerMessage.aggregate([
+          { $match: { conversation: { $in: ids } } },
+          {
+            $group: {
+              _id: "$conversation",
+              total: { $sum: 1 },
+              deleted: {
+                $sum: {
+                  $cond: [{ $ifNull: ["$deletedAt", false] }, 1, 0],
+                },
+              },
+            },
+          },
+        ])
+      : [];
+    const countMap = new Map(
+      counts.map((c) => [c._id.toString(), { total: c.total, deleted: c.deleted }])
+    );
+
+    const rows = conversations.map((c) => {
+      const counts = countMap.get(c._id.toString()) || { total: 0, deleted: 0 };
+      return {
+        conversationId: c._id.toString(),
+        participants: [c.userA, c.userB]
+          .filter(Boolean)
+          .map((u) => ({
+            id: u._id.toString(),
+            username: u.username,
+            fullName: u.fullName || "",
+            avatar: u.avatar || "",
+            email: u.email || "",
+          })),
+        lastMessageAt: c.lastMessageAt
+          ? new Date(c.lastMessageAt).toISOString()
+          : null,
+        lastMessagePreview: decrypt(c.lastMessageSnippet || "") || "",
+        lastMessageSenderId: c.lastMessageSenderId
+          ? c.lastMessageSenderId.toString()
+          : null,
+        messageCount: counts.total,
+        deletedMessageCount: counts.deleted,
+        createdAt: c.createdAt ? new Date(c.createdAt).toISOString() : null,
+      };
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        conversations: rows,
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.max(Math.ceil(total / limit), 1),
+        },
+      },
+    });
+  } catch (error) {
+    console.error("[Admin] messenger conversations error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Failed to load conversations" });
+  }
+});
+
+/**
+ * @route GET /api/admin/messenger/conversations/:conversationId/messages
+ *
+ * Returns the full plaintext thread for a conversation (decrypted on read).
+ * Writes one audit row per call. Accepts an optional `reason` query string
+ * (≤500 chars) which is recorded with the audit entry.
+ */
+router.get(
+  "/messenger/conversations/:conversationId/messages",
+  async (req, res) => {
+    try {
+      const { conversationId } = req.params;
+      if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid conversation id" });
+      }
+
+      const conv = await MessengerConversation.findById(conversationId)
+        .populate("userA", "username fullName avatar email")
+        .populate("userB", "username fullName avatar email")
+        .lean();
+      if (!conv) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Conversation not found" });
+      }
+
+      const limit = Math.min(
+        Math.max(parseInt(req.query.limit, 10) || 500, 1),
+        2000
+      );
+
+      // Investigation reads everything, including soft-deleted rows.
+      const raw = await MessengerMessage.find({ conversation: conv._id })
+        .sort({ createdAt: 1 })
+        .limit(limit)
+        .lean();
+
+      const messages = raw.map((m) => ({
+        id: m._id.toString(),
+        senderId: m.sender.toString(),
+        body: decrypt(m.body || ""),
+        createdAt: new Date(m.createdAt).toISOString(),
+        deletedAt: m.deletedAt ? new Date(m.deletedAt).toISOString() : null,
+        deletedBy: m.deletedBy ? m.deletedBy.toString() : null,
+      }));
+
+      // Audit log — privacy-policy mandated.
+      try {
+        const reason = (req.query.reason || "").toString().slice(0, 500);
+        const ip =
+          (req.headers["x-forwarded-for"] || "")
+            .toString()
+            .split(",")[0]
+            .trim() ||
+          req.ip ||
+          "";
+        const userAgent = (req.headers["user-agent"] || "")
+          .toString()
+          .slice(0, 500);
+        await AdminMessageAccessLog.create({
+          admin: req.user._id,
+          conversation: conv._id,
+          participants: [conv.userA?._id, conv.userB?._id].filter(Boolean),
+          reason,
+          messagesReturned: messages.length,
+          ip,
+          userAgent,
+        });
+      } catch (logErr) {
+        console.error("[Admin] failed to write access log:", logErr);
+      }
+
+      const participantPayload = [conv.userA, conv.userB]
+        .filter(Boolean)
+        .map((u) => ({
+          id: u._id.toString(),
+          username: u.username,
+          fullName: u.fullName || "",
+          avatar: u.avatar || "",
+          email: u.email || "",
+        }));
+
+      return res.json({
+        success: true,
+        data: {
+          conversation: {
+            conversationId: conv._id.toString(),
+            participants: participantPayload,
+            createdAt: conv.createdAt
+              ? new Date(conv.createdAt).toISOString()
+              : null,
+            lastMessageAt: conv.lastMessageAt
+              ? new Date(conv.lastMessageAt).toISOString()
+              : null,
+          },
+          messages,
+        },
+      });
+    } catch (error) {
+      console.error("[Admin] messenger messages error:", error);
+      return res
+        .status(500)
+        .json({ success: false, message: "Failed to load messages" });
+    }
+  }
+);
 
 module.exports = router;
 
