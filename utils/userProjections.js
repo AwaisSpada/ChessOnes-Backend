@@ -99,9 +99,18 @@ function publicUserView(user) {
   return out;
 }
 
+/** Human-readable join label from Mongoose `createdAt` (signup timestamp). */
+function formatMemberSince(createdAt) {
+  if (!createdAt) return undefined;
+  const d = new Date(createdAt);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+
 module.exports = {
   OTHER_USER_FIELDS,
   SEARCH_USER_FIELDS,
   SENSITIVE_KEYS,
   publicUserView,
+  formatMemberSince,
 };

@@ -31,7 +31,7 @@ const upload = multer({
 });
 
 const UserReport = require("../models/UserReport");
-const { OTHER_USER_FIELDS } = require("../utils/userProjections");
+const { OTHER_USER_FIELDS, formatMemberSince } = require("../utils/userProjections");
 const {
   isValidReportReason,
   getCategoryLabel,
@@ -301,10 +301,14 @@ router.get("/profile", auth, async (req, res) => {
       hasBlockedMe = userHasBlocked(themDoc, myIdStr);
     }
 
+    const userPayload = user.toObject();
+    const memberSince = formatMemberSince(userPayload.createdAt);
+    if (memberSince) userPayload.memberSince = memberSince;
+
     res.json({
       success: true,
       data: {
-        user,
+        user: userPayload,
         stats,
         isOwnProfile,
         isBlockedByMe,

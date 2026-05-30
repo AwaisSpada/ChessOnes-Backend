@@ -4,6 +4,13 @@ const Game = require("../models/Game");
 const User = require("../models/User");
 const Stats = require("../models/Stats");
 const auth = require("../middleware/auth");
+const {
+  attachReviewAccuracyToGames,
+  attachRatingChangeToGames,
+  getPlayedTodayCounts,
+  fetchUserGamesByPlayEndTime,
+  userGamesMatch,
+} = require("../utils/game-list-enrichment");
 const requirePoliciesAccepted = require("../middleware/requirePoliciesAccepted");
 const {
   isMoveLegal,
@@ -2706,9 +2713,7 @@ router.get("/user/:userId", auth, async (req, res) => {
     const { status = "all", limit = 20, page = 1 } = req.query;
     const userId = req.params.userId;
 
-    const query = {
-      $or: [{ "players.white": userId }, { "players.black": userId }],
-    };
+    const query = { ...userGamesMatch(userId) };
 
     if (status !== "all") {
       // "completed" is used by home/profile history; include abandoned so first-move
@@ -2722,31 +2727,38 @@ router.get("/user/:userId", auth, async (req, res) => {
 
     const limitNum = Math.min(Math.max(Number.parseInt(limit, 10) || 20, 1), 200);
     const pageNum = Math.max(Number.parseInt(page, 10) || 1, 1);
+    const skip = (pageNum - 1) * limitNum;
 
-    const games = await Game.find(query)
-      .populate(
-        "players.white players.black",
-        "username fullName avatar country rating isDeleted"
-      )
-      .populate("bot", "key name photoUrl difficulty elo subtitle description")
-      .sort({ updatedAt: -1 })
-      .limit(limitNum)
-      .skip((pageNum - 1) * limitNum);
+    const [games, total] = await Promise.all([
+      fetchUserGamesByPlayEndTime(userId, query, skip, limitNum),
+      Game.countDocuments(query),
+    ]);
 
-    const total = await Game.countDocuments(query);
+    const enrichedGames = attachRatingChangeToGames(
+      await attachReviewAccuracyToGames(games, userId),
+      userId
+    );
+
+    const payload = {
+      games: enrichedGames,
+      pagination: {
+        current: pageNum,
+        total: Math.ceil(total / limitNum) || 1,
+        count: enrichedGames.length,
+        totalGames: total,
+        limit: limitNum,
+      },
+    };
+
+    if (pageNum === 1) {
+      payload.summary = {
+        playedToday: await getPlayedTodayCounts(userId),
+      };
+    }
 
     res.json({
       success: true,
-      data: {
-        games,
-        pagination: {
-          current: pageNum,
-          total: Math.ceil(total / limitNum) || 1,
-          count: games.length,
-          totalGames: total,
-          limit: limitNum,
-        },
-      },
+      data: payload,
     });
   } catch (error) {
     console.error("Get user games error:", error);

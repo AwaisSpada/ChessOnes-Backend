@@ -17,6 +17,10 @@ const {
   extractPublicId,
 } = require("../utils/cloudinary");
 const { decrypt } = require("../utils/messageCrypto");
+const { formatMemberSince } = require("../utils/userProjections");
+
+/** Matches socket presence: users marked online or in an active game. */
+const ACTIVE_USER_STATUSES = ["online", "in-game"];
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
@@ -54,6 +58,8 @@ router.get("/users", async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const skip = (page - 1) * limit;
     const search = req.query.search || "";
+    const onlineOnly =
+      req.query.onlineOnly === "true" || req.query.onlineOnly === "1";
 
     // Build query
     const query = {};
@@ -70,6 +76,13 @@ router.get("/users", async (req, res) => {
       query.isDeleted = false;
     }
 
+    if (onlineOnly) {
+      query.status = { $in: ACTIVE_USER_STATUSES };
+    }
+
+    const baseCountQuery = { ...query };
+    delete baseCountQuery.status;
+
     const users = await User.find(query)
       .select("-password")
       .select("username email fullName avatar status role ratings badges createdAt isSuspended")
@@ -78,14 +91,25 @@ router.get("/users", async (req, res) => {
       .limit(limit)
       .lean();
 
-    const total = await User.countDocuments(query);
+    const [total, totalUsers, onlineCount] = await Promise.all([
+      User.countDocuments(query),
+      User.countDocuments(baseCountQuery),
+      User.countDocuments({
+        ...baseCountQuery,
+        status: { $in: ACTIVE_USER_STATUSES },
+      }),
+    ]);
 
     // Get stats for each user
     const usersWithStats = await Promise.all(
       users.map(async (user) => {
         const stats = await Stats.findOne({ user: user._id }).lean();
+        const memberSince = formatMemberSince(user.createdAt);
+        const isOnline = ACTIVE_USER_STATUSES.includes(user.status);
         return {
           ...user,
+          ...(memberSince ? { memberSince } : {}),
+          isOnline,
           stats: stats || {
             wins: { total: 0 },
             gamesPlayed: { total: 0 },
@@ -103,6 +127,10 @@ router.get("/users", async (req, res) => {
           limit,
           total,
           pages: Math.ceil(total / limit),
+        },
+        summary: {
+          totalUsers,
+          onlineCount,
         },
       },
     });

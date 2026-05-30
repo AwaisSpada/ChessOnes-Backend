@@ -1,4 +1,5 @@
 const User = require("../models/User");
+const Game = require("../models/Game");
 
 /**
  * Update Glicko-2 ratings for both players after a game ends
@@ -199,6 +200,25 @@ async function updateGameRatings(game, io) {
     // Calculate rating changes
     const whiteRatingChange = Math.round(updatedRatings.player1.rating - whiteOldRating);
     const blackRatingChange = Math.round(updatedRatings.player2.rating - blackOldRating);
+
+    try {
+      await Game.findOneAndUpdate(
+        { gameId: game.gameId },
+        {
+          $set: {
+            ratingChanges: {
+              white: whiteRatingChange,
+              black: blackRatingChange,
+            },
+          },
+        }
+      );
+    } catch (persistErr) {
+      console.error(
+        `[Rating] Failed to persist ratingChanges on game ${game.gameId}:`,
+        persistErr
+      );
+    }
     
     // Emit rating update events via Socket.io
     if (io) {

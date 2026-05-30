@@ -235,6 +235,11 @@ const gameSchema = new mongoose.Schema(
         default: null,
       },
     },
+    /** Per-side Glicko delta when a rated human-vs-human game ends (null when unrated/bot). */
+    ratingChanges: {
+      white: { type: Number, default: null },
+      black: { type: Number, default: null },
+    },
   },
   {
     timestamps: true,
