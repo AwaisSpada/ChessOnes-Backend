@@ -415,6 +415,9 @@ router.put(
     body("ageGroup")
       .optional()
       .isIn(["under-18", "18-25", "26-35", "36-50", "over-50"]),
+    body("status")
+      .optional()
+      .isIn(["online", "away", "busy", "invisible"]),
     body("currentPassword").optional().isLength({ min: 6 }),
     body("newPassword").optional().isLength({ min: 6 }),
     body("confirmNewPassword").optional().isLength({ min: 6 }),
@@ -437,6 +440,7 @@ router.put(
         ageGroup,
         country,
         avatar,
+        status,
         currentPassword,
         newPassword,
         confirmNewPassword,
@@ -469,6 +473,7 @@ router.put(
       if (ageGroup) updateFields.ageGroup = ageGroup;
       if (country !== undefined) updateFields.country = country;
       if (avatar) updateFields.avatar = avatar;
+      if (status !== undefined) updateFields.status = status;
 
       const user = await User.findById(req.user._id);
       if (!user) {
