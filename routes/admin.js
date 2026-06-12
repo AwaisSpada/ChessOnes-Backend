@@ -6,6 +6,9 @@ const User = require("../models/User");
 const News = require("../models/News");
 const Badge = require("../models/Badge");
 const Stats = require("../models/Stats");
+const DailyPuzzleUserProgress = require("../models/DailyPuzzleUserProgress");
+const PuzzleAttempt = require("../models/PuzzleAttempt");
+const { todayDateKey } = require("../utils/daily-puzzle-dates");
 const MessengerConversation = require("../models/MessengerConversation");
 const MessengerMessage = require("../models/MessengerMessage");
 const AdminMessageAccessLog = require("../models/AdminMessageAccessLog");
@@ -100,23 +103,52 @@ router.get("/users", async (req, res) => {
       }),
     ]);
 
-    // Get stats for each user
-    const usersWithStats = await Promise.all(
-      users.map(async (user) => {
-        const stats = await Stats.findOne({ user: user._id }).lean();
-        const memberSince = formatMemberSince(user.createdAt);
-        const isOnline = ACTIVE_USER_STATUSES.includes(user.status);
-        return {
-          ...user,
-          ...(memberSince ? { memberSince } : {}),
-          isOnline,
-          stats: stats || {
-            wins: { total: 0 },
-            gamesPlayed: { total: 0 },
-          },
-        };
-      })
+    const userIds = users.map((user) => user._id);
+    const today = todayDateKey();
+
+    const [statsDocs, dailySolvedTodayDocs, normalSolvedCounts] =
+      await Promise.all([
+        Stats.find({ user: { $in: userIds } }).lean(),
+        DailyPuzzleUserProgress.find({
+          user: { $in: userIds },
+          dateKey: today,
+          solved: true,
+        })
+          .select("user")
+          .lean(),
+        PuzzleAttempt.aggregate([
+          { $match: { user: { $in: userIds }, solved: true } },
+          { $group: { _id: "$user", count: { $sum: 1 } } },
+        ]),
+      ]);
+
+    const statsByUserId = new Map(
+      statsDocs.map((doc) => [String(doc.user), doc])
     );
+    const dailySolvedTodaySet = new Set(
+      dailySolvedTodayDocs.map((doc) => String(doc.user))
+    );
+    const normalSolvedByUserId = new Map(
+      normalSolvedCounts.map((row) => [String(row._id), row.count])
+    );
+
+    const usersWithStats = users.map((user) => {
+      const userId = String(user._id);
+      const stats = statsByUserId.get(userId);
+      const memberSince = formatMemberSince(user.createdAt);
+      const isOnline = ACTIVE_USER_STATUSES.includes(user.status);
+      return {
+        ...user,
+        ...(memberSince ? { memberSince } : {}),
+        isOnline,
+        stats: stats || {
+          wins: { total: 0 },
+          gamesPlayed: { total: 0 },
+        },
+        dailyPuzzleSolvedToday: dailySolvedTodaySet.has(userId),
+        normalPuzzlesSolvedCount: normalSolvedByUserId.get(userId) ?? 0,
+      };
+    });
 
     res.json({
       success: true,
