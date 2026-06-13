@@ -153,6 +153,7 @@ app.use("/api/invitations", require("./routes/invitations"));
 app.use("/api/game-review", require("./routes/game-review")); // Game review analysis
 app.use("/api/puzzles", require("./routes/puzzles")); // Puzzles endpoints
 app.use("/api/daily-puzzle", require("./routes/daily-puzzle")); // Daily puzzle (isolated)
+app.use("/api/learn", require("./routes/learn")); // Learn SRS progress sync
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
 app.use("/api/public", require("./routes/public")); // Contact + newsletter (public, uses sendMail)
 
