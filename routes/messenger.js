@@ -6,6 +6,7 @@ const MessengerConversation = require("../models/MessengerConversation");
 const MessengerMessage = require("../models/MessengerMessage");
 const { usersAreBlocked } = require("../utils/user-blocks");
 const { encrypt, decrypt } = require("../utils/messageCrypto");
+const { previewMessengerBody } = require("../utils/messengerPreview");
 
 const router = express.Router();
 
@@ -107,7 +108,7 @@ async function refreshConversationPreview(conv) {
     const plain = decrypt(last.body || "");
     conv.lastMessageAt = last.createdAt || new Date();
     // Snippet is stored encrypted; decrypt on read in the inbox endpoint.
-    conv.lastMessageSnippet = encrypt((plain || "").slice(0, 160));
+    conv.lastMessageSnippet = encrypt(previewMessengerBody(plain || "").slice(0, 160));
     conv.lastMessageSenderId = last.sender;
   }
   await conv.save();
@@ -222,7 +223,7 @@ router.get("/inbox", messengerAuth, async (req, res) => {
         conversationId: c._id.toString(),
         name: f.fullName || f.username || "Player",
         avatar: f.avatar || undefined,
-        lastMessage: decrypt(c.lastMessageSnippet || ""),
+        lastMessage: previewMessengerBody(decrypt(c.lastMessageSnippet || "")),
         lastMessageAt: new Date(c.lastMessageAt).toISOString(),
         hasUnread: unreadForViewer(c, myId),
         archived: archivedForViewer(c, myId),
@@ -402,7 +403,7 @@ router.post("/peers/:peerId/messages", messengerAuth, async (req, res) => {
     });
 
     conv.lastMessageAt = msg.createdAt || new Date();
-    conv.lastMessageSnippet = encrypt(trimmed.slice(0, 160));
+    conv.lastMessageSnippet = encrypt(previewMessengerBody(trimmed).slice(0, 160));
     conv.lastMessageSenderId = myId;
     await conv.save();
 
