@@ -231,6 +231,21 @@ async function getPlayedTodayCounts(userId) {
   return { overall, bullet, blitz, rapid };
 }
 
+/** Platform-wide completed games finished today (server local date). */
+async function getPlatformGamesTodayCount() {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const rows = await Game.aggregate([
+    { $match: { status: "completed" } },
+    { $addFields: END_TIME_ADD_FIELDS },
+    { $match: { endTime: { $gte: startOfDay } } },
+    { $count: "total" },
+  ]);
+
+  return rows[0]?.total ?? 0;
+}
+
 /**
  * List user games sorted by when they were actually played (last move time),
  * not document updatedAt — so review generation does not reorder history.
@@ -266,6 +281,7 @@ module.exports = {
   attachReviewAccuracyToGames,
   attachRatingChangeToGames,
   getPlayedTodayCounts,
+  getPlatformGamesTodayCount,
   fetchUserGamesByPlayEndTime,
   userGamesMatch,
   toObjectId,

@@ -11,6 +11,7 @@ const User = require("./models/User");
 const Game = require("./models/Game");
 const GameInvitation = require("./models/GameInvitation");
 const Stats = require("./models/Stats");
+const { appendArenaChatMessage } = require("./utils/arenaChat");
 require("dotenv").config();
 
 const app = express();
@@ -136,6 +137,17 @@ mongoose
     startDailyPuzzleMidnightScheduler().catch((err) => {
       console.error("[Daily Puzzle] scheduler startup failed:", err);
     });
+
+    const { syncCustomArenaStatuses } = require("./utils/customArenaLifecycle");
+    const FIVE_MINUTES_MS = 5 * 60 * 1000;
+    void syncCustomArenaStatuses(io).catch((err) => {
+      console.error("[Custom Arena] initial lifecycle sync failed:", err);
+    });
+    setInterval(() => {
+      void syncCustomArenaStatuses(io).catch((err) => {
+        console.error("[Custom Arena] lifecycle sync failed:", err);
+      });
+    }, FIVE_MINUTES_MS);
   })
   .catch((err) => console.error("MongoDB connection error:", err));
 
@@ -153,6 +165,7 @@ app.use("/api/invitations", require("./routes/invitations"));
 app.use("/api/game-review", require("./routes/game-review")); // Game review analysis
 app.use("/api/puzzles", require("./routes/puzzles")); // Puzzles endpoints
 app.use("/api/daily-puzzle", require("./routes/daily-puzzle")); // Daily puzzle (isolated)
+app.use("/api/tournaments", require("./routes/tournaments"));
 app.use("/api/learn", require("./routes/learn")); // Learn SRS progress sync
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
 app.use("/api/public", require("./routes/public")); // Contact + newsletter (public, uses sendMail)
@@ -814,6 +827,78 @@ io.on("connection", (socket) => {
       io.to(gameId).emit("chat:receive", chatData);
     } catch (error) {
       console.error("[Chat] Error handling chat:send:", error);
+    }
+  });
+
+  const arenaRoom = (arenaId) => `arena:${arenaId}`;
+
+  socket.on("join-arena", (arenaId) => {
+    if (!arenaId) return;
+    const room = arenaRoom(arenaId);
+    socket.join(room);
+    console.log(`[ArenaChat] ${socket.id} joined ${room}`);
+  });
+
+  socket.on("leave-arena", (arenaId) => {
+    if (!arenaId) return;
+    const room = arenaRoom(arenaId);
+    socket.leave(room);
+    console.log(`[ArenaChat] ${socket.id} left ${room}`);
+  });
+
+  socket.on("arena:chat:send", async (data) => {
+    try {
+      const { arenaId, message, senderId, username, avatar, timestamp } = data || {};
+
+      if (!arenaId || !message || !senderId) {
+        console.error("[ArenaChat] Missing required fields:", {
+          arenaId,
+          message,
+          senderId,
+        });
+        return;
+      }
+
+      if (
+        socket.data.userId &&
+        String(socket.data.userId) !== String(senderId)
+      ) {
+        console.error("[ArenaChat] senderId mismatch with socket user");
+        return;
+      }
+
+      const trimmed = String(message).trim();
+      if (!trimmed) return;
+      if (trimmed.length > 500) return;
+
+      const ts = timestamp || new Date().toISOString();
+      const messageId = `${senderId}-${ts}-${trimmed}`;
+      const chatData = {
+        arenaId: String(arenaId),
+        message: trimmed,
+        senderId: String(senderId),
+        username:
+          typeof username === "string" && username.trim()
+            ? username.trim()
+            : "Player",
+        avatar: typeof avatar === "string" ? avatar.trim() : "",
+        timestamp: ts,
+        messageId,
+      };
+
+      try {
+        const saved = await appendArenaChatMessage(arenaId, chatData);
+        if (saved?.messageId) {
+          chatData.messageId = saved.messageId;
+          chatData.timestamp = saved.timestamp;
+        }
+      } catch (persistErr) {
+        console.error("[ArenaChat] persist failed:", persistErr);
+      }
+
+      io.to(arenaRoom(arenaId)).emit("arena:chat:receive", chatData);
+    } catch (error) {
+      console.error("[ArenaChat] Error handling arena:chat:send:", error);
     }
   });
 

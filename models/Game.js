@@ -240,6 +240,17 @@ const gameSchema = new mongoose.Schema(
       white: { type: Number, default: null },
       black: { type: Number, default: null },
     },
+    /** Custom arena linkage — used to sync leaderboard after each arena game. */
+    arenaId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CustomArena",
+      default: null,
+      index: true,
+    },
+    arenaPairingId: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,

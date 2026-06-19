@@ -21,6 +21,7 @@ const {
   getAllLegalMoves,
 } = require("../utils/chess-engine");
 const { applyFischerIncrementToMover } = require("../utils/clockIncrement");
+const { canUserSpectateArenaGame } = require("../utils/arenaSpectateAccess");
 
 const router = express.Router();
 
@@ -313,10 +314,16 @@ router.get("/:gameId", auth, async (req, res) => {
         game.players.black._id.equals(req.user._id));
 
     if (!isPlayer && game.type !== "multiplayer") {
-      return res.status(403).json({
-        success: false,
-        message: "Access denied",
-      });
+      const canSpectate = await canUserSpectateArenaGame(
+        req.user._id,
+        game.gameId
+      );
+      if (!canSpectate) {
+        return res.status(403).json({
+          success: false,
+          message: "Access denied",
+        });
+      }
     }
 
     // Compute effective timeRemaining based on last update so timers stay correct on reload
@@ -617,6 +624,13 @@ router.post(
           };
           await game.save();
 
+          try {
+            const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
+            await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));
+          } catch (arenaErr) {
+            console.error("[Arena] hook failed after checkmate:", arenaErr);
+          }
+
           // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
           // COPY EXACT FLOW FROM /end ENDPOINT (timeout handler) - DO NOT CHANGE
           try {
@@ -884,6 +898,13 @@ router.post(
         }
         
         await game.save();
+
+        try {
+          const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
+          await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));
+        } catch (arenaErr) {
+          console.error("[Arena] hook failed after game end on move:", arenaErr);
+        }
         
         // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
         try {
@@ -2003,6 +2024,13 @@ router.post(
       game.markModified("status");
       await game.save();
 
+      try {
+        const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
+        await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));
+      } catch (arenaErr) {
+        console.error("[Arena] hook failed after /end:", arenaErr);
+      }
+
       // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
       if (!skipStats) {
         try {
@@ -2548,6 +2576,13 @@ router.post(
     };
     game.drawRequest = { from: null, timestamp: null };
     await game.save();
+
+    try {
+      const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
+      await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));
+    } catch (arenaErr) {
+      console.error("[Arena] hook failed after draw accept:", arenaErr);
+    }
 
     // Update Glicko-2 ratings
     const { updateGameRatings } = require("../services/updateGameRatings");

@@ -8,6 +8,9 @@ const User = require("../models/User");
 const GameInvitation = require("../models/GameInvitation");
 const Game = require("../models/Game");
 const RematchRequest = require("../models/RematchRequest");
+const {
+  dismissAllArenaNotificationsForUser,
+} = require("../services/arenaNotificationService");
 
 const { getPublicFrontendUrl } = require("../utils/frontendUrl");
 
@@ -521,7 +524,7 @@ router.get("/", auth, async (req, res) => {
 
 router.post("/clear-all", auth, async (req, res) => {
   try {
-    const [invitesResult, rematchesResult] = await Promise.all([
+    const [invitesResult, rematchesResult, clearedArenaNotifications] = await Promise.all([
       GameInvitation.updateMany(
         { toUser: req.user._id, isClearedByRecipient: false },
         { $set: { isClearedByRecipient: true } }
@@ -530,6 +533,7 @@ router.post("/clear-all", auth, async (req, res) => {
         { toUser: req.user._id, isClearedByRecipient: false },
         { $set: { isClearedByRecipient: true } }
       ),
+      dismissAllArenaNotificationsForUser(req.user._id),
     ]);
 
     return res.json({
@@ -538,6 +542,7 @@ router.post("/clear-all", auth, async (req, res) => {
       data: {
         clearedInvitations: invitesResult.modifiedCount || 0,
         clearedRematches: rematchesResult.modifiedCount || 0,
+        clearedArenaNotifications,
       },
     });
   } catch (error) {
