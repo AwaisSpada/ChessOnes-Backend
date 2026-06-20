@@ -113,15 +113,23 @@ async function tickArenaPairings(arenaId) {
   const activePairings = [...(arena.activePairings || [])];
   let playerStates = [...(arena.playerStates || [])];
 
+  const newPairings = [];
+
   for (const pairing of selected) {
     const pairingId = newPairingId();
+    const whiteStr = String(pairing.whiteUserId);
+    const blackStr = String(pairing.blackUserId);
+    newPairings.push({ pairingId, whiteUserId: pairing.whiteUserId });
     activePairings.push({
       pairingId,
       whiteUserId: pairing.whiteUserId,
       blackUserId: pairing.blackUserId,
       gameId: null,
       status: "pending",
-      acceptedUserIds: [],
+      acceptedUserIds: [
+        new mongoose.Types.ObjectId(whiteStr),
+        new mongoose.Types.ObjectId(blackStr),
+      ],
       createdAt: new Date(),
     });
 
@@ -141,7 +149,12 @@ async function tickArenaPairings(arenaId) {
   arena.playerStates = playerStates;
   markArenaDirty(arena);
   await arena.save();
-  return arena;
+
+  for (const { pairingId, whiteUserId } of newPairings) {
+    await startArenaPairingGame(arenaId, pairingId, whiteUserId);
+  }
+
+  return CustomArena.findById(arenaId);
 }
 
 async function attachGameToPairing(arenaId, pairingId, gameId) {
@@ -419,6 +432,22 @@ function serializeArenaRuntime(arena) {
         acceptedUserIds: (pairing.acceptedUserIds || []).map((id) => String(id)),
         createdAt: pairing.createdAt,
       })),
+    completedPairings: (arena.activePairings || [])
+      .filter((pairing) => pairing.status === "completed" && pairing.gameId)
+      .map((pairing) => ({
+        pairingId: pairing.pairingId,
+        whiteUserId: String(pairing.whiteUserId),
+        blackUserId: String(pairing.blackUserId),
+        gameId: pairing.gameId,
+        status: "completed",
+        result: pairing.result || null,
+        completedAt: pairing.completedAt || null,
+      }))
+      .sort(
+        (a, b) =>
+          new Date(b.completedAt || 0).getTime() -
+          new Date(a.completedAt || 0).getTime()
+      ),
     pendingPairings: (arena.activePairings || [])
       .filter((pairing) => pairing.status === "pending")
       .map((pairing) => ({
