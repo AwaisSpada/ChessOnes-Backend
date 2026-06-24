@@ -132,6 +132,22 @@ function emitArenaNotificationUpdate(io, userId, payload) {
   io.to(`user:${String(userId)}`).emit("arena:notification:update", payload);
 }
 
+async function notifyArenaInvitees(io, arenaDoc, userIds, eventType = "created") {
+  const arena = await CustomArena.findById(arenaDoc._id || arenaDoc)
+    .populate("createdBy", "username fullName name avatar")
+    .lean();
+  if (!arena || !Array.isArray(userIds) || userIds.length === 0) return [];
+
+  const payloads = [];
+  for (const userId of userIds) {
+    if (!userId) continue;
+    const payload = await upsertArenaNotificationForUser(arena, userId, eventType);
+    payloads.push(payload);
+    emitArenaNotification(io, userId, payload);
+  }
+  return payloads;
+}
+
 async function notifyArenaParticipants(io, arenaDoc, eventType) {
   const arena = await CustomArena.findById(arenaDoc._id || arenaDoc)
     .populate("createdBy", "username fullName name avatar")
@@ -266,6 +282,7 @@ module.exports = {
   getArenaRecipientUserIds,
   serializeArenaNotification,
   notifyArenaParticipants,
+  notifyArenaInvitees,
   notifyArenaEndedIfNeeded,
   markArenaJoined,
   listArenaNotificationsForUser,

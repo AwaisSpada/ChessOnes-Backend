@@ -179,6 +179,160 @@ const gameRoomUsers = new Map(); // gameId -> Set of userIds
 // Track per-game ready state in memory: Map<gameId, { [userId]: boolean }>
 const gameReadyState = new Map();
 
+/** Brief disconnect (refresh / tab switch) must not instantly forfeit active games. */
+const DISCONNECT_GAME_END_GRACE_MS = 45_000;
+const DISCONNECT_ARENA_GAME_END_GRACE_MS = 60_000;
+/** `${userId}:${gameId}` -> timeout handle */
+const pendingDisconnectGameEnds = new Map();
+
+function cancelPendingDisconnectGameEnd(userId, gameId) {
+  if (!userId || !gameId) return;
+  const key = `${String(userId)}:${String(gameId)}`;
+  const handle = pendingDisconnectGameEnds.get(key);
+  if (handle) {
+    clearTimeout(handle);
+    pendingDisconnectGameEnds.delete(key);
+  }
+}
+
+function cancelPendingDisconnectEndsForUser(userId) {
+  if (!userId) return;
+  const prefix = `${String(userId)}:`;
+  for (const [key, handle] of pendingDisconnectGameEnds.entries()) {
+    if (key.startsWith(prefix)) {
+      clearTimeout(handle);
+      pendingDisconnectGameEnds.delete(key);
+    }
+  }
+}
+
+function isUserFullyOffline(userId) {
+  const sockets = onlineUsers.get(String(userId));
+  return !sockets || sockets.size === 0;
+}
+
+async function completeGameOnUserDisconnect(game, userId, io) {
+  let winnerColor = null;
+  if (
+    game.players.white &&
+    game.players.white._id.toString() === userId.toString()
+  ) {
+    if (game.players.black) winnerColor = "black";
+  } else if (
+    game.players.black &&
+    game.players.black._id.toString() === userId.toString()
+  ) {
+    if (game.players.white) winnerColor = "white";
+  }
+
+  if (!winnerColor) {
+    game.status = "completed";
+    game.result = {
+      winner: null,
+      reason: "disconnect",
+    };
+  } else {
+    game.status = "completed";
+    game.result = {
+      winner: winnerColor,
+      reason: "disconnect",
+    };
+  }
+
+  await game.save();
+
+  try {
+    const { triggerReviewGeneration } = require("./utils/game-review/game-completion-hook");
+    triggerReviewGeneration(game.gameId);
+  } catch (error) {
+    console.error(`[GameReview] Error triggering review generation hook:`, error);
+  }
+
+  const gameTime = Date.now() - game.createdAt.getTime();
+
+  if (game.players.white) {
+    const whiteStats = await Stats.findOne({
+      user: game.players.white._id,
+    });
+    if (whiteStats) {
+      const whiteResult =
+        game.result.winner === "white"
+          ? "win"
+          : game.result.winner === "black"
+          ? "loss"
+          : "draw";
+      await whiteStats.updateAfterGame(game.type, whiteResult, gameTime);
+    }
+  }
+
+  if (game.players.black && game.type !== "bot") {
+    const blackStats = await Stats.findOne({
+      user: game.players.black._id,
+    });
+    if (blackStats) {
+      const blackResult =
+        game.result.winner === "black"
+          ? "win"
+          : game.result.winner === "white"
+          ? "loss"
+          : "draw";
+      await blackStats.updateAfterGame(game.type, blackResult, gameTime);
+    }
+  }
+
+  if (game.players.white) {
+    await User.findByIdAndUpdate(game.players.white._id, {
+      status: "online",
+    });
+  }
+  if (game.players.black && game.type !== "bot") {
+    await User.findByIdAndUpdate(game.players.black._id, {
+      status: "online",
+    });
+  }
+
+  const { updateGameRatings } = require("./services/updateGameRatings");
+  await updateGameRatings(game, io);
+
+  io.to(game.gameId).emit("game-ended", {
+    gameId: game.gameId,
+    result: game.result,
+  });
+
+  try {
+    const { syncArenaGameCompletion } = require("./utils/arenaGameCompletionHook");
+    await syncArenaGameCompletion(game.gameId, game.result, io);
+  } catch (err) {
+    console.error("[Arena] disconnect completion sync failed:", game.gameId, err);
+  }
+}
+
+function scheduleDisconnectGameEnd(userId, gameId, graceMs) {
+  cancelPendingDisconnectGameEnd(userId, gameId);
+  const key = `${String(userId)}:${String(gameId)}`;
+  const handle = setTimeout(async () => {
+    pendingDisconnectGameEnds.delete(key);
+    try {
+      if (!isUserFullyOffline(userId)) return;
+      const game = await Game.findOne({
+        gameId: String(gameId),
+        status: "active",
+      }).populate("players.white players.black");
+      if (!game) return;
+      const gameHasMoves =
+        Array.isArray(game.moves) && game.moves.length > 0;
+      if (!gameHasMoves) return;
+      console.log(
+        `⏱️ Ending game ${gameId} after disconnect grace (${graceMs}ms) for user ${userId}`
+      );
+      await completeGameOnUserDisconnect(game, userId, io);
+    } catch (err) {
+      console.error("disconnect grace game end failed:", gameId, err);
+    }
+  }, graceMs);
+  pendingDisconnectGameEnds.set(key, handle);
+}
+
 // ========== MATCHMAKING SYSTEM ==========
 // Matchmaking pool: Array of { userId, socketId, category, rating, timeControl: { initialTime, increment }, joinedAt, initialRating, timeoutSent }
 const matchmakingPool = [];
@@ -499,6 +653,7 @@ io.on("connection", (socket) => {
     const sockets = onlineUsers.get(userId) || new Set();
     sockets.add(socket.id);
     onlineUsers.set(userId, sockets);
+    cancelPendingDisconnectEndsForUser(userId.toString());
     console.log(`✅ User ${userId} registered socket ${socket.id}`);
     console.log(`   - Joined room: user:${userId}`);
 
@@ -548,6 +703,7 @@ io.on("connection", (socket) => {
     // If we have a userId, track it and sync presence
     if (socket.data.userId) {
       const userId = socket.data.userId.toString();
+      cancelPendingDisconnectGameEnd(userId, gameId);
       const wasUserAlreadyTracked = userSet.has(userId);
 
       if (!wasUserAlreadyTracked) {
@@ -2111,13 +2267,11 @@ io.on("connection", (socket) => {
           }).populate("players.white players.black");
 
           for (const game of activeGames) {
-            // Let the opponent know a player disconnected in this game
             io.to(game.gameId).emit("player-disconnected", {
               gameId: game.gameId,
               userId,
             });
 
-            // Skip auto-ending games that haven't started yet (no moves made)
             const gameHasMoves =
               Array.isArray(game.moves) && game.moves.length > 0;
             if (!gameHasMoves) {
@@ -2127,111 +2281,10 @@ io.on("connection", (socket) => {
               continue;
             }
 
-            let winnerColor = null;
-            if (
-              game.players.white &&
-              game.players.white._id.toString() === userId.toString()
-            ) {
-              // White disconnected -> black wins
-              if (game.players.black) winnerColor = "black";
-            } else if (
-              game.players.black &&
-              game.players.black._id.toString() === userId.toString()
-            ) {
-              // Black disconnected -> white wins
-              if (game.players.white) winnerColor = "white";
-            }
-
-            // If for some reason there is no opponent (e.g., friend challenge not fully joined),
-            // just mark game as abandoned.
-            if (!winnerColor) {
-              game.status = "completed";
-              game.result = {
-                winner: null,
-                reason: "disconnect",
-              };
-            } else {
-              game.status = "completed";
-              game.result = {
-                winner: winnerColor,
-                reason: "disconnect",
-              };
-            }
-
-            await game.save();
-
-            // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
-            // COPY EXACT FLOW FROM /end ENDPOINT (timeout handler) - DO NOT CHANGE
-            try {
-              const { triggerReviewGeneration } = require("./utils/game-review/game-completion-hook");
-              triggerReviewGeneration(game.gameId);
-            } catch (error) {
-              // Don't fail game completion if review hook fails
-              console.error(`[GameReview] Error triggering review generation hook:`, error);
-            }
-
-            // Update stats similarly to /api/games/:gameId/end
-            const gameTime = Date.now() - game.createdAt.getTime();
-
-            if (game.players.white) {
-              const whiteStats = await Stats.findOne({
-                user: game.players.white._id,
-              });
-              if (whiteStats) {
-                const whiteResult =
-                  game.result.winner === "white"
-                    ? "win"
-                    : game.result.winner === "black"
-                    ? "loss"
-                    : "draw";
-                await whiteStats.updateAfterGame(
-                  game.type,
-                  whiteResult,
-                  gameTime
-                );
-              }
-            }
-
-            if (game.players.black && game.type !== "bot") {
-              const blackStats = await Stats.findOne({
-                user: game.players.black._id,
-              });
-              if (blackStats) {
-                const blackResult =
-                  game.result.winner === "black"
-                    ? "win"
-                    : game.result.winner === "white"
-                    ? "loss"
-                    : "draw";
-                await blackStats.updateAfterGame(
-                  game.type,
-                  blackResult,
-                  gameTime
-                );
-              }
-            }
-
-            // Reset both players' user.status to "online" (they may come back later)
-            if (game.players.white) {
-              await User.findByIdAndUpdate(game.players.white._id, {
-                status: "online",
-              });
-            }
-            if (game.players.black && game.type !== "bot") {
-              await User.findByIdAndUpdate(game.players.black._id, {
-                status: "online",
-              });
-            }
-
-            // Update Glicko-2 ratings
-            const { updateGameRatings } = require("./services/updateGameRatings");
-            await updateGameRatings(game, io);
-
-            // Notify both players (and observers) that the game ended
-            io.to(game.gameId).emit("game-ended", {
-              gameId: game.gameId,
-              result: game.result,
-            });
+            const graceMs = game.arenaId
+              ? DISCONNECT_ARENA_GAME_END_GRACE_MS
+              : DISCONNECT_GAME_END_GRACE_MS;
+            scheduleDisconnectGameEnd(userId, game.gameId, graceMs);
           }
 
           if (userDoc?.friends?.length) {

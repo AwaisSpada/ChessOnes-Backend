@@ -19,10 +19,12 @@ const {
   setArenaMatchmakingReady,
   acceptArenaPairing,
   enterArenaLobby,
+  addInvitesToLiveArena,
 } = require("../services/customArenaEngine");
 const { getArenaChatMessages } = require("../utils/arenaChat");
 const {
   notifyArenaParticipants,
+  notifyArenaInvitees,
   markArenaJoined,
   listArenaNotificationsForUser,
   notifyArenaEndedIfNeeded,
@@ -273,6 +275,15 @@ function serializeCustomArena(arena, viewer) {
         : countInvitedPlayers(arena) + (arena.hostPlays !== false ? 1 : 0),
     createdAt: arena.createdAt,
     durationMinutes: arena.durationMinutes ?? null,
+    matchCount: arena.matchCount ?? null,
+    startMode: arena.startMode || "now",
+    timeControl: arena.timeControl
+      ? {
+          label: arena.timeControl.label,
+          time: arena.timeControl.time,
+          increment: Number(arena.timeControl.increment) || 0,
+        }
+      : null,
   };
 }
 
@@ -704,6 +715,266 @@ router.post("/custom-arenas/:id/pairings/:pairingId/game", auth, async (req, res
   } catch (error) {
     console.error("[Tournaments] custom-arenas attach game error:", error);
     res.status(500).json({ success: false, message: "Failed to attach game" });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/:id/invites
+router.post("/custom-arenas/:id/invites", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid arena id",
+      });
+    }
+
+    const arena = await CustomArena.findById(req.params.id);
+    if (!arena) {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+
+    if (String(arena.createdBy) !== String(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the host can invite players",
+      });
+    }
+
+    const resolvedInvites = await resolveInvitedPlayers(
+      req.body?.invitedPlayers,
+      req.user._id
+    );
+
+    if (resolvedInvites.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Add at least one valid player to invite",
+      });
+    }
+
+    const result = await addInvitesToLiveArena(req.params.id, resolvedInvites);
+    if (!result.ok) {
+      return res.status(400).json({
+        success: false,
+        message: result.message || "Could not add players",
+      });
+    }
+
+    const populated = await CustomArena.findById(req.params.id)
+      .populate("createdBy", "username fullName name email")
+      .lean();
+
+    const io = req.app.get("io");
+    if (io && result.newInvites?.length) {
+      await notifyArenaInvitees(
+        io,
+        populated,
+        result.newInvites.map((invite) => invite.userId),
+        "created"
+      );
+    }
+
+    const runtime = await getArenaRuntimeState(req.params.id, { autoTick: false });
+
+    res.json({
+      success: true,
+      data: {
+        added: result.added,
+        arena: serializeCustomArena(populated, req.user),
+        runtime,
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas invites error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to invite players",
+    });
+  }
+});
+
+// @route   PATCH /api/tournaments/custom-arenas/:id
+router.patch("/custom-arenas/:id", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid arena id",
+      });
+    }
+
+    const arena = await CustomArena.findById(req.params.id);
+    if (!arena) {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+
+    if (String(arena.createdBy) !== String(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the host can edit this arena",
+      });
+    }
+
+    if (arena.status !== "draft") {
+      return res.status(400).json({
+        success: false,
+        message: "Only draft arenas can be edited",
+      });
+    }
+
+    const {
+      name,
+      gameType,
+      timeControl,
+      ratingMode,
+      format,
+      matchCount,
+      durationMinutes,
+      invitedPlayers,
+      startMode,
+      startDate,
+      startTime,
+      intent,
+    } = req.body;
+
+    const trimmedName = String(name || "").trim();
+    if (trimmedName.length < 3) {
+      return res.status(400).json({
+        success: false,
+        message: "Arena name must be at least 3 characters",
+      });
+    }
+
+    if (!GAME_TYPES.includes(gameType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid game type",
+      });
+    }
+
+    if (!timeControl?.label || typeof timeControl.time !== "number") {
+      return res.status(400).json({
+        success: false,
+        message: "Time control is required",
+      });
+    }
+
+    const resolvedInvites = await resolveInvitedPlayers(
+      invitedPlayers,
+      req.user._id
+    );
+    const hostWillPlay = true;
+    const rosterSize = hostWillPlay
+      ? resolvedInvites.length + 1
+      : resolvedInvites.length;
+
+    const isDraft = intent === "draft";
+    const scheduledAt = parseScheduledAt(startMode, startDate, startTime);
+
+    if (!isDraft && startMode === "schedule" && !scheduledAt) {
+      return res.status(400).json({
+        success: false,
+        message: "Scheduled start requires a valid date and time",
+      });
+    }
+
+    if (!isDraft && startMode === "schedule" && scheduledAt.getTime() <= Date.now()) {
+      return res.status(400).json({
+        success: false,
+        message: "Scheduled start must be in the future",
+      });
+    }
+
+    if (!isDraft && rosterSize < MIN_ARENA_PLAYERS) {
+      return res.status(400).json({
+        success: false,
+        message: `At least ${MIN_ARENA_PLAYERS} players required in the arena roster`,
+      });
+    }
+
+    if (
+      !isDraft &&
+      hostWillPlay &&
+      resolvedInvites.some((p) => String(p.userId) === String(req.user._id))
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Host is already in the roster — remove duplicate self-invite",
+      });
+    }
+
+    arena.name = trimmedName;
+    arena.gameType = gameType;
+    arena.timeControl = {
+      label: timeControl.label,
+      time: timeControl.time,
+      increment: Number(timeControl.increment) || 0,
+    };
+    arena.ratingMode = ratingMode === "unrated" ? "unrated" : "rated";
+    arena.format = format === "match_count" ? "match_count" : "time_duration";
+    arena.matchCount = Math.min(20, Math.max(1, Number(matchCount) || 6));
+    arena.durationMinutes = Math.min(
+      1440,
+      Math.max(30, Number(durationMinutes) || 1440)
+    );
+    arena.invitedUserIds = resolvedInvites.map((p) => p.userId);
+    arena.invitedPlayers = resolvedInvites;
+    arena.hostPlays = hostWillPlay;
+    arena.startMode = startMode === "schedule" ? "schedule" : "now";
+
+    if (!isDraft) {
+      if (startMode === "now") {
+        arena.status = "live";
+        arena.startedAt = new Date();
+        arena.scheduledAt = null;
+      } else {
+        arena.status = "scheduled";
+        arena.scheduledAt = scheduledAt;
+        arena.startedAt = null;
+      }
+    } else {
+      arena.status = "draft";
+      arena.scheduledAt = null;
+      arena.startedAt = null;
+    }
+
+    await arena.save();
+
+    if (!isDraft) {
+      await initializeArenaRuntime(arena._id, req.user);
+      if (arena.status === "live") {
+        const { tickArenaPairings } = require("../services/customArenaEngine");
+        await tickArenaPairings(arena._id);
+      }
+    }
+
+    const populated = await CustomArena.findById(arena._id)
+      .populate("createdBy", "username fullName name email")
+      .lean();
+
+    const io = req.app.get("io");
+    if (!isDraft && io) {
+      await notifyArenaParticipants(io, populated, "created");
+    }
+
+    res.json({
+      success: true,
+      data: {
+        arena: serializeCustomArena(populated, req.user),
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas update error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update custom arena",
+    });
   }
 });
 

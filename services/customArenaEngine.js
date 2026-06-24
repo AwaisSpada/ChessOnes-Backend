@@ -25,6 +25,115 @@ function markArenaDirty(arena) {
   if (arena.recordedGameIds) arena.markModified("recordedGameIds");
 }
 
+async function saveArenaDoc(arena, maxAttempts = 4) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      markArenaDirty(arena);
+      await arena.save();
+      return arena;
+    } catch (err) {
+      const isVersion =
+        err?.name === "VersionError" ||
+        String(err?.message || "").includes("No matching document");
+      if (!isVersion || attempt === maxAttempts - 1) {
+        throw err;
+      }
+      const fresh = await CustomArena.findById(arena._id);
+      if (!fresh) throw err;
+      fresh.playerStates = arena.playerStates;
+      fresh.activePairings = arena.activePairings;
+      if (arena.leaderboard) fresh.leaderboard = arena.leaderboard;
+      if (arena.pairStats) fresh.pairStats = arena.pairStats;
+      if (arena.recordedGameIds) fresh.recordedGameIds = arena.recordedGameIds;
+      arena = fresh;
+    }
+  }
+  return arena;
+}
+
+/**
+ * Close arena pairings whose linked Game documents already finished
+ * (e.g. disconnect / timeout while arena document was not updated).
+ */
+async function syncStaleArenaPairings(arenaId) {
+  let arena = await CustomArena.findById(arenaId);
+  if (!arena) return null;
+
+  const activeWithGame = (arena.activePairings || []).filter(
+    (pairing) => pairing.status === "active" && pairing.gameId
+  );
+  if (!activeWithGame.length) return arena;
+
+  const games = await Game.find({
+    gameId: { $in: activeWithGame.map((p) => String(p.gameId)) },
+  })
+    .select("gameId status result")
+    .lean();
+
+  let changed = false;
+  for (const game of games) {
+    const status = String(game.status || "").toLowerCase();
+    if (status !== "completed" && status !== "abandoned") continue;
+
+    const winner = game.result?.winner;
+    const normalized =
+      winner === "white" || winner === "black" || winner === "draw"
+        ? winner
+        : "draw";
+    const outcome = await recordArenaResultForGame(String(game.gameId), {
+      winner: normalized,
+      reason: game.result?.reason || "stale-sync",
+    });
+    if (!outcome.error) {
+      changed = true;
+      arena = await CustomArena.findById(arenaId);
+      continue;
+    }
+
+    const pairingIndex = (arena.activePairings || []).findIndex(
+      (p) => String(p.gameId) === String(game.gameId) && p.status === "active"
+    );
+    if (pairingIndex === -1) continue;
+
+    const pairing = arena.activePairings[pairingIndex];
+    const pairings = [...arena.activePairings];
+    pairings[pairingIndex] = {
+      ...pairing,
+      status: "completed",
+      completedAt: pairing.completedAt || new Date(),
+      result: pairing.result || normalized,
+    };
+    arena.activePairings = pairings;
+
+    let playerStates = [...(arena.playerStates || [])];
+    for (const pid of [pairing.whiteUserId, pairing.blackUserId]) {
+      playerStates = setPlayerStatus(playerStates, String(pid), {
+        status: "idle",
+        matchmakingReady: false,
+        currentGameId: null,
+      });
+    }
+    arena.playerStates = playerStates;
+    changed = true;
+  }
+
+  if (changed) {
+    arena = await saveArenaDoc(arena);
+  }
+
+  return arena;
+}
+
+async function isGameStillActive(gameId) {
+  if (!gameId) return false;
+  const game = await Game.findOne({ gameId: String(gameId) })
+    .select("status")
+    .lean();
+  if (!game) return false;
+  const status = String(game.status || "").toLowerCase();
+  return status === "active" || status === "waiting";
+}
+
 async function linkGameToArenaPairing(gameId, arenaId, pairingId) {
   if (!gameId || !arenaId || !pairingId) return;
   await Game.updateOne(
@@ -84,6 +193,7 @@ function setPlayerStatus(playerStates, userId, patch) {
 }
 
 async function tickArenaPairings(arenaId) {
+  await syncStaleArenaPairings(arenaId);
   const arena = await CustomArena.findById(arenaId);
   if (!arena || arena.status !== "live") return arena;
 
@@ -459,8 +569,10 @@ function serializeArenaRuntime(arena) {
 }
 
 async function getArenaRuntimeState(arenaId, { autoTick = false } = {}) {
-  const arena = await CustomArena.findById(arenaId);
+  let arena = await CustomArena.findById(arenaId);
   if (!arena) return null;
+
+  arena = (await syncStaleArenaPairings(arenaId)) || arena;
 
   if (arena.status === "live" && autoTick) {
     await tickArenaPairings(arenaId);
@@ -498,7 +610,10 @@ function removePendingPairingForUser(activePairings, userId) {
 }
 
 async function enterArenaLobby(arenaId, userId) {
-  const arena = await CustomArena.findById(arenaId);
+  let arena = await syncStaleArenaPairings(arenaId);
+  if (!arena) {
+    arena = await CustomArena.findById(arenaId);
+  }
   if (!arena) {
     return { runtime: null, error: "Arena not found" };
   }
@@ -521,11 +636,58 @@ async function enterArenaLobby(arenaId, userId) {
     return { runtime: null, error: "Player state not found" };
   }
 
-  const myState = playerStates[stateIndex];
+  let myState = playerStates[stateIndex];
+
+  const activeGamePairing = (arena.activePairings || []).find(
+    (pairing) =>
+      (String(pairing.whiteUserId) === uid ||
+        String(pairing.blackUserId) === uid) &&
+      pairing.status === "active" &&
+      pairing.gameId
+  );
+  if (activeGamePairing) {
+    const stillLive = await isGameStillActive(activeGamePairing.gameId);
+    if (stillLive) {
+      const alreadyInGame =
+        myState.status === "in_game" &&
+        String(myState.currentGameId) === String(activeGamePairing.gameId);
+      if (!alreadyInGame) {
+        playerStates = setPlayerStatus(playerStates, uid, {
+          status: "in_game",
+          matchmakingReady: false,
+          currentGameId: String(activeGamePairing.gameId),
+        });
+        arena.playerStates = playerStates;
+        await saveArenaDoc(arena);
+      }
+      const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+      return { runtime, error: null };
+    }
+    arena = (await syncStaleArenaPairings(arenaId)) || arena;
+    playerStates = [...(arena.playerStates || [])];
+    const stateIndexAfterSync = playerStates.findIndex(
+      (s) => String(s.userId) === uid
+    );
+    if (stateIndexAfterSync === -1) {
+      return { runtime: null, error: "Player state not found" };
+    }
+    myState = playerStates[stateIndexAfterSync];
+  }
 
   if (myState.status === "in_game" && myState.currentGameId) {
-    const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
-    return { runtime, error: null };
+    const stillLive = await isGameStillActive(myState.currentGameId);
+    if (stillLive) {
+      const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+      return { runtime, error: null };
+    }
+    playerStates = setPlayerStatus(playerStates, uid, {
+      status: "idle",
+      matchmakingReady: false,
+      currentGameId: null,
+    });
+    arena.playerStates = playerStates;
+    await saveArenaDoc(arena);
+    myState = { ...myState, status: "idle", currentGameId: null };
   }
 
   const pendingConfirm = findUserPendingPairing(arena.activePairings, uid);
@@ -561,7 +723,7 @@ async function enterArenaLobby(arenaId, userId) {
 
   arena.activePairings = activePairings;
   arena.playerStates = playerStates;
-  await arena.save();
+  await saveArenaDoc(arena);
 
   const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
   return { runtime, error: null };
@@ -818,6 +980,104 @@ async function acceptArenaPairing(arenaId, pairingId, userId) {
   };
 }
 
+async function addInvitesToLiveArena(arenaId, resolvedInvites) {
+  const arena = await CustomArena.findById(arenaId);
+  if (!arena) {
+    return { ok: false, message: "Arena not found", added: 0, arena: null };
+  }
+
+  if (!["live", "scheduled"].includes(arena.status)) {
+    return {
+      ok: false,
+      message: "Players can only be added to live or scheduled arenas",
+      added: 0,
+      arena: null,
+    };
+  }
+
+  const existingInviteIds = new Set();
+  for (const id of arena.invitedUserIds || []) {
+    if (id) existingInviteIds.add(String(id));
+  }
+  for (const invite of arena.invitedPlayers || []) {
+    if (invite?.userId) existingInviteIds.add(String(invite.userId));
+  }
+  for (const id of arena.participantUserIds || []) {
+    if (id) existingInviteIds.add(String(id));
+  }
+
+  const newInvites = (resolvedInvites || []).filter(
+    (invite) => invite?.userId && !existingInviteIds.has(String(invite.userId))
+  );
+
+  if (newInvites.length === 0) {
+    return {
+      ok: false,
+      message: "No new players to add",
+      added: 0,
+      arena,
+    };
+  }
+
+  arena.invitedPlayers = [...(arena.invitedPlayers || []), ...newInvites];
+  arena.invitedUserIds = [
+    ...(arena.invitedUserIds || []),
+    ...newInvites.map((invite) => invite.userId),
+  ];
+  arena.markModified("invitedPlayers");
+  arena.markModified("invitedUserIds");
+
+  const participantSet = new Set((arena.participantUserIds || []).map(String));
+  const leaderboard = [...(arena.leaderboard || [])];
+  const leaderboardIds = new Set(leaderboard.map((row) => String(row.userId)));
+  let playerStates = [...(arena.playerStates || [])];
+  const stateIds = new Set(playerStates.map((state) => String(state.userId)));
+
+  for (const invite of newInvites) {
+    const userId = String(invite.userId);
+    if (!participantSet.has(userId)) {
+      participantSet.add(userId);
+      arena.participantUserIds = [
+        ...(arena.participantUserIds || []),
+        new mongoose.Types.ObjectId(userId),
+      ];
+    }
+
+    if (!leaderboardIds.has(userId)) {
+      leaderboardIds.add(userId);
+      leaderboard.push({
+        userId,
+        username: invite.username || "player",
+        displayName: invite.displayName || invite.username || "Player",
+        avatar: invite.avatar || "",
+        points: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        gamesPlayed: 0,
+      });
+    }
+
+    if (!stateIds.has(userId)) {
+      stateIds.add(userId);
+      playerStates.push({
+        userId,
+        status: "idle",
+        matchmakingReady: false,
+        currentGameId: null,
+        lastOpponentUserId: null,
+      });
+    }
+  }
+
+  arena.leaderboard = leaderboard;
+  arena.playerStates = playerStates;
+  markArenaDirty(arena);
+  await saveArenaDoc(arena);
+
+  return { ok: true, message: null, added: newInvites.length, arena, newInvites };
+}
+
 module.exports = {
   ensureRuntimeInitialized,
   initializeArenaRuntime,
@@ -831,4 +1091,5 @@ module.exports = {
   startArenaPairingGame,
   setArenaMatchmakingReady,
   acceptArenaPairing,
+  addInvitesToLiveArena,
 };
