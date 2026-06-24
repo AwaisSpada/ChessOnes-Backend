@@ -562,7 +562,11 @@ router.post("/custom-arenas/:id/lobby-enter", auth, async (req, res) => {
 
     const io = req.app.get("io");
     if (io) {
-      await markArenaJoined(io, req.params.id, req.user._id);
+      try {
+        await markArenaJoined(io, req.params.id, req.user._id);
+      } catch (markErr) {
+        console.warn("[Tournaments] markArenaJoined failed (non-fatal):", markErr?.message || markErr);
+      }
     }
 
     res.json({ success: true, data: { runtime } });

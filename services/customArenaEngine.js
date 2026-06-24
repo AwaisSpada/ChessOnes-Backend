@@ -192,6 +192,12 @@ function setPlayerStatus(playerStates, userId, patch) {
   );
 }
 
+function arenaTimeControlToGame(timeControl) {
+  const initial = Math.max(1, Number(timeControl?.time || 180)) * 1000;
+  const increment = Math.max(0, Number(timeControl?.increment || 0)) * 1000;
+  return { initial, increment };
+}
+
 async function tickArenaPairings(arenaId) {
   await syncStaleArenaPairings(arenaId);
   const arena = await CustomArena.findById(arenaId);
@@ -223,19 +229,39 @@ async function tickArenaPairings(arenaId) {
   const activePairings = [...(arena.activePairings || [])];
   let playerStates = [...(arena.playerStates || [])];
 
-  const newPairings = [];
-
   for (const pairing of selected) {
     const pairingId = newPairingId();
     const whiteStr = String(pairing.whiteUserId);
     const blackStr = String(pairing.blackUserId);
-    newPairings.push({ pairingId, whiteUserId: pairing.whiteUserId });
+    const resolvedTimeControl = arenaTimeControlToGame(arena.timeControl);
+    const gameId = Math.random().toString(36).substr(2, 9);
+    const game = new Game({
+      gameId,
+      type: "friend",
+      isRated: arena.ratingMode !== "unrated",
+      arenaId: arena._id,
+      arenaPairingId: pairingId,
+      players: {
+        white: pairing.whiteUserId,
+        black: pairing.blackUserId,
+      },
+      timeControl: resolvedTimeControl,
+      timeRemaining: {
+        white: resolvedTimeControl.initial,
+        black: resolvedTimeControl.initial,
+      },
+      status: "active",
+    });
+    setGameCategory(game);
+    await game.save();
+    await linkGameToArenaPairing(gameId, arena._id, pairingId);
+
     activePairings.push({
       pairingId,
       whiteUserId: pairing.whiteUserId,
       blackUserId: pairing.blackUserId,
-      gameId: null,
-      status: "pending",
+      gameId,
+      status: "active",
       acceptedUserIds: [
         new mongoose.Types.ObjectId(whiteStr),
         new mongoose.Types.ObjectId(blackStr),
@@ -244,14 +270,14 @@ async function tickArenaPairings(arenaId) {
     });
 
     playerStates = setPlayerStatus(playerStates, pairing.whiteUserId, {
-      status: "matched",
+      status: "in_game",
       matchmakingReady: false,
-      currentGameId: null,
+      currentGameId: gameId,
     });
     playerStates = setPlayerStatus(playerStates, pairing.blackUserId, {
-      status: "matched",
+      status: "in_game",
       matchmakingReady: false,
-      currentGameId: null,
+      currentGameId: gameId,
     });
   }
 
@@ -259,10 +285,6 @@ async function tickArenaPairings(arenaId) {
   arena.playerStates = playerStates;
   markArenaDirty(arena);
   await arena.save();
-
-  for (const { pairingId, whiteUserId } of newPairings) {
-    await startArenaPairingGame(arenaId, pairingId, whiteUserId);
-  }
 
   return CustomArena.findById(arenaId);
 }
@@ -490,6 +512,37 @@ async function recordArenaGameResult(arenaId, { pairingId, gameId, winner }) {
   return { arena, error: null };
 }
 
+/**
+ * Drop orphan pending pairings for players who already have an active game row.
+ */
+async function pruneStalePendingPairings(arenaId) {
+  let arena = await CustomArena.findById(arenaId);
+  if (!arena) return null;
+
+  const pairings = [...(arena.activePairings || [])];
+  const activeGameUsers = new Set();
+  for (const pairing of pairings) {
+    if (pairing.status === "active" && pairing.gameId) {
+      activeGameUsers.add(String(pairing.whiteUserId));
+      activeGameUsers.add(String(pairing.blackUserId));
+    }
+  }
+
+  if (activeGameUsers.size === 0) return arena;
+
+  const next = pairings.filter((pairing) => {
+    if (pairing.status !== "pending" || pairing.gameId) return true;
+    const white = String(pairing.whiteUserId);
+    const black = String(pairing.blackUserId);
+    return !activeGameUsers.has(white) && !activeGameUsers.has(black);
+  });
+
+  if (next.length === pairings.length) return arena;
+
+  arena.activePairings = next;
+  return saveArenaDoc(arena);
+}
+
 function serializeArenaRuntime(arena) {
   const roster = (arena.participantUserIds || []).map(String);
   return {
@@ -573,6 +626,7 @@ async function getArenaRuntimeState(arenaId, { autoTick = false } = {}) {
   if (!arena) return null;
 
   arena = (await syncStaleArenaPairings(arenaId)) || arena;
+  arena = (await pruneStalePendingPairings(arenaId)) || arena;
 
   if (arena.status === "live" && autoTick) {
     await tickArenaPairings(arenaId);
@@ -590,6 +644,14 @@ function findUserPendingPairing(activePairings, userId) {
         String(pairing.blackUserId) === uid) &&
       pairing.status === "pending" &&
       !pairing.gameId
+  );
+}
+
+function findUserArenaPairing(activePairings, userId) {
+  const uid = String(userId);
+  return (activePairings || []).find(
+    (pairing) =>
+      String(pairing.whiteUserId) === uid || String(pairing.blackUserId) === uid
   );
 }
 
@@ -691,39 +753,63 @@ async function enterArenaLobby(arenaId, userId) {
   }
 
   const pendingConfirm = findUserPendingPairing(arena.activePairings, uid);
+  const myArenaPairing = findUserArenaPairing(arena.activePairings, uid);
+
+  if (myArenaPairing) {
+    const pairingGameId = myArenaPairing.gameId
+      ? String(myArenaPairing.gameId)
+      : null;
+    const inActiveGame =
+      myArenaPairing.status === "active" &&
+      pairingGameId &&
+      (await isGameStillActive(pairingGameId));
+
+    if (inActiveGame) {
+      if (
+        myState.status !== "in_game" ||
+        String(myState.currentGameId) !== pairingGameId
+      ) {
+        playerStates = setPlayerStatus(playerStates, uid, {
+          status: "in_game",
+          matchmakingReady: false,
+          currentGameId: pairingGameId,
+        });
+        arena.playerStates = playerStates;
+        await saveArenaDoc(arena);
+      }
+      const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+      return { runtime, error: null };
+    }
+
+    if (myArenaPairing.status === "pending" || !pairingGameId) {
+      if (myState.status !== "matched" && myState.status !== "in_game") {
+        playerStates = setPlayerStatus(playerStates, uid, {
+          status: "matched",
+          matchmakingReady: false,
+          currentGameId: null,
+        });
+        arena.playerStates = playerStates;
+        await saveArenaDoc(arena);
+      }
+      const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+      return { runtime, error: null };
+    }
+  }
+
   if (myState.status === "matched" && pendingConfirm) {
     const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
     return { runtime, error: null };
   }
 
-  let activePairings = [...(arena.activePairings || [])];
-  const { pairings: clearedPairings, removed } = removePendingPairingForUser(
-    activePairings,
-    uid
-  );
-  activePairings = clearedPairings;
-
-  if (removed) {
-    const otherId =
-      String(removed.whiteUserId) === uid
-        ? String(removed.blackUserId)
-        : String(removed.whiteUserId);
-    playerStates = setPlayerStatus(playerStates, otherId, {
+  if (myState.matchmakingReady) {
+    playerStates = setPlayerStatus(playerStates, uid, {
       status: "idle",
       matchmakingReady: false,
       currentGameId: null,
     });
+    arena.playerStates = playerStates;
+    await saveArenaDoc(arena);
   }
-
-  playerStates = setPlayerStatus(playerStates, uid, {
-    status: "idle",
-    matchmakingReady: false,
-    currentGameId: null,
-  });
-
-  arena.activePairings = activePairings;
-  arena.playerStates = playerStates;
-  await saveArenaDoc(arena);
 
   const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
   return { runtime, error: null };
@@ -781,12 +867,6 @@ async function recordArenaResultForGame(gameId, result) {
   }
 
   return outcome;
-}
-
-function arenaTimeControlToGame(timeControl) {
-  const initial = Math.max(1, Number(timeControl?.time || 180)) * 1000;
-  const increment = Math.max(0, Number(timeControl?.increment || 0)) * 1000;
-  return { initial, increment };
 }
 
 async function startArenaPairingGame(arenaId, pairingId, userId) {

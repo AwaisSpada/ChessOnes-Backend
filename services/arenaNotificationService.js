@@ -183,16 +183,16 @@ async function notifyArenaEndedIfNeeded(io, arenaId) {
 
 async function markArenaJoined(io, arenaId, userId) {
   const uid = String(userId);
-  const arena = await CustomArena.findById(arenaId);
-  if (!arena) return null;
+  if (!mongoose.Types.ObjectId.isValid(uid)) return null;
 
-  const joined = (arena.joinedUserIds || []).map(String);
-  if (!joined.includes(uid)) {
-    arena.joinedUserIds = [
-      ...(arena.joinedUserIds || []),
-      new mongoose.Types.ObjectId(uid),
-    ];
-    await arena.save();
+  try {
+    await CustomArena.updateOne(
+      { _id: arenaId },
+      { $addToSet: { joinedUserIds: new mongoose.Types.ObjectId(uid) } }
+    );
+  } catch (err) {
+    console.warn("[Arena] markArenaJoined update failed:", arenaId, err?.message || err);
+    return null;
   }
 
   const populated = await CustomArena.findById(arenaId)
