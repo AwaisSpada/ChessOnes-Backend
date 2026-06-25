@@ -10,6 +10,7 @@ const {
   isArenaVisibleToUser,
   viewerIsInvited,
 } = require("../utils/customArenaVisibility");
+const { enrichLeaderboardRow, buildRuntimeLeaderboard } = require("../utils/customArenaPairing");
 const {
   initializeArenaRuntime,
   getArenaRuntimeState,
@@ -20,6 +21,7 @@ const {
   acceptArenaPairing,
   enterArenaLobby,
   addInvitesToLiveArena,
+  leaveArenaTournament,
 } = require("../services/customArenaEngine");
 const { getArenaChatMessages } = require("../utils/arenaChat");
 const {
@@ -131,6 +133,7 @@ function buildParticipantsList(arena) {
       username: row.username || "player",
       displayName: row.displayName || row.username || "Player",
       avatar: row.avatar || "",
+      country: row.country || "",
       isHost: hostId && String(row.userId) === hostId,
     }));
   }
@@ -147,6 +150,7 @@ function buildParticipantsList(arena) {
       username: entry.username || "player",
       displayName: entry.displayName || entry.fullName || entry.username || "Player",
       avatar: entry.avatar || "",
+      country: entry.country || "",
       isHost,
     });
   };
@@ -158,6 +162,7 @@ function buildParticipantsList(arena) {
         username: arena.createdBy.username,
         displayName: arena.createdBy.fullName || arena.createdBy.username,
         avatar: arena.createdBy.avatar,
+        country: arena.createdBy.country || "",
       },
       true
     );
@@ -224,23 +229,13 @@ function serializeCustomArena(arena, viewer) {
           username: p.username,
           displayName: p.displayName || p.username,
           avatar: p.avatar || "",
+          country: p.country || "",
         }))
     : [];
 
   const participants = buildParticipantsList(arena);
 
-  const leaderboard = (arena.leaderboard || []).map((row, index) => ({
-    rank: index + 1,
-    userId: String(row.userId),
-    username: row.username,
-    displayName: row.displayName || row.username,
-    avatar: row.avatar || "",
-    points: row.points || 0,
-    wins: row.wins || 0,
-    draws: row.draws || 0,
-    losses: row.losses || 0,
-    gamesPlayed: row.gamesPlayed || 0,
-  }));
+  const leaderboard = buildRuntimeLeaderboard(arena);
 
   return {
     id: String(arena._id),
@@ -304,13 +299,13 @@ async function resolveInvitedPlayers(rawList, currentUserId) {
 
     if (item && typeof item === "object" && item.userId) {
       if (!mongoose.Types.ObjectId.isValid(item.userId)) continue;
-      user = await User.findById(item.userId).select("username fullName avatar");
+      user = await User.findById(item.userId).select("username fullName avatar country");
     } else if (typeof item === "string") {
       const username = item.trim().replace(/^@/, "");
       if (!username) continue;
       user = await User.findOne({
         username: { $regex: new RegExp(`^${escapeRegex(username)}$`, "i") },
-      }).select("username fullName avatar");
+      }).select("username fullName avatar country");
     }
 
     if (!user) continue;
@@ -323,6 +318,7 @@ async function resolveInvitedPlayers(rawList, currentUserId) {
       username: user.username,
       displayName: user.fullName || user.username,
       avatar: user.avatar || "",
+      country: user.country || "",
     });
   }
 
@@ -417,7 +413,7 @@ router.get("/custom-arenas/:id", optionalAuth, async (req, res) => {
     }
 
     const arena = await CustomArena.findById(req.params.id)
-      .populate("createdBy", "username fullName name email avatar")
+      .populate("createdBy", "username fullName name email avatar country")
       .lean();
 
     if (!arena) {
@@ -573,6 +569,43 @@ router.post("/custom-arenas/:id/lobby-enter", auth, async (req, res) => {
   } catch (error) {
     console.error("[Tournaments] custom-arenas lobby-enter error:", error);
     res.status(500).json({ success: false, message: "Failed to enter arena lobby" });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/:id/leave
+// @desc    Voluntarily leave a live arena (no further pairings)
+// @access  Private
+router.post("/custom-arenas/:id/leave", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid arena id" });
+    }
+
+    const arenaLean = await CustomArena.findById(req.params.id).lean();
+    if (!arenaLean) {
+      return res.status(404).json({ success: false, message: "Arena not found" });
+    }
+    if (!isArenaVisibleToUser(arenaLean, req.user)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const { arena, runtime, error } = await leaveArenaTournament(
+      req.params.id,
+      req.user._id
+    );
+
+    if (error && !runtime) {
+      return res.status(400).json({ success: false, message: error });
+    }
+
+    res.json({
+      success: true,
+      data: { runtime, arenaEnded: arena?.status === "ended" },
+      message: error || undefined,
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas leave error:", error);
+    res.status(500).json({ success: false, message: "Failed to leave arena" });
   }
 });
 

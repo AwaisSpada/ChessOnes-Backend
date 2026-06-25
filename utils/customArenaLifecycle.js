@@ -3,6 +3,7 @@ const User = require("../models/User");
 const {
   isMatchCountArenaComplete,
   hasActivePairings,
+  getActiveArenaRoster,
 } = require("../utils/customArenaPairing");
 const { initializeArenaRuntime, tickArenaPairings } = require("../services/customArenaEngine");
 const {
@@ -70,7 +71,7 @@ async function syncCustomArenaStatuses(io = null) {
     status: "live",
     format: "match_count",
   }).select(
-    "_id participantUserIds pairStats matchCount activePairings createdAt"
+    "_id participantUserIds pairStats matchCount activePairings createdAt playerStates"
   );
 
   for (const arena of liveMatchCount) {
@@ -84,8 +85,9 @@ async function syncCustomArenaStatuses(io = null) {
     }
 
     const roster = (arena.participantUserIds || []).map(String);
+    const activeRoster = getActiveArenaRoster(arena.playerStates, roster);
     const complete = isMatchCountArenaComplete(
-      roster,
+      activeRoster,
       arena.pairStats,
       arena.matchCount
     );

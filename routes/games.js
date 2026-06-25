@@ -42,6 +42,139 @@ function serializePerGameMutation(gameId, fn) {
   return next;
 }
 
+/** Ratings, stats, badges, arena sync — must not block move-made / HTTP response on game end. */
+function scheduleGameCompletionSideEffects(gameId, result, io) {
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
+        await syncArenaGameCompletion(gameId, result, io);
+      } catch (arenaErr) {
+        console.error("[Arena] hook failed after game end on move:", arenaErr);
+      }
+
+      try {
+        const { triggerReviewGeneration } = require("../utils/game-review/game-completion-hook");
+        triggerReviewGeneration(gameId);
+      } catch (error) {
+        console.error("[GameReview] Error triggering review generation hook:", error);
+      }
+
+      try {
+        const gameForRating = await Game.findOne({ gameId }).populate(
+          "players.white players.black"
+        );
+        if (!gameForRating) return;
+
+        if (!gameForRating.category && gameForRating.timeControl) {
+          const { setGameCategory } = require("../services/ratingEngine");
+          setGameCategory(gameForRating);
+          await gameForRating.save();
+        }
+
+        const gameTime = Date.now() - gameForRating.createdAt.getTime();
+        const gameCategory = gameForRating.category;
+
+        if (gameForRating.players.white) {
+          const whiteStats = await Stats.findOne({
+            user: gameForRating.players.white._id,
+          });
+          if (whiteStats) {
+            const whiteResult =
+              result.winner === "white"
+                ? "win"
+                : result.winner === "black"
+                  ? "loss"
+                  : "draw";
+            await whiteStats.updateAfterGame(
+              gameForRating.type,
+              whiteResult,
+              gameTime,
+              gameCategory
+            );
+          }
+        }
+
+        if (gameForRating.players.black && gameForRating.type !== "bot") {
+          const blackStats = await Stats.findOne({
+            user: gameForRating.players.black._id,
+          });
+          if (blackStats) {
+            const blackResult =
+              result.winner === "black"
+                ? "win"
+                : result.winner === "white"
+                  ? "loss"
+                  : "draw";
+            await blackStats.updateAfterGame(
+              gameForRating.type,
+              blackResult,
+              gameTime,
+              gameCategory
+            );
+          }
+        }
+
+        if (gameForRating.type === "bot") {
+          const userId =
+            gameForRating.players.white?._id || gameForRating.players.black?._id;
+          if (userId) {
+            const userStats = await Stats.findOne({ user: userId });
+            if (userStats) {
+              const userResult =
+                (gameForRating.players.white && result.winner === "white") ||
+                (gameForRating.players.black && result.winner === "black")
+                  ? "win"
+                  : result.winner === "draw"
+                    ? "draw"
+                    : "loss";
+              await userStats.updateAfterGame(
+                gameForRating.type,
+                userResult,
+                gameTime,
+                gameCategory
+              );
+            }
+          }
+        }
+
+        const { updateGameRatings } = require("../services/updateGameRatings");
+        await updateGameRatings(gameForRating, io);
+
+        try {
+          const { checkAndAwardBadges } = require("../services/achievementService");
+          if (gameForRating.type === "bot") {
+            const userId =
+              gameForRating.players.white?._id || gameForRating.players.black?._id;
+            if (userId) {
+              await checkAndAwardBadges(userId.toString(), gameForRating.gameId, io);
+            }
+          } else {
+            if (gameForRating.players.white) {
+              await checkAndAwardBadges(
+                gameForRating.players.white._id.toString(),
+                gameForRating.gameId,
+                io
+              );
+            }
+            if (gameForRating.players.black) {
+              await checkAndAwardBadges(
+                gameForRating.players.black._id.toString(),
+                gameForRating.gameId,
+                io
+              );
+            }
+          }
+        } catch (badgeError) {
+          console.error("[Game End] Error checking badges:", badgeError);
+        }
+      } catch (err) {
+        console.error("[Game End] post-completion side effects failed:", gameId, err);
+      }
+    })();
+  });
+}
+
 // Material calculation removed - using pure Stockfish evaluation only
 
 /**
@@ -899,106 +1032,44 @@ router.post(
         
         await game.save();
 
-        try {
-          const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
-          await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));
-        } catch (arenaErr) {
-          console.error("[Arena] hook failed after game end on move:", arenaErr);
-        }
-        
-        // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
-        try {
-          const { triggerReviewGeneration } = require("../utils/game-review/game-completion-hook");
-          triggerReviewGeneration(game.gameId);
-        } catch (error) {
-          console.error(`[GameReview] Error triggering review generation hook:`, error);
-        }
-        
-        // Reload game to ensure all fields (including category) are present
-        const gameForRating = await Game.findOne({ gameId: req.params.gameId })
-          .populate("players.white players.black");
-        
-        // Ensure category is set
-        if (!gameForRating.category && gameForRating.timeControl) {
-          const { setGameCategory } = require("../services/ratingEngine");
-          setGameCategory(gameForRating);
-          await gameForRating.save();
-        }
-
-        // Update player stats (WITH category for badge tracking)
-        const Stats = require("../models/Stats");
-        const gameTime = Date.now() - gameForRating.createdAt.getTime();
-        const gameCategory = gameForRating.category;
-
-        if (gameForRating.players.white) {
-          const whiteStats = await Stats.findOne({ user: gameForRating.players.white._id });
-          if (whiteStats) {
-            const whiteResult = game.result.winner === "white" ? "win" : game.result.winner === "black" ? "loss" : "draw";
-            await whiteStats.updateAfterGame(gameForRating.type, whiteResult, gameTime, gameCategory);
-          }
-        }
-
-        if (gameForRating.players.black && gameForRating.type !== "bot") {
-          const blackStats = await Stats.findOne({ user: gameForRating.players.black._id });
-          if (blackStats) {
-            const blackResult = game.result.winner === "black" ? "win" : game.result.winner === "white" ? "loss" : "draw";
-            await blackStats.updateAfterGame(gameForRating.type, blackResult, gameTime, gameCategory);
-          }
-        }
-
-        // For bot games, update stats for the human player
-        if (gameForRating.type === "bot") {
-          const userId = gameForRating.players.white?._id || gameForRating.players.black?._id;
-          if (userId) {
-            const userStats = await Stats.findOne({ user: userId });
-            if (userStats) {
-              const userResult = (gameForRating.players.white && game.result.winner === "white") || 
-                               (gameForRating.players.black && game.result.winner === "black") 
-                               ? "win" : game.result.winner === "draw" ? "draw" : "loss";
-              await userStats.updateAfterGame(gameForRating.type, userResult, gameTime, gameCategory);
-            }
-          }
-        }
-        
-        // Update Glicko-2 ratings for invitation/friend games
-        const { updateGameRatings } = require("../services/updateGameRatings");
         const io = req.app.get("io");
-        await updateGameRatings(gameForRating, io);
+        const terminalMoveData = {
+          gameId: req.params.gameId,
+          move,
+          board: newBoard,
+          currentTurn: game.currentTurn,
+          timeRemaining: game.timeRemaining,
+          isInCheck,
+          isCheckmate: isCheckmateState,
+          isStalemate: isStalemateState,
+          isThreefoldRepetition,
+          isInsufficientMaterial: isInsufficientMaterialState,
+          gameEnded: true,
+          result: game.result,
+        };
 
-        // Check badges for ALL game types
-        try {
-          const { checkAndAwardBadges } = require("../services/achievementService");
-          if (gameForRating.type === "bot") {
-            const userId = gameForRating.players.white?._id || gameForRating.players.black?._id;
-            if (userId) {
-              await checkAndAwardBadges(userId.toString(), gameForRating.gameId, io);
-            }
-          } else {
-            if (gameForRating.players.white) {
-              await checkAndAwardBadges(gameForRating.players.white._id.toString(), gameForRating.gameId, io);
-            }
-            if (gameForRating.players.black) {
-              await checkAndAwardBadges(gameForRating.players.black._id.toString(), gameForRating.gameId, io);
-            }
-          }
-        } catch (badgeError) {
-          console.error("[Game End] Error checking badges:", badgeError);
-        }
-        
-        // Emit game ended event
-        req.app.get("io").to(req.params.gameId).emit("game-ended", {
+        io.to(req.params.gameId).emit("move-made", terminalMoveData);
+        io.to(req.params.gameId).emit("game-ended", {
           gameId: req.params.gameId,
           result: game.result,
         });
-        
-        // Return early since game is completed
+
+        scheduleGameCompletionSideEffects(game.gameId, game.result, io);
+
         return res.json({
           success: true,
           message: "Move made and game ended",
           data: {
             move,
             board: newBoard,
+            currentTurn: game.currentTurn,
+            timeRemaining: game.timeRemaining,
             gameStatus: game.status,
+            gameEnded: true,
+            isCheckmate: isCheckmateState,
+            isStalemate: isStalemateState,
+            isThreefoldRepetition,
+            isInsufficientMaterial: isInsufficientMaterialState,
             result: game.result,
           },
         });
@@ -1140,7 +1211,7 @@ router.post(
           isThreefoldRepetition: isThreefoldRepetition,
           isInsufficientMaterial: isInsufficientMaterialState,
           gameEnded: game.status === "completed",
-          result: game.result || null,
+          result: game.status === "completed" ? game.result : null,
           advantageScore, // Will be 0 initially, updated via WebSocket
         },
       });

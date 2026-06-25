@@ -50,9 +50,21 @@ function getActivePairingCount(activePairings) {
   ).length;
 }
 
+function isLeftTournamentState(state) {
+  return state?.status === "left_tournament";
+}
+
+function getActiveArenaRoster(playerStates, roster) {
+  return (roster || []).map(String).filter((id) => {
+    const state = (playerStates || []).find((s) => String(s.userId) === id);
+    return !isLeftTournamentState(state);
+  });
+}
+
 function getBusyPlayerIds(playerStates) {
   const busy = new Set();
   for (const state of playerStates || []) {
+    if (isLeftTournamentState(state)) continue;
     if (state.status === "in_game" || state.status === "matched") {
       busy.add(String(state.userId));
     }
@@ -62,7 +74,7 @@ function getBusyPlayerIds(playerStates) {
 
 function getQueuePlayerIds(playerStates, roster) {
   const busy = getBusyPlayerIds(playerStates);
-  return (roster || []).map(String).filter((id) => {
+  return getActiveArenaRoster(playerStates, roster).filter((id) => {
     if (busy.has(id)) return false;
     const state = (playerStates || []).find((s) => String(s.userId) === id);
     return state?.status === "idle" && state.matchmakingReady === true;
@@ -257,6 +269,33 @@ function upsertPairStats(pairStats, userId1, userId2, whiteUserId) {
   return next;
 }
 
+function lookupParticipantMeta(arena, userId) {
+  const id = String(userId);
+  const hostId = String(arena?.createdBy?._id || arena?.createdBy || "");
+  if (id === hostId && arena?.createdBy && typeof arena.createdBy === "object") {
+    return {
+      avatar: arena.createdBy.avatar || "",
+      country: arena.createdBy.country || "",
+    };
+  }
+  const invite = (arena?.invitedPlayers || []).find(
+    (entry) => entry?.userId && String(entry.userId) === id
+  );
+  return {
+    avatar: invite?.avatar || "",
+    country: invite?.country || "",
+  };
+}
+
+function enrichLeaderboardRow(row, arena) {
+  const meta = lookupParticipantMeta(arena, row.userId);
+  return {
+    ...cloneLeaderboardRow(row),
+    avatar: row.avatar || meta.avatar || "",
+    country: row.country || meta.country || "",
+  };
+}
+
 function ensureLeaderboardRows(leaderboard, whiteUserId, blackUserId, arenaMeta = {}) {
   const { invitedPlayers = [], createdBy } = arenaMeta;
   const next = (leaderboard || []).map(cloneLeaderboardRow);
@@ -269,6 +308,7 @@ function ensureLeaderboardRows(leaderboard, whiteUserId, blackUserId, arenaMeta 
       username: createdBy.username || "host",
       displayName: createdBy.fullName || createdBy.username || "Host",
       avatar: createdBy.avatar || "",
+      country: createdBy.country || "",
     });
   }
   for (const invite of invitedPlayers || []) {
@@ -279,6 +319,7 @@ function ensureLeaderboardRows(leaderboard, whiteUserId, blackUserId, arenaMeta 
       username: invite.username || "player",
       displayName: invite.displayName || invite.username || "Player",
       avatar: invite.avatar || "",
+      country: invite.country || "",
     });
   }
 
@@ -291,6 +332,7 @@ function ensureLeaderboardRows(leaderboard, whiteUserId, blackUserId, arenaMeta 
       username: meta?.username || "player",
       displayName: meta?.displayName || "Player",
       avatar: meta?.avatar || "",
+      country: meta?.country || "",
       points: 0,
       wins: 0,
       draws: 0,
@@ -373,6 +415,7 @@ function buildLeaderboardEntries(hostUser, hostPlays, invitedPlayers) {
       username: user.username || "player",
       displayName: user.displayName || user.fullName || user.username || "Player",
       avatar: user.avatar || "",
+      country: user.country || "",
       points: 0,
       wins: 0,
       draws: 0,
@@ -387,6 +430,7 @@ function buildLeaderboardEntries(hostUser, hostPlays, invitedPlayers) {
       username: hostUser.username,
       displayName: hostUser.fullName || hostUser.username,
       avatar: hostUser.avatar,
+      country: hostUser.country,
     });
   }
 
@@ -407,6 +451,64 @@ function buildInitialPlayerStates(roster) {
   }));
 }
 
+function isLeaderboardRowDiscarded(arena, userId) {
+  const uid = String(userId);
+  const state = (arena.playerStates || []).find((s) => String(s.userId) === uid);
+  if (state?.status === "left_tournament") return true;
+  const row = (arena.leaderboard || []).find((r) => String(r.userId) === uid);
+  return !!row?.discarded;
+}
+
+function buildRuntimeLeaderboard(arena) {
+  const rows = (arena.leaderboard || []).map((row) => {
+    const enriched = enrichLeaderboardRow(row, arena);
+    const discarded = isLeaderboardRowDiscarded(arena, enriched.userId);
+    return {
+      enriched,
+      discarded,
+      points: enriched.points || 0,
+      gamesPlayed: enriched.gamesPlayed || 0,
+      wins: enriched.wins || 0,
+    };
+  });
+
+  const sortByStanding = (a, b) =>
+    b.points - a.points ||
+    b.wins - a.wins ||
+    b.gamesPlayed - a.gamesPlayed;
+
+  const active = rows.filter((r) => !r.discarded).sort(sortByStanding);
+  const left = rows.filter((r) => r.discarded).sort(sortByStanding);
+  const ordered = [...active, ...left];
+
+  return ordered.map((entry, index) => {
+    const enriched = entry.enriched;
+    return {
+      rank: index + 1,
+      userId: String(enriched.userId),
+      username: enriched.username,
+      displayName: enriched.displayName,
+      avatar: enriched.avatar || "",
+      country: enriched.country || "",
+      points: enriched.points || 0,
+      wins: enriched.wins || 0,
+      draws: enriched.draws || 0,
+      losses: enriched.losses || 0,
+      gamesPlayed: enriched.gamesPlayed || 0,
+      discarded: entry.discarded,
+    };
+  });
+}
+
+function markLeaderboardRowDiscarded(leaderboard, userId) {
+  const uid = String(userId);
+  return (leaderboard || []).map((row) => {
+    const rowObj = row?.toObject?.() ? row.toObject() : { ...row };
+    if (String(rowObj.userId) !== uid) return rowObj;
+    return { ...rowObj, discarded: true };
+  });
+}
+
 module.exports = {
   ARENA_SCORING,
   canonicalPair,
@@ -418,6 +520,7 @@ module.exports = {
   getFreePlayerIds,
   getQueuePlayerIds,
   getBusyPlayerIds,
+  getActiveArenaRoster,
   selectMatchCountPairings,
   selectTimeDurationPairings,
   canPairTimeDuration,
@@ -429,4 +532,9 @@ module.exports = {
   buildParticipantRoster,
   buildLeaderboardEntries,
   buildInitialPlayerStates,
+  enrichLeaderboardRow,
+  lookupParticipantMeta,
+  buildRuntimeLeaderboard,
+  markLeaderboardRowDiscarded,
+  isLeaderboardRowDiscarded,
 };

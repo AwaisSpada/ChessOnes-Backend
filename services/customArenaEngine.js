@@ -14,7 +14,11 @@ const {
   buildParticipantRoster,
   buildLeaderboardEntries,
   buildInitialPlayerStates,
+  enrichLeaderboardRow,
   getMaxConcurrentMatches,
+  getActiveArenaRoster,
+  buildRuntimeLeaderboard,
+  markLeaderboardRowDiscarded,
 } = require("../utils/customArenaPairing");
 
 function markArenaDirty(arena) {
@@ -203,7 +207,7 @@ async function tickArenaPairings(arenaId) {
   const arena = await CustomArena.findById(arenaId);
   if (!arena || arena.status !== "live") return arena;
 
-  const roster = (arena.participantUserIds || []).map(String);
+  const roster = getActiveArenaRoster(arena.playerStates, arena.participantUserIds);
   if (roster.length < 2) return arena;
 
   let selected = [];
@@ -369,7 +373,7 @@ async function findArenaByGameId(gameId) {
 async function recordArenaGameResult(arenaId, { pairingId, gameId, winner }) {
   const arena = await CustomArena.findById(arenaId).populate(
     "createdBy",
-    "username fullName avatar"
+    "username fullName avatar country"
   );
   if (!arena) {
     return { arena: null, error: "Arena not found" };
@@ -495,7 +499,7 @@ async function recordArenaGameResult(arenaId, { pairingId, gameId, winner }) {
   if (
     arena.format === "match_count" &&
     isMatchCountArenaComplete(
-      (arena.participantUserIds || []).map(String),
+      getActiveArenaRoster(arena.playerStates, arena.participantUserIds),
       arena.pairStats,
       arena.matchCount
     ) &&
@@ -555,18 +559,7 @@ function serializeArenaRuntime(arena) {
     maxConcurrentMatches: getMaxConcurrentMatches(roster.length),
     participantCount: roster.length,
     participantUserIds: roster,
-    leaderboard: (arena.leaderboard || []).map((row, index) => ({
-      rank: index + 1,
-      userId: String(row.userId),
-      username: row.username,
-      displayName: row.displayName,
-      avatar: row.avatar || "",
-      points: row.points || 0,
-      wins: row.wins || 0,
-      draws: row.draws || 0,
-      losses: row.losses || 0,
-      gamesPlayed: row.gamesPlayed || 0,
-    })),
+    leaderboard: buildRuntimeLeaderboard(arena),
     playerStates: (arena.playerStates || []).map((state) => ({
       userId: String(state.userId),
       status: state.status,
@@ -699,6 +692,11 @@ async function enterArenaLobby(arenaId, userId) {
   }
 
   let myState = playerStates[stateIndex];
+
+  if (myState.status === "left_tournament") {
+    const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+    return { runtime, error: null };
+  }
 
   const activeGamePairing = (arena.activePairings || []).find(
     (pairing) =>
@@ -973,6 +971,13 @@ async function setArenaMatchmakingReady(arenaId, userId, ready) {
   }
 
   const state = playerStates[index];
+  if (state.status === "left_tournament") {
+    return {
+      arena,
+      runtime: null,
+      error: "You left this tournament",
+    };
+  }
   if (state.status === "matched" || state.status === "in_game") {
     return {
       arena,
@@ -1130,6 +1135,7 @@ async function addInvitesToLiveArena(arenaId, resolvedInvites) {
         username: invite.username || "player",
         displayName: invite.displayName || invite.username || "Player",
         avatar: invite.avatar || "",
+        country: invite.country || "",
         points: 0,
         wins: 0,
         draws: 0,
@@ -1158,6 +1164,146 @@ async function addInvitesToLiveArena(arenaId, resolvedInvites) {
   return { ok: true, message: null, added: newInvites.length, arena, newInvites };
 }
 
+function removeOpenPairingsForUser(activePairings, userId) {
+  const uid = String(userId);
+  const removed = [];
+  const next = (activePairings || []).filter((pairing) => {
+    const involves =
+      String(pairing.whiteUserId) === uid || String(pairing.blackUserId) === uid;
+    if (!involves) return true;
+    if (pairing.status === "completed") return true;
+    if (pairing.status === "active" && pairing.gameId) return true;
+    removed.push(pairing);
+    return false;
+  });
+  return { pairings: next, removed };
+}
+
+function maybeEndMatchCountArena(arena) {
+  if (arena.format !== "match_count" || arena.status !== "live") return arena;
+
+  const roster = (arena.participantUserIds || []).map(String);
+  const activeRoster = getActiveArenaRoster(arena.playerStates, roster);
+  const openPairings = (arena.activePairings || []).filter(
+    (p) => p.status !== "completed"
+  );
+
+  if (activeRoster.length < 2) {
+    arena.status = "ended";
+    arena.endedAt = new Date();
+    return arena;
+  }
+
+  if (
+    isMatchCountArenaComplete(activeRoster, arena.pairStats, arena.matchCount) &&
+    !hasActivePairings(openPairings)
+  ) {
+    arena.status = "ended";
+    arena.endedAt = new Date();
+  }
+
+  return arena;
+}
+
+async function leaveArenaTournament(arenaId, userId) {
+  let arena = await syncStaleArenaPairings(arenaId);
+  if (!arena) {
+    arena = await CustomArena.findById(arenaId);
+  }
+  if (!arena) {
+    return { arena: null, runtime: null, error: "Arena not found" };
+  }
+  if (arena.status !== "live") {
+    return {
+      arena,
+      runtime: serializeArenaRuntime(arena),
+      error: "Arena is not live",
+    };
+  }
+
+  const uid = String(userId);
+  const roster = (arena.participantUserIds || []).map(String);
+  if (!roster.includes(uid)) {
+    return { arena, runtime: null, error: "You are not in this arena" };
+  }
+
+  let playerStates = [...(arena.playerStates || [])];
+  const state = playerStates.find((s) => String(s.userId) === uid);
+  if (!state) {
+    return { arena, runtime: null, error: "Player state not found" };
+  }
+  if (state.status === "left_tournament") {
+    const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+    return { arena, runtime, error: null };
+  }
+
+  if (state.status === "in_game" && state.currentGameId) {
+    const stillLive = await isGameStillActive(state.currentGameId);
+    if (stillLive) {
+      return {
+        arena,
+        runtime: null,
+        error: "Finish or resign your current game before leaving the tournament",
+      };
+    }
+  }
+
+  const activePairing = (arena.activePairings || []).find(
+    (pairing) =>
+      (String(pairing.whiteUserId) === uid ||
+        String(pairing.blackUserId) === uid) &&
+      pairing.status === "active" &&
+      pairing.gameId
+  );
+  if (activePairing?.gameId) {
+    const stillLive = await isGameStillActive(activePairing.gameId);
+    if (stillLive) {
+      return {
+        arena,
+        runtime: null,
+        error: "Finish or resign your current game before leaving the tournament",
+      };
+    }
+  }
+
+  const { pairings: nextPairings, removed } = removeOpenPairingsForUser(
+    arena.activePairings,
+    uid
+  );
+  arena.activePairings = nextPairings;
+
+  for (const pairing of removed) {
+    const oppId =
+      String(pairing.whiteUserId) === uid
+        ? String(pairing.blackUserId)
+        : String(pairing.whiteUserId);
+    const oppState = playerStates.find((s) => String(s.userId) === oppId);
+    if (oppState && oppState.status !== "left_tournament") {
+      playerStates = setPlayerStatus(playerStates, oppId, {
+        status: "idle",
+        matchmakingReady: false,
+        currentGameId: null,
+      });
+    }
+  }
+
+  playerStates = setPlayerStatus(playerStates, uid, {
+    status: "left_tournament",
+    matchmakingReady: false,
+    currentGameId: null,
+    lastOpponentUserId: state.lastOpponentUserId || null,
+  });
+  arena.playerStates = playerStates;
+  arena.leaderboard = markLeaderboardRowDiscarded(arena.leaderboard, uid);
+
+  arena = maybeEndMatchCountArena(arena);
+  markArenaDirty(arena);
+  await saveArenaDoc(arena);
+
+  const runtime = await getArenaRuntimeState(arenaId, { autoTick: true });
+  return { arena, runtime, error: null };
+}
+
 module.exports = {
   ensureRuntimeInitialized,
   initializeArenaRuntime,
@@ -1172,4 +1318,5 @@ module.exports = {
   setArenaMatchmakingReady,
   acceptArenaPairing,
   addInvitesToLiveArena,
+  leaveArenaTournament,
 };
