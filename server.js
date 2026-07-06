@@ -386,6 +386,10 @@ function getDynamicRange(timeInQueueMs) {
 function canMatch(player1, player2) {
   // Must have same category
   if (player1.category !== player2.category) return false;
+
+  const matchType1 = player1.matchType || "rated";
+  const matchType2 = player2.matchType || "rated";
+  if (matchType1 !== matchType2) return false;
   
   // Must have EXACT same time control (initialTime and increment)
   if (!player1.timeControl || !player2.timeControl) {
@@ -452,7 +456,7 @@ async function createMatchmakingGame(player1, player2, category) {
     const game = new Game({
       gameId: gameId,
       type: "multiplayer", // Rated multiplayer game
-      isRated: true,
+      isRated: (player1.matchType || "rated") !== "unrated",
       players: {
         white: player1.userId,
         black: player2.userId,
@@ -767,7 +771,7 @@ io.on("connection", (socket) => {
   // Join matchmaking queue
   socket.on("JOIN_MATCHMAKING", async (payload) => {
     try {
-      const { userId, rating, category, timeControl } = payload || {};
+      const { userId, rating, category, timeControl, matchType } = payload || {};
       
       if (!userId || !rating || !category) {
         socket.emit("MATCHMAKING_ERROR", {
@@ -814,11 +818,14 @@ io.on("connection", (socket) => {
       }
       
       // Add to matchmaking pool with time control
+      const normalizedMatchType =
+        matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
       const player = {
         userId: userId.toString(),
         socketId: socket.id,
         category: normalizedCategory, // Use normalized category
         rating: rating,
+        matchType: normalizedMatchType,
         timeControl: {
           initialTime: timeControl.initialTime, // in milliseconds
           increment: timeControl.increment, // in milliseconds
