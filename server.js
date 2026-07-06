@@ -179,6 +179,25 @@ const gameRoomUsers = new Map(); // gameId -> Set of userIds
 // Track per-game ready state in memory: Map<gameId, { [userId]: boolean }>
 const gameReadyState = new Map();
 
+function readyFlagForPlayer(state, playerId) {
+  if (!playerId) return false;
+  const pid = String(playerId);
+  if (state[pid] === true) return true;
+  return Object.entries(state || {}).some(
+    ([key, value]) => key.toString() === pid && value === true
+  );
+}
+
+function buildCanonicalReadyState(rawState, whiteId, blackId) {
+  const w = whiteId ? String(whiteId) : null;
+  const b = blackId ? String(blackId) : null;
+  if (!w || !b) return rawState || {};
+  return {
+    [w]: readyFlagForPlayer(rawState, w),
+    [b]: readyFlagForPlayer(rawState, b),
+  };
+}
+
 /** Brief disconnect (refresh / tab switch) must not instantly forfeit active games. */
 const DISCONNECT_GAME_END_GRACE_MS = 45_000;
 const DISCONNECT_ARENA_GAME_END_GRACE_MS = 60_000;
@@ -916,24 +935,39 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("player-ready", (payload) => {
+  socket.on("player-ready", async (payload) => {
     try {
       const { gameId, userId, ready } = payload || {};
       if (!gameId || !userId) return;
 
+      const normalizedId = String(userId);
       const current = gameReadyState.get(gameId) || {};
-      current[userId] = !!ready;
-      gameReadyState.set(gameId, current);
+      current[normalizedId] = !!ready;
 
-      const readyValues = Object.values(current);
-      const allReady =
-        readyValues.length >= 2 && readyValues.every((val) => val === true);
+      const Game = require("./models/Game");
+      const game = await Game.findOne({ gameId }).select("players").lean();
+
+      let state = current;
+      let allReady = false;
+
+      if (game?.players?.white && game?.players?.black) {
+        const whiteId = String(game.players.white);
+        const blackId = String(game.players.black);
+        state = buildCanonicalReadyState(current, whiteId, blackId);
+        allReady = state[whiteId] === true && state[blackId] === true;
+      } else {
+        const readyValues = Object.values(current);
+        allReady =
+          readyValues.length >= 2 && readyValues.every((val) => val === true);
+      }
+
+      gameReadyState.set(gameId, state);
 
       io.to(gameId).emit("ready:update", {
         gameId,
-        userId,
+        userId: normalizedId,
         ready: !!ready,
-        state: current,
+        state,
         allReady,
       });
     } catch (err) {
