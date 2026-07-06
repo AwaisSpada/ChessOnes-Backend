@@ -2095,6 +2095,73 @@ router.post(
       game.markModified("status");
       await game.save();
 
+      if (result.reason === "first-move-abandon") {
+        try {
+          const GameInvitation = require("../models/GameInvitation");
+          const expiredInvites = await GameInvitation.find({
+            gameId: game.gameId,
+            status: "pending",
+          }).populate([
+            { path: "fromUser", select: "username fullName avatar rating country" },
+            { path: "toUser", select: "username fullName avatar rating country" },
+          ]);
+
+          if (expiredInvites.length > 0) {
+            await GameInvitation.updateMany(
+              { gameId: game.gameId, status: "pending" },
+              { $set: { status: "expired" } }
+            );
+
+            const io = req.app.get("io");
+            if (io) {
+              for (const invitation of expiredInvites) {
+                const formatted = {
+                  id: invitation._id,
+                  token: invitation.token,
+                  status: "expired",
+                  gameType: invitation.gameType,
+                  matchType: invitation.matchType || "rated",
+                  gameFormat: "friend",
+                  gameId: invitation.gameId,
+                  from: invitation.fromUser
+                    ? {
+                        id: invitation.fromUser._id,
+                        username: invitation.fromUser.username,
+                        fullName: invitation.fromUser.fullName,
+                        rating: invitation.fromUser.rating,
+                        avatar: invitation.fromUser.avatar,
+                      }
+                    : null,
+                  to: invitation.toUser
+                    ? {
+                        id: invitation.toUser._id,
+                        username: invitation.toUser.username,
+                        fullName: invitation.toUser.fullName,
+                        rating: invitation.toUser.rating,
+                        avatar: invitation.toUser.avatar,
+                      }
+                    : null,
+                };
+                if (invitation.fromUser?._id) {
+                  io.to(`user:${invitation.fromUser._id.toString()}`).emit(
+                    "challenge:update",
+                    formatted
+                  );
+                }
+                if (invitation.toUser?._id) {
+                  io.to(`user:${invitation.toUser._id.toString()}`).emit(
+                    "challenge:update",
+                    formatted
+                  );
+                }
+              }
+            }
+          }
+        } catch (inviteErr) {
+          console.error("[GameEnd] Failed to expire pending invitations:", inviteErr);
+        }
+      }
+
       try {
         const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
         await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));

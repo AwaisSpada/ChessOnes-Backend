@@ -1135,10 +1135,16 @@ io.on("connection", (socket) => {
       });
 
       if (existingPending) {
-        socket.emit("invite-error", {
-          message: "You already have a pending challenge to this user",
-        });
-        return;
+        const staleGame = await Game.findOne({ gameId: existingPending.gameId });
+        if (staleGame && staleGame.status === "active") {
+          socket.emit("invite-error", {
+            message: "You already have a pending challenge to this user",
+          });
+          return;
+        }
+
+        existingPending.status = "expired";
+        await existingPending.save();
       }
 
       // Create game
