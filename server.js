@@ -963,13 +963,21 @@ io.on("connection", (socket) => {
 
       gameReadyState.set(gameId, state);
 
-      io.to(gameId).emit("ready:update", {
+      const readyPayload = {
         gameId,
         userId: normalizedId,
         ready: !!ready,
         state,
         allReady,
-      });
+      };
+
+      io.to(gameId).emit("ready:update", readyPayload);
+      if (game?.players?.white) {
+        io.to(`user:${String(game.players.white)}`).emit("ready:update", readyPayload);
+      }
+      if (game?.players?.black) {
+        io.to(`user:${String(game.players.black)}`).emit("ready:update", readyPayload);
+      }
     } catch (err) {
       console.error("player-ready socket handler error:", err);
     }
