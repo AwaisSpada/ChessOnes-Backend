@@ -199,7 +199,8 @@ router.get("/leaderboard", auth, async (req, res) => {
       return {
         rank: index + 1,
         userId: user._id,
-        name: user.fullName?.trim() || user.username?.trim() || "Player",
+        username: user.username?.trim() || "",
+        name: user.username?.trim() || user.fullName?.trim() || "Player",
         rating: Math.round(Number(rating) || 0),
         country: user.country || "",
         avatar: user.avatar || null,
