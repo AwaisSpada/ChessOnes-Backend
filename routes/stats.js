@@ -160,49 +160,56 @@ router.post("/player", auth, async (req, res) => {
 })
 
 // @route   GET /api/stats/leaderboard
-// @desc    Get leaderboard
+// @desc    Global leaderboard by time category or puzzles
 // @access  Private
 router.get("/leaderboard", auth, async (req, res) => {
   try {
-    const { type = "rating", limit = 50 } = req.query
+    const category = String(req.query.category || req.query.type || "blitz").toLowerCase()
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 50, 1), 100)
 
-    let sortField = "rating"
-    if (type === "wins") sortField = "wins.total"
-    else if (type === "games") sortField = "gamesPlayed.total"
-    else if (type === "winRate") sortField = "winRate"
+    const validCategories = new Set(["bullet", "blitz", "rapid", "puzzles"])
+    if (!validCategories.has(category)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid category. Use bullet, blitz, rapid, or puzzles.",
+      })
+    }
 
-    const users = await User.find({ rating: { $gt: 0 } })
-      .select("username fullName avatar rating")
+    const isPuzzles = category === "puzzles"
+    const query = isPuzzles
+      ? { puzzleRating: { $gt: 0 } }
+      : { [`ratings.${category}.rating`]: { $gt: 0 } }
+
+    const sortField = isPuzzles ? "puzzleRating" : `ratings.${category}.rating`
+
+    const users = await User.find(query)
+      .select("username fullName avatar country ratings puzzleRating")
       .sort({ [sortField]: -1 })
-      .limit(Number.parseInt(limit))
+      .limit(limit)
+      .lean()
 
-    // Get stats for each user
-    const leaderboard = await Promise.all(
-      users.map(async (user) => {
-        const stats = await Stats.findOne({ user: user._id })
-        return {
-          user: {
-            id: user._id,
-            username: user.username,
-            fullName: user.fullName,
-            avatar: user.avatar,
-            rating: user.rating,
-          },
-          stats: stats
-            ? {
-                gamesPlayed: stats.gamesPlayed.total,
-                wins: stats.wins.total,
-                winRate: stats.winRate,
-                currentStreak: stats.currentStreak,
-              }
-            : null,
-        }
-      }),
-    )
+    const friendIds = new Set((req.user.friends || []).map((id) => String(id)))
+    const myId = String(req.user._id)
+
+    const leaderboard = users.map((user, index) => {
+      const rating = isPuzzles
+        ? user.puzzleRating ?? 0
+        : user.ratings?.[category]?.rating ?? 1500
+
+      return {
+        rank: index + 1,
+        userId: user._id,
+        name: user.fullName?.trim() || user.username?.trim() || "Player",
+        rating: Math.round(Number(rating) || 0),
+        country: user.country || "",
+        avatar: user.avatar || null,
+        isFriend: friendIds.has(String(user._id)) || String(user._id) === myId,
+      }
+    })
 
     res.json({
       success: true,
-      data: { leaderboard },
+      data: { leaderboard, category },
     })
   } catch (error) {
     console.error("Get leaderboard error:", error)
