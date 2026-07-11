@@ -1067,6 +1067,7 @@ router.get("/search", auth, async (req, res) => {
         username: user.username,
         fullName: user.fullName,
         avatar: user.avatar,
+        country: user.country,
         rating: user.rating,
         status: user.status,
         isFriend,

@@ -268,7 +268,7 @@ router.get("/profile", auth, async (req, res) => {
       // Full profile for own profile
       user = await User.findById(req.user._id)
         .select("-password")
-        .populate("friends", "username fullName avatar status rating")
+        .populate("friends", "username fullName avatar status rating country")
         .populate("badges.badgeId", "name description imageUrl");
     } else {
       // Public profile for other users — explicit allow-list (see
@@ -279,7 +279,7 @@ router.get("/profile", auth, async (req, res) => {
         .select(OTHER_USER_FIELDS)
         .populate("badges.badgeId", "name description imageUrl");
       if (user && user.friends && user.friends.length > 0) {
-        await user.populate("friends", "username fullName avatar status rating");
+        await user.populate("friends", "username fullName avatar status rating country");
       }
     }
 
