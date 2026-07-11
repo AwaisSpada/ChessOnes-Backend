@@ -103,6 +103,7 @@ router.post(
         country: country || "",
         status: "online",
         ratings: defaultRatings,
+        hasCompletedSignupDetails: true,
       });
 
       await user.save();
@@ -177,6 +178,7 @@ router.post(
             country: user.country,
             hasAcceptedPolicies: user.hasAcceptedPolicies === true,
             hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
+            hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
           },
         },
       });
@@ -295,6 +297,7 @@ router.post(
               role: user.role || "USER", // Include role for admin check
               hasAcceptedPolicies: user.hasAcceptedPolicies === true,
               hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
+              hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
             },
           },
         });
@@ -324,6 +327,7 @@ router.post(
             role: user.role || "USER", // Include role for admin check
             hasAcceptedPolicies: user.hasAcceptedPolicies === true,
             hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
+            hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
           },
         },
       })
@@ -728,6 +732,8 @@ router.post("/social", async (req, res) => {
       ],
     });
 
+    let isNewUser = false;
+
     if (user) {
       // Update existing user with social auth info if needed
       if (!user.provider) {
@@ -742,6 +748,7 @@ router.post("/social", async (req, res) => {
       }
       await user.save();
     } else {
+      isNewUser = true;
       // Create new user
       // Generate username from email or name
       let username = email.split("@")[0].toLowerCase();
@@ -787,9 +794,11 @@ router.post("/social", async (req, res) => {
         avatar: image || null,
         provider,
         providerId,
-        ageGroup: "18-25", // Default
+        ageGroup: "18-25", // Default until OAuth checklist collects a real age group
         status: "online",
         ratings: defaultRatings,
+        hasCompletedSignupDetails: false,
+        hasAcceptedPolicies: false,
       });
 
       await user.save();
@@ -809,6 +818,7 @@ router.post("/social", async (req, res) => {
       message: "Social authentication successful",
       data: {
         token,
+        isNewUser,
         user: {
           id: user._id,
           _id: user._id,
@@ -819,8 +829,10 @@ router.post("/social", async (req, res) => {
           ratings: user.ratings,
           status: user.status,
           country: user.country,
+          ageGroup: user.ageGroup,
           hasAcceptedPolicies: user.hasAcceptedPolicies === true,
           hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
+          hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
         },
       },
     });

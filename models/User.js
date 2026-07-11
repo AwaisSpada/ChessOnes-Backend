@@ -241,6 +241,12 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /** Email signup fills username/country in-modal; OAuth users must finish that checklist after social auth. */
+    hasCompletedSignupDetails: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
     hasAcceptedMessengerTerms: {
       type: Boolean,
       default: false,

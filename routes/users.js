@@ -444,6 +444,7 @@ router.put(
         currentPassword,
         newPassword,
         confirmNewPassword,
+        completeSignupDetails,
       } = req.body;
 
       const updateFields = {};
@@ -474,6 +475,9 @@ router.put(
       if (country !== undefined) updateFields.country = country;
       if (avatar) updateFields.avatar = avatar;
       if (status !== undefined) updateFields.status = status;
+      if (completeSignupDetails === true) {
+        updateFields.hasCompletedSignupDetails = true;
+      }
 
       const user = await User.findById(req.user._id);
       if (!user) {

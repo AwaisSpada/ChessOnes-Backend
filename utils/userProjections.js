@@ -73,6 +73,7 @@ const SENSITIVE_KEYS = new Set([
   "isSuspended",
   "hasAcceptedPolicies",
   "acceptedPoliciesAt",
+  "hasCompletedSignupDetails",
   "hasAcceptedMessengerTerms",
   "acceptedMessengerTermsAt",
   "accountStatus",
