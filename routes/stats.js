@@ -3,6 +3,7 @@ const { body, validationResult } = require("express-validator")
 const Stats = require("../models/Stats")
 const User = require("../models/User")
 const Game = require("../models/Game")
+const PuzzleAttempt = require("../models/PuzzleAttempt")
 const auth = require("../middleware/auth")
 
 const router = express.Router()
@@ -176,17 +177,27 @@ router.get("/leaderboard", auth, async (req, res) => {
     }
 
     const isPuzzles = category === "puzzles"
-    const query = isPuzzles
-      ? { puzzleRating: { $gt: 0 } }
-      : { [`ratings.${category}.rating`]: { $gt: 0 } }
 
-    const sortField = isPuzzles ? "puzzleRating" : `ratings.${category}.rating`
-
-    const users = await User.find(query)
-      .select("username fullName avatar country ratings puzzleRating")
-      .sort({ [sortField]: -1 })
-      .limit(limit)
-      .lean()
+    let users
+    if (isPuzzles) {
+      // Same source of truth as /puzzles/stats/user + friends page: User.puzzleRating.
+      // Only include players who actually attempted puzzles (avoids everyone stuck at default 100).
+      const attemptedUserIds = await PuzzleAttempt.distinct("user")
+      users = await User.find({
+        _id: { $in: attemptedUserIds },
+        puzzleRating: { $exists: true, $ne: null },
+      })
+        .select("username fullName avatar country ratings puzzleRating")
+        .sort({ puzzleRating: -1 })
+        .limit(limit)
+        .lean()
+    } else {
+      users = await User.find({ [`ratings.${category}.rating`]: { $gt: 0 } })
+        .select("username fullName avatar country ratings puzzleRating")
+        .sort({ [`ratings.${category}.rating`]: -1 })
+        .limit(limit)
+        .lean()
+    }
 
     const friendIds = new Set((req.user.friends || []).map((id) => String(id)))
     const myId = String(req.user._id)
@@ -196,12 +207,16 @@ router.get("/leaderboard", auth, async (req, res) => {
         ? user.puzzleRating ?? 0
         : user.ratings?.[category]?.rating ?? 1500
 
+      const rounded = Math.round(Number(rating) || 0)
+
       return {
         rank: index + 1,
         userId: user._id,
         username: user.username?.trim() || "",
         name: user.username?.trim() || user.fullName?.trim() || "Player",
-        rating: Math.round(Number(rating) || 0),
+        rating: rounded,
+        // Explicit field — mobile/web friends leaderboard reads puzzleRating the same way
+        puzzleRating: isPuzzles ? rounded : undefined,
         country: user.country || "",
         avatar: user.avatar || null,
         isFriend: friendIds.has(String(user._id)) || String(user._id) === myId,
