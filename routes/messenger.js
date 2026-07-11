@@ -196,7 +196,7 @@ router.get("/inbox", messengerAuth, async (req, res) => {
       const extras = await User.find({
         _id: { $in: [...missingPeerIds] },
       })
-        .select("username fullName avatar status rating")
+        .select("username fullName avatar status rating country")
         .lean();
       for (const u of extras) {
         peerById.set(u._id.toString(), u);
@@ -223,6 +223,7 @@ router.get("/inbox", messengerAuth, async (req, res) => {
         conversationId: c._id.toString(),
         name: f.fullName || f.username || "Player",
         avatar: f.avatar || undefined,
+        country: f.country || undefined,
         lastMessage: previewMessengerBody(decrypt(c.lastMessageSnippet || "")),
         lastMessageAt: new Date(c.lastMessageAt).toISOString(),
         hasUnread: unreadForViewer(c, myId),
