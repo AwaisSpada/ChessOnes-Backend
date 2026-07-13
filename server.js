@@ -1275,6 +1275,7 @@ io.on("connection", (socket) => {
           fullName: invitation.fromUser.fullName,
           rating: invitation.fromUser.rating,
           avatar: invitation.fromUser.avatar,
+          country: invitation.fromUser.country || "",
         },
         to: {
           id: invitation.toUser._id,
@@ -1282,6 +1283,7 @@ io.on("connection", (socket) => {
           fullName: invitation.toUser.fullName,
           rating: invitation.toUser.rating,
           avatar: invitation.toUser.avatar,
+          country: invitation.toUser.country || "",
         },
       };
 
