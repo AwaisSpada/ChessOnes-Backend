@@ -29,7 +29,15 @@ router.get("/", optionalAuth, async (req, res) => {
     }
 
     if (theme) {
-      query.themes = { $in: [theme] };
+      const themes = String(theme)
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      if (themes.length === 1) {
+        query.themes = themes[0];
+      } else if (themes.length > 1) {
+        query.themes = { $in: themes };
+      }
     }
 
     if (minRating || maxRating) {
@@ -110,7 +118,7 @@ router.get("/", optionalAuth, async (req, res) => {
 // Implements rating-based selection with exclusion of already played puzzles
 router.get("/random/get", optionalAuth, async (req, res) => {
   try {
-    const { difficulty, minRating, maxRating } = req.query;
+    const { difficulty, minRating, maxRating, theme } = req.query;
 
     // Get user's puzzle rating if authenticated
     let userPuzzleRating = 100; // Default for non-authenticated users
@@ -139,6 +147,18 @@ router.get("/random/get", optionalAuth, async (req, res) => {
 
     if (difficulty) {
       query.difficulty = difficulty.toUpperCase();
+    }
+
+    if (theme) {
+      const themes = String(theme)
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean);
+      if (themes.length === 1) {
+        query.themes = themes[0];
+      } else if (themes.length > 1) {
+        query.themes = { $in: themes };
+      }
     }
 
     // Rating-based selection: puzzles within ±200 of user rating (widens if needed)
@@ -476,13 +496,22 @@ router.get("/stats/user", auth, async (req, res) => {
   }
 });
 
-// Get available themes - optional auth
+// Get available themes with counts - optional auth
 router.get("/themes/list", optionalAuth, async (req, res) => {
   try {
-    const themes = await Puzzle.distinct("themes");
+    const rows = await Puzzle.aggregate([
+      { $unwind: "$themes" },
+      { $group: { _id: "$themes", count: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]);
+    const themes = rows.map((r) => r._id).filter(Boolean).sort();
+    const counts = {};
+    for (const row of rows) {
+      if (row._id) counts[row._id] = row.count;
+    }
     res.json({
       success: true,
-      data: { themes: themes.sort() },
+      data: { themes, counts },
     });
   } catch (error) {
     console.error("Error fetching themes:", error);
