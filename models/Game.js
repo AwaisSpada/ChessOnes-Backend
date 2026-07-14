@@ -251,6 +251,22 @@ const gameSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    /**
+     * Client-generated id for mobile/local bot games (idempotent import).
+     * Sparse unique so online/server-created games stay null.
+     */
+    clientGameId: {
+      type: String,
+      default: null,
+      sparse: true,
+      unique: true,
+      index: true,
+    },
+    /** True when moves were played on-device and later uploaded. */
+    clientPlayed: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,

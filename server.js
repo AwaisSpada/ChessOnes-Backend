@@ -1252,8 +1252,8 @@ io.on("connection", (socket) => {
       });
 
       await invitation.populate([
-        { path: "fromUser", select: "username fullName avatar rating country" },
-        { path: "toUser", select: "username fullName avatar rating country" },
+        { path: "fromUser", select: "username fullName avatar rating ratings country" },
+        { path: "toUser", select: "username fullName avatar rating ratings country" },
       ]);
 
       const formatted = {
@@ -1482,8 +1482,8 @@ io.on("connection", (socket) => {
       const Game = require("./models/Game");
 
       const invitation = await GameInvitation.findOne({ token }).populate([
-        { path: "fromUser", select: "username fullName avatar rating country" },
-        { path: "toUser", select: "username fullName avatar rating country" },
+        { path: "fromUser", select: "username fullName avatar rating ratings country" },
+        { path: "toUser", select: "username fullName avatar rating ratings country" },
       ]);
 
       if (!invitation) {
@@ -1589,6 +1589,7 @@ io.on("connection", (socket) => {
             fullName: invitation.toUser.fullName,
             avatar: invitation.toUser.avatar,
             rating: invitation.toUser.rating,
+            ratings: invitation.toUser.ratings,
             country: invitation.toUser.country || "",
           },
         }
@@ -1604,6 +1605,7 @@ io.on("connection", (socket) => {
           fullName: invitation.toUser.fullName,
           avatar: invitation.toUser.avatar,
           rating: invitation.toUser.rating,
+          ratings: invitation.toUser.ratings,
           country: invitation.toUser.country || "",
         },
       });
@@ -1619,6 +1621,7 @@ io.on("connection", (socket) => {
             fullName: invitation.fromUser.fullName,
             avatar: invitation.fromUser.avatar,
             rating: invitation.fromUser.rating,
+            ratings: invitation.fromUser.ratings,
             country: invitation.fromUser.country || "",
           },
         });
@@ -1759,8 +1762,8 @@ io.on("connection", (socket) => {
       const Game = require("./models/Game");
 
       const invitation = await GameInvitation.findOne({ token }).populate([
-        { path: "fromUser", select: "username fullName avatar rating country" },
-        { path: "toUser", select: "username fullName avatar rating country" },
+        { path: "fromUser", select: "username fullName avatar rating ratings country" },
+        { path: "toUser", select: "username fullName avatar rating ratings country" },
       ]);
 
       if (!invitation) {

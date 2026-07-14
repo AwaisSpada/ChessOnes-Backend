@@ -1971,7 +1971,7 @@ router.post("/:gameId/join", auth, requirePoliciesAccepted, async (req, res) => 
     // Populate player data
     await game.populate(
       "players.white players.black",
-      "username fullName avatar rating country"
+      "username fullName avatar rating ratings country"
     );
 
     // Notify other players
@@ -1987,6 +1987,7 @@ router.post("/:gameId/join", auth, requirePoliciesAccepted, async (req, res) => 
           fullName: req.user.fullName,
           avatar: req.user.avatar,
           rating: req.user.rating,
+          ratings: req.user.ratings,
           country: req.user.country || "",
         },
       });

@@ -606,8 +606,8 @@ router.post(
         invitation = await GameInvitation.findOne({
           token: req.params.token,
         }).populate([
-          { path: "fromUser", select: "username fullName avatar rating country" },
-          { path: "toUser", select: "username fullName avatar rating country" },
+          { path: "fromUser", select: "username fullName avatar rating ratings country" },
+          { path: "toUser", select: "username fullName avatar rating ratings country" },
         ]);
       }
 
@@ -798,6 +798,7 @@ router.post(
                 fullName: invitation.toUser.fullName,
                 avatar: invitation.toUser.avatar,
                 rating: invitation.toUser.rating,
+                ratings: invitation.toUser.ratings,
                 country: invitation.toUser.country || "",
               },
             }
@@ -813,6 +814,7 @@ router.post(
               fullName: invitation.toUser.fullName,
               avatar: invitation.toUser.avatar,
               rating: invitation.toUser.rating,
+              ratings: invitation.toUser.ratings,
               country: invitation.toUser.country || "",
             },
           });
