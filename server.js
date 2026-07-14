@@ -430,6 +430,48 @@ async function ensurePoliciesAcceptedForUser(userId) {
  * Create a rated multiplayer game for two matched players
  * Uses the exact time control selected by the players
  */
+function normalizePreferredColor(raw) {
+  const v = String(raw || "random")
+    .toLowerCase()
+    .trim();
+  if (v === "white" || v === "black" || v === "random") return v;
+  return "random";
+}
+
+/** Assign seats for online matchmaking from both players' preferredColor. */
+function resolveMatchmakingSeats(player1, player2) {
+  const c1 = normalizePreferredColor(player1.preferredColor);
+  const c2 = normalizePreferredColor(player2.preferredColor);
+  let player1IsWhite;
+  if (c1 === "white" && c2 !== "white") player1IsWhite = true;
+  else if (c1 === "black" && c2 !== "black") player1IsWhite = false;
+  else if (c2 === "white" && c1 !== "white") player1IsWhite = false;
+  else if (c2 === "black" && c1 !== "black") player1IsWhite = true;
+  else player1IsWhite = Math.random() < 0.5;
+
+  return {
+    white: player1IsWhite ? player1.userId : player2.userId,
+    black: player1IsWhite ? player2.userId : player1.userId,
+  };
+}
+
+/** Challenger preferredColor → inviter/invitee seats. */
+function resolveInviteSeats(senderId, opponentId, preferredColor) {
+  const pref = normalizePreferredColor(preferredColor);
+  const inviterSide =
+    pref === "white" || pref === "black"
+      ? pref
+      : Math.random() < 0.5
+        ? "white"
+        : "black";
+  return {
+    white: inviterSide === "white" ? senderId : opponentId,
+    black: inviterSide === "black" ? senderId : opponentId,
+    inviterSide,
+    inviteeSide: inviterSide === "white" ? "black" : "white",
+  };
+}
+
 async function createMatchmakingGame(player1, player2, category) {
   try {
     const Game = require("./models/Game");
@@ -451,6 +493,7 @@ async function createMatchmakingGame(player1, player2, category) {
     
     // Generate unique game ID
     const gameId = Math.random().toString(36).substr(2, 9);
+    const seats = resolveMatchmakingSeats(player1, player2);
     
     // Create game with the selected time control
     const game = new Game({
@@ -458,8 +501,8 @@ async function createMatchmakingGame(player1, player2, category) {
       type: "multiplayer", // Rated multiplayer game
       isRated: (player1.matchType || "rated") !== "unrated",
       players: {
-        white: player1.userId,
-        black: player2.userId,
+        white: seats.white,
+        black: seats.black,
       },
       timeControl: {
         initial: timeControl.initialTime, // in milliseconds
@@ -771,7 +814,8 @@ io.on("connection", (socket) => {
   // Join matchmaking queue
   socket.on("JOIN_MATCHMAKING", async (payload) => {
     try {
-      const { userId, rating, category, timeControl, matchType } = payload || {};
+      const { userId, rating, category, timeControl, matchType, preferredColor } =
+        payload || {};
       
       if (!userId || !rating || !category) {
         socket.emit("MATCHMAKING_ERROR", {
@@ -826,6 +870,7 @@ io.on("connection", (socket) => {
         category: normalizedCategory, // Use normalized category
         rating: rating,
         matchType: normalizedMatchType,
+        preferredColor: normalizePreferredColor(preferredColor),
         timeControl: {
           initialTime: timeControl.initialTime, // in milliseconds
           increment: timeControl.increment, // in milliseconds
@@ -1123,7 +1168,8 @@ io.on("connection", (socket) => {
   // Handle sending invitation via WebSocket
   socket.on("send-invite", async (payload) => {
     try {
-      const { friendId, gameType, timeControl, matchType } = payload || {};
+      const { friendId, gameType, timeControl, matchType, preferredColor } =
+        payload || {};
       if (!friendId) {
         socket.emit("invite-error", {
           message: "Friend ID is required",
@@ -1214,14 +1260,19 @@ io.on("connection", (socket) => {
         DEFAULT_TIME_CONTROLS.blitz;
 
       const { setGameCategory } = require("./services/ratingEngine");
+      const seats = resolveInviteSeats(
+        sender._id,
+        opponent._id,
+        preferredColor
+      );
       
       const game = new Game({
         gameId: gameId,
         type: "friend",
         isRated,
         players: {
-          white: sender._id,
-          black: opponent._id,
+          white: seats.white,
+          black: seats.black,
         },
         timeControl: resolvedTimeControl,
         timeRemaining: {
@@ -1263,8 +1314,8 @@ io.on("connection", (socket) => {
         gameType: invitation.gameType,
         matchType: invitation.matchType || "rated",
         gameFormat: "friend",
-        inviterSide: "white",
-        inviteeSide: "black",
+        inviterSide: seats.inviterSide,
+        inviteeSide: seats.inviteeSide,
         timeControl: invitation.timeControl,
         expiresAt: invitation.expiresAt,
         createdAt: invitation.createdAt,
