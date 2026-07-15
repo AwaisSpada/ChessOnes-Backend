@@ -133,6 +133,11 @@ mongoose
         console.error("Error counting puzzles:", err);
       });
 
+    const { ensureClientGameIdIndex } = require("./utils/ensureClientGameIdIndex");
+    void ensureClientGameIdIndex(Game).catch((err) => {
+      console.error("[Game] clientGameId index repair failed:", err);
+    });
+
     const { startDailyPuzzleMidnightScheduler } = require("./utils/daily-puzzle-cron");
     startDailyPuzzleMidnightScheduler().catch((err) => {
       console.error("[Daily Puzzle] scheduler startup failed:", err);
