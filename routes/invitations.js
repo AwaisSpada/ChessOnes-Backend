@@ -43,17 +43,35 @@ function resolveTimeControl(gameType, maybeControl = {}) {
   };
 }
 
+function resolveSides(preferredColor = "random") {
+  if (preferredColor === "white") {
+    return { inviterSide: "white", inviteeSide: "black" };
+  }
+  if (preferredColor === "black") {
+    return { inviterSide: "black", inviteeSide: "white" };
+  }
+  // random — fixed at create time for open links via stored preferredColor;
+  // if still random, default inviter white for display.
+  return { inviterSide: "white", inviteeSide: "black" };
+}
+
 function formatInvitation(invitation) {
   const matchType = invitation.matchType || "rated";
+  const preferredColor = invitation.preferredColor || "random";
+  const { inviterSide, inviteeSide } = resolveSides(
+    preferredColor === "random" ? "white" : preferredColor
+  );
   return {
     id: invitation._id,
     token: invitation.token,
     status: invitation.status,
     gameType: invitation.gameType,
     matchType,
-    gameFormat: "friend",
-    inviterSide: "white",
-    inviteeSide: "black",
+    gameFormat: invitation.isOpenLink ? "open_link" : "friend",
+    isOpenLink: Boolean(invitation.isOpenLink),
+    preferredColor,
+    inviterSide,
+    inviteeSide,
     timeControl: invitation.timeControl,
     expiresAt: invitation.expiresAt,
     createdAt: invitation.createdAt,
@@ -121,15 +139,26 @@ async function resolveRematchEffectiveStatus(rematchRequest, now = new Date()) {
 function broadcastInvite(io, invitation) {
   if (!io) return;
   const payload = formatInvitation(invitation);
-  io.to(`user:${invitation.fromUser._id.toString()}`).emit(
-    "challenge:update",
-    payload
-  );
-  io.to(`user:${invitation.toUser._id.toString()}`).emit(
-    "challenge:update",
-    payload
-  );
+  if (invitation.fromUser?._id) {
+    io.to(`user:${invitation.fromUser._id.toString()}`).emit(
+      "challenge:update",
+      payload
+    );
+  }
+  if (invitation.toUser?._id) {
+    io.to(`user:${invitation.toUser._id.toString()}`).emit(
+      "challenge:update",
+      payload
+    );
+  }
   io.to(`invite:${invitation.token}`).emit("challenge:update", payload);
+}
+
+function pickOpenLinkColor(preferredColor) {
+  if (preferredColor === "white" || preferredColor === "black") {
+    return preferredColor;
+  }
+  return Math.random() < 0.5 ? "white" : "black";
 }
 
 router.post(
@@ -265,6 +294,92 @@ router.post(
       res.status(500).json({
         success: false,
         message: "Unable to send challenge invitation",
+      });
+    }
+  }
+);
+
+router.post(
+  "/link",
+  [
+    auth,
+    requirePoliciesAccepted,
+    body("gameType").optional().isString(),
+    body("timeControl").optional().isObject(),
+    body("matchType").optional().isIn(["rated", "unrated", "casual"]),
+    body("preferredColor").optional().isIn(["white", "black", "random"]),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const { gameType, timeControl, matchType, preferredColor } = req.body;
+      const normalizedMatchType =
+        matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
+      const normalizedGameType = normalizeGameType(gameType);
+      const resolvedTimeControl = resolveTimeControl(
+        normalizedGameType,
+        timeControl
+      );
+      // Resolve random at create so the share link has a fixed color assignment.
+      const resolvedColor = pickOpenLinkColor(preferredColor || "random");
+      const token = crypto.randomUUID();
+      const expiresAt = new Date(Date.now() + INVITE_EXPIRATION_MS);
+
+      // Expire older open links from this user so only one active share exists.
+      await GameInvitation.updateMany(
+        {
+          fromUser: req.user._id,
+          isOpenLink: true,
+          status: "pending",
+          expiresAt: { $gt: new Date() },
+        },
+        { $set: { status: "expired" } }
+      );
+
+      const invitation = await GameInvitation.create({
+        token,
+        fromUser: req.user._id,
+        toUser: null,
+        toEmail: null,
+        isOpenLink: true,
+        preferredColor: resolvedColor,
+        gameType: normalizedGameType,
+        matchType: normalizedMatchType,
+        timeControl: resolvedTimeControl,
+        expiresAt,
+        gameId: null,
+      });
+
+      await invitation.populate([
+        { path: "fromUser", select: "username fullName avatar rating country" },
+      ]);
+
+      const baseUrl = getPublicFrontendUrl();
+      const joinUrl = `${baseUrl}/dashboard?invite=${token}`;
+
+      const formatted = {
+        ...formatInvitation(invitation),
+        joinUrl,
+      };
+
+      res.status(201).json({
+        success: true,
+        message: "Challenge link created",
+        data: { invitation: formatted },
+      });
+    } catch (error) {
+      console.error("Open challenge link error:", error);
+      res.status(500).json({
+        success: false,
+        message: "Unable to create challenge link",
       });
     }
   }
@@ -618,11 +733,30 @@ router.post(
         });
       }
 
-      if (!invitation.toUser._id.equals(req.user._id)) {
-        return res.status(403).json({
-          success: false,
-          message: "You are not allowed to respond to this invite",
-        });
+      const isOpenLink = Boolean(invitation.isOpenLink);
+      const toUserId = invitation.toUser?._id || invitation.toUser || null;
+      const fromUserId = invitation.fromUser?._id || invitation.fromUser;
+
+      if (isOpenLink) {
+        if (String(fromUserId) === String(req.user._id)) {
+          return res.status(400).json({
+            success: false,
+            message: "You cannot accept your own challenge link",
+          });
+        }
+        if (toUserId && String(toUserId) !== String(req.user._id)) {
+          return res.status(403).json({
+            success: false,
+            message: "This challenge link was already claimed by someone else",
+          });
+        }
+      } else {
+        if (!toUserId || String(toUserId) !== String(req.user._id)) {
+          return res.status(403).json({
+            success: false,
+            message: "You are not allowed to respond to this invite",
+          });
+        }
       }
 
       if (invitation.status !== "pending") {
@@ -746,6 +880,86 @@ router.post(
                 id: rematchRequest._id,
                 gameId: rematchRequest.originalGameId,
               },
+            },
+          });
+        }
+
+        // Open challenge link: claim + create game on accept
+        if (isOpenLink && !invitation.gameId) {
+          const { setGameCategory } = require("../services/ratingEngine");
+          const isRated = (invitation.matchType || "rated") === "rated";
+          const inviterColor =
+            invitation.preferredColor === "black" ? "black" : "white";
+          const gameId = Math.random().toString(36).substr(2, 9);
+          const players =
+            inviterColor === "white"
+              ? { white: invitation.fromUser._id, black: req.user._id }
+              : { white: req.user._id, black: invitation.fromUser._id };
+
+          game = new Game({
+            gameId,
+            type: "friend",
+            isRated,
+            players,
+            timeControl: invitation.timeControl,
+            timeRemaining: {
+              white: invitation.timeControl.initial,
+              black: invitation.timeControl.initial,
+            },
+            status: "active",
+          });
+          setGameCategory(game);
+          await game.save();
+
+          invitation.toUser = req.user._id;
+          invitation.toEmail = req.user.email || null;
+          invitation.gameId = gameId;
+          invitation.status = "accepted";
+          await invitation.save();
+          await invitation.populate([
+            { path: "fromUser", select: "username fullName avatar rating ratings country" },
+            { path: "toUser", select: "username fullName avatar rating ratings country" },
+          ]);
+
+          const ioOpen = req.app.get("io");
+          if (ioOpen) {
+            ioOpen.to(`user:${invitation.fromUser._id.toString()}`).emit(
+              "opponent-joined",
+              {
+                gameId: game.gameId,
+                opponent: {
+                  id: req.user._id,
+                  username: req.user.username,
+                  fullName: req.user.fullName,
+                  avatar: req.user.avatar,
+                  rating: req.user.rating,
+                  ratings: req.user.ratings,
+                  country: req.user.country || "",
+                },
+              }
+            );
+            ioOpen.to(game.gameId).emit("player-joined", {
+              gameId: game.gameId,
+              userId: req.user._id.toString(),
+              player: {
+                id: req.user._id,
+                username: req.user.username,
+                fullName: req.user.fullName,
+                avatar: req.user.avatar,
+                rating: req.user.rating,
+                ratings: req.user.ratings,
+                country: req.user.country || "",
+              },
+            });
+          }
+
+          broadcastInvite(ioOpen, invitation);
+          return res.json({
+            success: true,
+            message: "Invitation accepted",
+            data: {
+              invitation: formatInvitation(invitation),
+              game,
             },
           });
         }

@@ -15,13 +15,27 @@ const invitationSchema = new mongoose.Schema(
     toUser: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
+      required: false,
+      default: null,
     },
     toEmail: {
       type: String,
-      required: true,
+      required: false,
       lowercase: true,
       trim: true,
+      default: null,
+    },
+    /** Anyone with the join link can accept (not tied to a friend). */
+    isOpenLink: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    /** Challenger's preferred color: white | black | random */
+    preferredColor: {
+      type: String,
+      enum: ["white", "black", "random"],
+      default: "random",
     },
     status: {
       type: String,
