@@ -21,6 +21,9 @@ app.set("trust proxy", 1);
 
 const server = createServer(app);
 const io = new Server(server, {
+  // Fast dead-connection detection (defaults are ~25s+20s → feels broken in live games).
+  pingInterval: 1500,
+  pingTimeout: 2000,
   cors: {
     origin: [
       process.env.FRONTEND_URL || "https://chessones-frontend-v2.vercel.app",
@@ -257,6 +260,49 @@ function emitPlayerDisconnected(io, gameId, userId) {
     status: "reconnecting",
   });
 }
+
+/** Live-game heartbeats (opt-in): clients that emit game:heartbeat get ~2s drop detection. */
+const GAME_HEARTBEAT_STALE_MS = 2500;
+/** `${gameId}:${userId}` -> { lastMs, staleNotified } */
+const gameHeartbeats = new Map();
+
+function heartbeatKey(gameId, userId) {
+  return `${String(gameId)}:${String(userId)}`;
+}
+
+function clearGameHeartbeat(gameId, userId) {
+  if (!gameId || !userId) return;
+  gameHeartbeats.delete(heartbeatKey(gameId, userId));
+}
+
+function touchGameHeartbeat(gameId, userId) {
+  if (!gameId || !userId) return;
+  const key = heartbeatKey(gameId, userId);
+  const prev = gameHeartbeats.get(key);
+  gameHeartbeats.set(key, { lastMs: Date.now(), staleNotified: false });
+  // First beat after a stale window → reconnect signal
+  if (prev?.staleNotified) {
+    emitPlayerReconnected(io, gameId, userId);
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of gameHeartbeats.entries()) {
+    if (!entry || entry.staleNotified) continue;
+    if (now - entry.lastMs < GAME_HEARTBEAT_STALE_MS) continue;
+    const sep = key.lastIndexOf(":");
+    if (sep <= 0) continue;
+    const gameId = key.slice(0, sep);
+    const userId = key.slice(sep + 1);
+    entry.staleNotified = true;
+    gameHeartbeats.set(key, entry);
+    emitPlayerDisconnected(io, gameId, userId);
+    console.log(
+      `📡 Game heartbeat stale → player-disconnected game=${gameId} user=${userId}`
+    );
+  }
+}, 500);
 
 function isUserFullyOffline(userId) {
   const sockets = onlineUsers.get(String(userId));
@@ -876,6 +922,13 @@ io.on("connection", (socket) => {
     // This prevents the ready state from being reset when the frontend effect runs multiple times
   });
 
+  socket.on("game:heartbeat", (payload) => {
+    const gameId = payload?.gameId;
+    const userId = socket.data.userId;
+    if (!gameId || !userId) return;
+    touchGameHeartbeat(gameId, userId.toString());
+  });
+
   // ========== MATCHMAKING SOCKET HANDLERS ==========
   
   // Join matchmaking queue
@@ -1042,6 +1095,7 @@ io.on("connection", (socket) => {
       // Only notify when this user has fully left the board
       if (!hasOtherSockets) {
         emitPlayerDisconnected(io, gameId, userId);
+        clearGameHeartbeat(gameId, userId);
       }
 
       console.log(
@@ -2393,6 +2447,7 @@ io.on("connection", (socket) => {
               // Opponent should see connection loss even if this user stays
               // online elsewhere (another tab) outside this game room.
               emitPlayerDisconnected(io, gameId, userId);
+              clearGameHeartbeat(gameId, userId);
             }
           }
         }
