@@ -209,25 +209,53 @@ const DISCONNECT_ARENA_GAME_END_GRACE_MS = 60_000;
 /** `${userId}:${gameId}` -> timeout handle */
 const pendingDisconnectGameEnds = new Map();
 
+/** @returns {boolean} true if a pending auto-forfeit was cancelled (player is reconnecting). */
 function cancelPendingDisconnectGameEnd(userId, gameId) {
-  if (!userId || !gameId) return;
+  if (!userId || !gameId) return false;
   const key = `${String(userId)}:${String(gameId)}`;
   const handle = pendingDisconnectGameEnds.get(key);
   if (handle) {
     clearTimeout(handle);
     pendingDisconnectGameEnds.delete(key);
+    return true;
   }
+  return false;
 }
 
+/** @returns {string[]} gameIds that had a pending disconnect end cancelled. */
 function cancelPendingDisconnectEndsForUser(userId) {
-  if (!userId) return;
+  if (!userId) return [];
   const prefix = `${String(userId)}:`;
+  const resumedGameIds = [];
   for (const [key, handle] of pendingDisconnectGameEnds.entries()) {
     if (key.startsWith(prefix)) {
       clearTimeout(handle);
       pendingDisconnectGameEnds.delete(key);
+      resumedGameIds.push(key.slice(prefix.length));
     }
   }
+  return resumedGameIds;
+}
+
+/** Notify opponents that a player is back in the game room (mobile + web presence UI). */
+function emitPlayerReconnected(io, gameId, userId) {
+  if (!gameId || !userId) return;
+  const payload = { gameId: String(gameId), userId: String(userId), connected: true };
+  io.to(String(gameId)).emit("player-reconnected", payload);
+  io.to(String(gameId)).emit("connection-status", {
+    ...payload,
+    status: "online",
+  });
+}
+
+function emitPlayerDisconnected(io, gameId, userId) {
+  if (!gameId || !userId) return;
+  const payload = { gameId: String(gameId), userId: String(userId), connected: false };
+  io.to(String(gameId)).emit("player-disconnected", payload);
+  io.to(String(gameId)).emit("connection-status", {
+    ...payload,
+    status: "reconnecting",
+  });
 }
 
 function isUserFullyOffline(userId) {
@@ -724,9 +752,34 @@ io.on("connection", (socket) => {
     const sockets = onlineUsers.get(userId) || new Set();
     sockets.add(socket.id);
     onlineUsers.set(userId, sockets);
-    cancelPendingDisconnectEndsForUser(userId.toString());
+    const resumedGameIds = cancelPendingDisconnectEndsForUser(userId.toString());
     console.log(`✅ User ${userId} registered socket ${socket.id}`);
     console.log(`   - Joined room: user:${userId}`);
+
+    // join-game can race ahead of register-user on mobile — attach userId to
+    // any game rooms this socket already joined, and notify opponents.
+    const uid = userId.toString();
+    for (const [gameId, socketSet] of gameRoomSockets.entries()) {
+      if (!socketSet.has(socket.id)) continue;
+      if (!gameRoomUsers.has(gameId)) {
+        gameRoomUsers.set(gameId, new Set());
+      }
+      const userSet = gameRoomUsers.get(gameId);
+      const wasTracked = userSet.has(uid);
+      if (!wasTracked) {
+        userSet.add(uid);
+        socket.to(gameId).emit("player-joined", {
+          gameId,
+          userId: uid,
+        });
+      }
+      if (resumedGameIds.includes(String(gameId))) {
+        emitPlayerReconnected(io, gameId, uid);
+        console.log(
+          `🔄 User ${uid} reconnected to game ${gameId} after register-user`
+        );
+      }
+    }
 
     // Update DB status and notify friends via presence socket event
     try {
@@ -774,7 +827,10 @@ io.on("connection", (socket) => {
     // If we have a userId, track it and sync presence
     if (socket.data.userId) {
       const userId = socket.data.userId.toString();
-      cancelPendingDisconnectGameEnd(userId, gameId);
+      const resumedAfterDisconnect = cancelPendingDisconnectGameEnd(
+        userId,
+        gameId
+      );
       const wasUserAlreadyTracked = userSet.has(userId);
 
       if (!wasUserAlreadyTracked) {
@@ -807,6 +863,12 @@ io.on("connection", (socket) => {
           gameId,
           userId: userId,
         });
+      }
+
+      // Mid-game reconnect within disconnect grace — tell opponent they're back.
+      // Fresh joins already get player-joined above.
+      if (resumedAfterDisconnect) {
+        emitPlayerReconnected(io, gameId, userId);
       }
     }
 
@@ -949,10 +1011,9 @@ io.on("connection", (socket) => {
       }
 
       // Check if this user has any other sockets in this game room
+      let hasOtherSockets = false;
       const userSet = gameRoomUsers.get(gameId);
       if (userSet) {
-        // Check all sockets in this game room to see if any belong to this userId
-        let hasOtherSockets = false;
         if (socketSet && socketSet.size > 0) {
           for (const otherSocketId of socketSet) {
             const otherSocket = io.sockets.sockets.get(otherSocketId);
@@ -978,14 +1039,13 @@ io.on("connection", (socket) => {
 
       socket.leave(gameId);
 
-      // Notify remaining players in this game that a player left the board
-      io.to(gameId).emit("player-disconnected", {
-        gameId,
-        userId,
-      });
+      // Only notify when this user has fully left the board
+      if (!hasOtherSockets) {
+        emitPlayerDisconnected(io, gameId, userId);
+      }
 
       console.log(
-        `👋 User ${userId} (socket ${socket.id}) left game ${gameId} via leave-game`
+        `👋 User ${userId} (socket ${socket.id}) left game ${gameId} via leave-game (notified=${!hasOtherSockets})`
       );
     } catch (err) {
       console.error("leave-game socket handler error:", err);
@@ -2330,6 +2390,9 @@ io.on("connection", (socket) => {
               if (userSet.size === 0) {
                 gameRoomUsers.delete(gameId);
               }
+              // Opponent should see connection loss even if this user stays
+              // online elsewhere (another tab) outside this game room.
+              emitPlayerDisconnected(io, gameId, userId);
             }
           }
         }
@@ -2383,10 +2446,7 @@ io.on("connection", (socket) => {
           }).populate("players.white players.black");
 
           for (const game of activeGames) {
-            io.to(game.gameId).emit("player-disconnected", {
-              gameId: game.gameId,
-              userId,
-            });
+            emitPlayerDisconnected(io, game.gameId, userId);
 
             const gameHasMoves =
               Array.isArray(game.moves) && game.moves.length > 0;
