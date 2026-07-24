@@ -1,33 +1,50 @@
 const User = require("../models/User");
 const Game = require("../models/Game");
 
+const DEFAULT_RATING = {
+  rating: 1500,
+  rd: 350,
+  volatility: 0.06,
+  gamesPlayed: 0,
+};
+
+function playerId(player) {
+  if (!player) return null;
+  return player._id || player;
+}
+
+function alreadyHasRatingChanges(game) {
+  const changes = game?.ratingChanges;
+  if (!changes) return null;
+  const white = changes.white;
+  const black = changes.black;
+  if (typeof white === "number" && typeof black === "number") {
+    return { white, black };
+  }
+  return null;
+}
+
 /**
- * Update Glicko-2 ratings for both players after a game ends
- * This is a reusable function that can be called from any game end scenario
- * 
+ * Update Glicko-2 ratings for both players after a game ends.
+ * Computes deltas first, persists with parallel updateOne (no full-doc save),
+ * and is idempotent if ratingChanges are already on the game.
+ *
  * @param {Object} game - Game object with players, category, and result
  * @param {Object} io - Socket.io instance for emitting events
- * @returns {Promise<void>}
+ * @returns {Promise<{white:number,black:number}|null>}
  */
 async function updateGameRatings(game, io) {
-  console.log(`[Rating] updateGameRatings called for game ${game.gameId}:`, {
-    type: game.type,
-    category: game.category,
-    hasWhite: !!game.players.white,
-    hasBlack: !!game.players.black,
-    movesCount: game.moves?.length || 0,
-    result: game.result,
-  });
-
   if (game.result?.reason === "first-move-abandon") {
-    console.log(`[Rating] Skipping rating update for first-move abandon ${game.gameId}`);
     return null;
   }
 
-  // Check if game was aborted (no moves made)
+  const existing = alreadyHasRatingChanges(game);
+  if (existing) {
+    return existing;
+  }
+
   const isAborted = !game.moves || game.moves.length === 0;
-  
-  // Only update ratings for rated human-vs-human games, not bot/casual/aborted games.
+
   if (
     game.type === "bot" ||
     game.isRated === false ||
@@ -36,252 +53,153 @@ async function updateGameRatings(game, io) {
     isAborted ||
     !game.category
   ) {
-    if (isAborted) {
-      console.log(`[Rating] Skipping rating update for aborted game ${game.gameId} (no moves made)`);
-    } else if (game.type === "bot") {
-      console.log(`[Rating] Skipping rating update for bot game ${game.gameId}`);
-    } else if (game.isRated === false) {
-      console.log(`[Rating] Skipping rating update for casual game ${game.gameId}`);
-    } else if (!game.category) {
-      console.log(`[Rating] Skipping rating update for game ${game.gameId} - no category set`);
-    } else {
-      console.log(`[Rating] Skipping rating update for game ${game.gameId} - missing players or other issue`);
-    }
     return null;
   }
 
   try {
     const { calculateNewRatings } = require("./ratingEngine");
-    
-    // Ensure players are populated (handle both ObjectId and populated objects)
-    const whitePlayerId = game.players.white?._id || game.players.white;
-    const blackPlayerId = game.players.black?._id || game.players.black;
-    
+
+    const whitePlayerId = playerId(game.players.white);
+    const blackPlayerId = playerId(game.players.black);
+
     if (!whitePlayerId || !blackPlayerId) {
-      console.error("[Rating] Missing player IDs:", {
-        white: whitePlayerId,
-        black: blackPlayerId,
-        gameId: game.gameId,
-      });
-      return null;
-    }
-    
-    // Fetch full user objects with ratings
-    const whiteUser = await User.findById(whitePlayerId);
-    const blackUser = await User.findById(blackPlayerId);
-    
-    if (!whiteUser || !blackUser) {
-      console.error("[Rating] Could not find one or both users for rating update:", {
-        whiteUserId: whitePlayerId,
-        blackUserId: blackPlayerId,
-        whiteFound: !!whiteUser,
-        blackFound: !!blackUser,
-      });
+      console.error("[Rating] Missing player IDs for", game.gameId);
       return null;
     }
 
-    // Determine result from white player's perspective
+    // Prefer already-populated player docs (avoids extra round-trips on /end).
+    let whiteRatings = game.players.white?.ratings;
+    let blackRatings = game.players.black?.ratings;
+
+    if (!whiteRatings || !blackRatings) {
+      const [whiteUser, blackUser] = await Promise.all([
+        User.findById(whitePlayerId).select("ratings").lean(),
+        User.findById(blackPlayerId).select("ratings").lean(),
+      ]);
+      if (!whiteUser || !blackUser) {
+        console.error("[Rating] Could not find users for", game.gameId);
+        return null;
+      }
+      whiteRatings = whiteUser.ratings;
+      blackRatings = blackUser.ratings;
+    }
+
     const whiteResult =
       game.result?.winner === "white"
         ? "win"
         : game.result?.winner === "black"
-        ? "loss"
-        : "draw";
-    
-    console.log(`[Rating] Game result:`, {
-      winner: game.result?.winner,
-      reason: game.result?.reason,
-      whiteResult: whiteResult,
-    });
-    
-    // Use the stored category from the game
-    // If category is missing, set it based on timeControl
+          ? "loss"
+          : "draw";
+
     let ratingType = game.category;
     if (!ratingType && game.timeControl) {
       const { setGameCategory } = require("./ratingEngine");
       setGameCategory(game);
       ratingType = game.category;
-      await game.save();
-      console.log(`[Rating] Set missing category for game ${game.gameId}: ${ratingType}`);
+      await Game.updateOne(
+        { gameId: game.gameId },
+        { $set: { category: ratingType } }
+      );
     }
-    
-    if (!ratingType) {
-      console.error(`[Rating] Cannot determine game category for game ${game.gameId}`);
+
+    if (!ratingType || ratingType === "un-timed") {
       return null;
     }
 
-    if (ratingType === "un-timed") {
-      console.log(
-        `[Rating] Skipping Glicko update for un-timed game ${game.gameId} (no rating pool)`
-      );
-      return null;
-    }
-    
-    console.log(`[Rating] Using category: ${ratingType} for rating update`);
-    
-    // Get current rating data for this category
-    const whiteRatingData = whiteUser.ratings?.[ratingType] || {
-      rating: 1500,
-      rd: 350,
-      volatility: 0.06,
-      gamesPlayed: 0,
-    };
-    
-    const blackRatingData = blackUser.ratings?.[ratingType] || {
-      rating: 1500,
-      rd: 350,
-      volatility: 0.06,
-      gamesPlayed: 0,
-    };
-    
-    console.log(`[Rating] Current ratings before update:`, {
-      white: {
-        rating: whiteRatingData.rating,
-        rd: whiteRatingData.rd,
-        gamesPlayed: whiteRatingData.gamesPlayed,
-      },
-      black: {
-        rating: blackRatingData.rating,
-        rd: blackRatingData.rd,
-        gamesPlayed: blackRatingData.gamesPlayed,
-      },
-    });
-    
-    // Store old ratings for change calculation
+    const whiteRatingData = whiteRatings?.[ratingType] || { ...DEFAULT_RATING };
+    const blackRatingData = blackRatings?.[ratingType] || { ...DEFAULT_RATING };
     const whiteOldRating = whiteRatingData.rating;
     const blackOldRating = blackRatingData.rating;
-    
-    // Calculate new ratings
+
     const updatedRatings = calculateNewRatings(
       whiteRatingData,
       blackRatingData,
       whiteResult,
       ratingType
     );
-    
-    // Initialize ratings object if needed
-    if (!whiteUser.ratings) {
-      whiteUser.ratings = {
-        bullet: { rating: 1500, rd: 350, volatility: 0.06, gamesPlayed: 0 },
-        blitz: { rating: 1500, rd: 350, volatility: 0.06, gamesPlayed: 0 },
-        rapid: { rating: 1500, rd: 350, volatility: 0.06, gamesPlayed: 0 },
-      };
-    }
-    if (!blackUser.ratings) {
-      blackUser.ratings = {
-        bullet: { rating: 1500, rd: 350, volatility: 0.06, gamesPlayed: 0 },
-        blitz: { rating: 1500, rd: 350, volatility: 0.06, gamesPlayed: 0 },
-        rapid: { rating: 1500, rd: 350, volatility: 0.06, gamesPlayed: 0 },
-      };
-    }
-    
-    // Atomically update both users' ratings
-    whiteUser.ratings[ratingType] = updatedRatings.player1;
-    blackUser.ratings[ratingType] = updatedRatings.player2;
-    
-    console.log(`[Rating] Saving updated ratings to database:`, {
-      white: {
-        rating: updatedRatings.player1.rating,
-        rd: updatedRatings.player1.rd,
-        gamesPlayed: updatedRatings.player1.gamesPlayed,
-      },
-      black: {
-        rating: updatedRatings.player2.rating,
-        rd: updatedRatings.player2.rd,
-        gamesPlayed: updatedRatings.player2.gamesPlayed,
-      },
-    });
-    
-    await whiteUser.save();
-    await blackUser.save();
-    
-    console.log(`[Rating] Ratings saved successfully to database`);
-    
-    // Calculate rating changes
-    const whiteRatingChange = Math.round(updatedRatings.player1.rating - whiteOldRating);
-    const blackRatingChange = Math.round(updatedRatings.player2.rating - blackOldRating);
 
-    try {
-      await Game.findOneAndUpdate(
-        { gameId: game.gameId },
-        {
-          $set: {
-            ratingChanges: {
-              white: whiteRatingChange,
-              black: blackRatingChange,
-            },
-          },
-        }
-      );
-    } catch (persistErr) {
-      console.error(
-        `[Rating] Failed to persist ratingChanges on game ${game.gameId}:`,
-        persistErr
-      );
-    }
-    
-    // Emit rating update events via Socket.io
-    if (io) {
-      const whitePayload = {
-        newRating: Math.round(updatedRatings.player1.rating),
-        ratingChange: whiteRatingChange,
-        category: ratingType,
-        isProvisional: updatedRatings.player1.gamesPlayed < 5,
-        gamesPlayed: updatedRatings.player1.gamesPlayed,
-      };
-      
-      const blackPayload = {
-        newRating: Math.round(updatedRatings.player2.rating),
-        ratingChange: blackRatingChange,
-        category: ratingType,
-        isProvisional: updatedRatings.player2.gamesPlayed < 5,
-        gamesPlayed: updatedRatings.player2.gamesPlayed,
-      };
-      
-      const whiteRoom = `user:${whiteUser._id.toString()}`;
-      const blackRoom = `user:${blackUser._id.toString()}`;
-      
-      console.log(`[Rating] Emitting RATING_UPDATED events:`, {
-        whiteRoom,
-        whitePayload,
-        blackRoom,
-        blackPayload,
-      });
-      
-      // Emit to white player
-      io.to(whiteRoom).emit("RATING_UPDATED", whitePayload);
-      
-      // Emit to black player
-      io.to(blackRoom).emit("RATING_UPDATED", blackPayload);
-      
-      // Also emit to game room as backup
-      io.to(game.gameId).emit("RATING_UPDATED", {
-        white: whitePayload,
-        black: blackPayload,
-      });
-      
-      console.log(`[Rating] RATING_UPDATED events emitted successfully to rooms: ${whiteRoom}, ${blackRoom}, ${game.gameId}`);
-    } else {
-      console.warn(`[Rating] Socket.io instance not available, cannot emit RATING_UPDATED events`);
-    }
-    
-    console.log(`[Rating] Updated ${ratingType} ratings for game ${game.gameId}:`, {
-      white: { old: whiteOldRating, new: updatedRatings.player1.rating, change: whiteRatingChange },
-      black: { old: blackOldRating, new: updatedRatings.player2.rating, change: blackRatingChange },
-    });
-
-    // Badge awarding intentionally happens in routes/games.js only, via
-    // services/achievementService, to keep a single source of truth.
-    return {
+    const whiteRatingChange = Math.round(
+      updatedRatings.player1.rating - whiteOldRating
+    );
+    const blackRatingChange = Math.round(
+      updatedRatings.player2.rating - blackOldRating
+    );
+    const ratingChanges = {
       white: whiteRatingChange,
       black: blackRatingChange,
     };
+
+    // Mark in-memory immediately so callers/emits are not blocked on Mongo writes.
+    game.ratingChanges = ratingChanges;
+
+    const whitePayload = {
+      newRating: Math.round(updatedRatings.player1.rating),
+      ratingChange: whiteRatingChange,
+      category: ratingType,
+      isProvisional: updatedRatings.player1.gamesPlayed < 5,
+      gamesPlayed: updatedRatings.player1.gamesPlayed,
+    };
+    const blackPayload = {
+      newRating: Math.round(updatedRatings.player2.rating),
+      ratingChange: blackRatingChange,
+      category: ratingType,
+      isProvisional: updatedRatings.player2.gamesPlayed < 5,
+      gamesPlayed: updatedRatings.player2.gamesPlayed,
+    };
+
+    // Persist + profile rating events in the background (Chess.com-style).
+    setImmediate(() => {
+      void (async () => {
+        try {
+          await Promise.all([
+            Game.updateOne(
+              { gameId: game.gameId },
+              { $set: { ratingChanges } }
+            ),
+            User.updateOne(
+              { _id: whitePlayerId },
+              { $set: { [`ratings.${ratingType}`]: updatedRatings.player1 } }
+            ),
+            User.updateOne(
+              { _id: blackPlayerId },
+              { $set: { [`ratings.${ratingType}`]: updatedRatings.player2 } }
+            ),
+          ]);
+        } catch (persistErr) {
+          console.error(
+            `[Rating] Failed to persist ratings for ${game.gameId}:`,
+            persistErr
+          );
+        }
+
+        if (!io) return;
+        try {
+          io.to(`user:${whitePlayerId.toString()}`).emit(
+            "RATING_UPDATED",
+            whitePayload
+          );
+          io.to(`user:${blackPlayerId.toString()}`).emit(
+            "RATING_UPDATED",
+            blackPayload
+          );
+          io.to(game.gameId).emit("RATING_UPDATED", {
+            white: whitePayload,
+            black: blackPayload,
+          });
+        } catch (emitErr) {
+          console.error(
+            `[Rating] Failed to emit RATING_UPDATED for ${game.gameId}:`,
+            emitErr
+          );
+        }
+      })();
+    });
+
+    return ratingChanges;
   } catch (ratingError) {
-    // Don't fail game completion if rating calculation fails
     console.error("[Rating] Error updating ratings:", ratingError);
     return null;
   }
 }
 
 module.exports = { updateGameRatings };
-

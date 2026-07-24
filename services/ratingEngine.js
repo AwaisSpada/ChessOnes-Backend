@@ -99,11 +99,6 @@ function calculateNewRatings(player1, player2, result, type) {
   
   const p1InitialRd = p1CurrentGamesPlayed >= 5 ? 50 : (player1.rd || 350);
   const p2InitialRd = p2CurrentGamesPlayed >= 5 ? 50 : (player2.rd || 350);
-  
-  console.log(`[Rating Engine] Initializing players with RD:`, {
-    player1: { gamesPlayed: p1CurrentGamesPlayed, rd: p1InitialRd, isConfirmed: p1CurrentGamesPlayed >= 5 },
-    player2: { gamesPlayed: p2CurrentGamesPlayed, rd: p2InitialRd, isConfirmed: p2CurrentGamesPlayed >= 5 },
-  });
 
   // Create Glicko-2 player objects
   const p1 = ratingSystem.makePlayer(
@@ -156,20 +151,12 @@ function calculateNewRatings(player1, player2, result, type) {
   const p2GamesPlayed = (player2.gamesPlayed || 0) + 1;
 
   // RD Management: Set RD to 50 for confirmed ratings (>= 5 games), keep calculated RD for provisional (< 5 games)
-  // Provisional ratings (< 5 games): Use calculated RD (starts at 350, decreases with each game)
-  // Confirmed ratings (>= 5 games): Set RD to 50 (fixed value for established players)
   if (p1GamesPlayed >= 5) {
     p1Rd = 50;
-    console.log(`[Rating Engine] Player 1 has ${p1GamesPlayed} games - setting RD to 50 (confirmed rating)`);
-  } else {
-    console.log(`[Rating Engine] Player 1 has ${p1GamesPlayed} games - using calculated RD ${p1Rd.toFixed(2)} (provisional rating)`);
   }
 
   if (p2GamesPlayed >= 5) {
     p2Rd = 50;
-    console.log(`[Rating Engine] Player 2 has ${p2GamesPlayed} games - setting RD to 50 (confirmed rating)`);
-  } else {
-    console.log(`[Rating Engine] Player 2 has ${p2GamesPlayed} games - using calculated RD ${p2Rd.toFixed(2)} (provisional rating)`);
   }
 
   const updatedRatings = {

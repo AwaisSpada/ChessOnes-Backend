@@ -45,18 +45,28 @@ function serializePerGameMutation(gameId, fn) {
 /**
  * Fast path: compute Elo first, then notify clients with ratingChanges on game-ended.
  * Arena / stats / badges stay in the background so the end dialog is not blocked by them.
+ * Pass `gameDoc` when callers already loaded (+ ideally populated) the game to skip a re-fetch.
  */
-async function applyRatingsForGameEnd(gameId, io) {
+async function applyRatingsForGameEnd(gameId, io, gameDoc = null) {
   try {
-    const gameForRating = await Game.findOne({ gameId }).populate(
-      "players.white players.black"
-    );
+    let gameForRating = gameDoc;
+    const whitePopulated = Boolean(gameForRating?.players?.white?.ratings);
+    const blackPopulated = Boolean(gameForRating?.players?.black?.ratings);
+
+    if (!gameForRating || !whitePopulated || !blackPopulated) {
+      gameForRating = await Game.findOne({ gameId }).populate(
+        "players.white players.black"
+      );
+    }
     if (!gameForRating) return null;
 
     if (!gameForRating.category && gameForRating.timeControl) {
       const { setGameCategory } = require("../services/ratingEngine");
       setGameCategory(gameForRating);
-      await gameForRating.save();
+      await Game.updateOne(
+        { gameId },
+        { $set: { category: gameForRating.category } }
+      );
     }
 
     const { updateGameRatings } = require("../services/updateGameRatings");
@@ -78,8 +88,8 @@ async function emitGameEnded(gameId, result, io, ratingChanges = null) {
 }
 
 /** Elo first → game-ended (with deltas) → heavy work in background. */
-async function notifyGameEndedFast(gameId, result, io) {
-  const ratingChanges = await applyRatingsForGameEnd(gameId, io);
+async function notifyGameEndedFast(gameId, result, io, gameDoc = null) {
+  const ratingChanges = await applyRatingsForGameEnd(gameId, io, gameDoc);
   await emitGameEnded(gameId, result, io, ratingChanges);
   scheduleGameCompletionSideEffects(gameId, result, io, { skipRatings: true });
   return ratingChanges;
@@ -828,8 +838,11 @@ router.post(
           await game.save();
 
           const io = req.app.get("io");
-          // Elo first so move-made + game-ended both carry ratingChanges (dialog ±delta instant).
-          const ratingChanges = await applyRatingsForGameEnd(game.gameId, io);
+          const ratingChanges = await applyRatingsForGameEnd(
+            game.gameId,
+            io,
+            game
+          );
           const terminalPayload = {
             gameId: req.params.gameId,
             move,
@@ -1028,7 +1041,11 @@ router.post(
         await game.save();
 
         const io = req.app.get("io");
-        const ratingChanges = await applyRatingsForGameEnd(game.gameId, io);
+        const ratingChanges = await applyRatingsForGameEnd(
+          game.gameId,
+          io,
+          game
+        );
         const terminalMoveData = {
           gameId: req.params.gameId,
           move,
@@ -2083,18 +2100,65 @@ router.post(
         });
       }
 
-      // Update game
-      if (result.reason === "first-move-abandon") {
-        game.status = "abandoned";
-      } else {
-        game.status = "completed";
+      // Atomic claim — prevents double-end and avoids slow full-document save before notify.
+      const nextStatus =
+        result.reason === "first-move-abandon" ? "abandoned" : "completed";
+      const claimed = await Game.updateOne(
+        { gameId: game.gameId, status: "active" },
+        { $set: { status: nextStatus, result } }
+      );
+      if (claimed.matchedCount === 0) {
+        return res.status(404).json({
+          success: false,
+          message: "Game not found",
+        });
       }
-      // Clean up evaluation history when game ends
-      gameEvaluationHistory.delete(req.params.gameId);
+      if (claimed.modifiedCount === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Game is already ended",
+        });
+      }
+
+      game.status = nextStatus;
       game.result = result;
-      game.markModified("result");
-      game.markModified("status");
-      await game.save();
+      gameEvaluationHistory.delete(req.params.gameId);
+
+      const io = req.app.get("io");
+
+      let ratingChanges = null;
+      if (!skipStats) {
+        // Elo is in-memory (populated players) — emit immediately after claim.
+        ratingChanges = await applyRatingsForGameEnd(
+          game.gameId,
+          io,
+          game
+        );
+        await emitGameEnded(game.gameId, result, io, ratingChanges);
+        scheduleGameCompletionSideEffects(game.gameId, result, io, {
+          skipRatings: true,
+        });
+      } else {
+        await emitGameEnded(game.gameId, result, io, null);
+        setImmediate(() => {
+          void (async () => {
+            try {
+              if (game.players.white?._id) {
+                await User.findByIdAndUpdate(game.players.white._id, {
+                  status: "online",
+                });
+              }
+              if (game.players.black?._id && game.type !== "bot") {
+                await User.findByIdAndUpdate(game.players.black._id, {
+                  status: "online",
+                });
+              }
+            } catch (err) {
+              console.error("[Game End] status update failed:", err);
+            }
+          })();
+        });
+      }
 
       if (result.reason === "first-move-abandon") {
         try {
@@ -2161,34 +2225,6 @@ router.post(
         } catch (inviteErr) {
           console.error("[GameEnd] Failed to expire pending invitations:", inviteErr);
         }
-      }
-
-      const io = req.app.get("io");
-
-      let ratingChanges = null;
-      if (!skipStats) {
-        // Elo before notify so end dialog shows ±delta immediately.
-        ratingChanges = await notifyGameEndedFast(game.gameId, result, io);
-      } else {
-        await emitGameEnded(game.gameId, result, io, null);
-        setImmediate(() => {
-          void (async () => {
-            try {
-              if (game.players.white?._id) {
-                await User.findByIdAndUpdate(game.players.white._id, {
-                  status: "online",
-                });
-              }
-              if (game.players.black?._id && game.type !== "bot") {
-                await User.findByIdAndUpdate(game.players.black._id, {
-                  status: "online",
-                });
-              }
-            } catch (err) {
-              console.error("[Game End] status update failed:", err);
-            }
-          })();
-        });
       }
 
       return res.json({
@@ -2595,7 +2631,7 @@ router.post(
 
     const io = req.app.get("io");
 
-    const ratingChanges = await applyRatingsForGameEnd(game.gameId, io);
+    const ratingChanges = await applyRatingsForGameEnd(game.gameId, io, game);
     io.to(req.params.gameId).emit("draw-accepted", {
       gameId: req.params.gameId,
       ratingChanges,
