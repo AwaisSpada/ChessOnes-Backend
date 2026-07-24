@@ -649,8 +649,21 @@ router.post(
       }
 
       // Check if move is legal (doesn't leave own king in check)
-      const promotionPiece =
-        piece && piece !== movingPiece.toLowerCase() ? piece : null;
+      // Promotion must be Q/R/B/N — never the pawn letter itself.
+      let promotionPiece = null;
+      if (piece && typeof piece === "string") {
+        const letter = piece.trim().toLowerCase();
+        if (letter === "q" || letter === "r" || letter === "b" || letter === "n") {
+          promotionPiece = piece;
+        } else if (
+          movingPiece &&
+          movingPiece.toLowerCase() === "p" &&
+          letter === "p"
+        ) {
+          // Legacy mobile bug: sent "P" instead of promoted piece → treat as queen.
+          promotionPiece = "q";
+        }
+      }
       if (!isMoveLegal(game.board, from, to, promotionPiece)) {
         return res.status(400).json({
           success: false,
@@ -919,13 +932,19 @@ router.post(
             ((movingPiece === movingPiece.toUpperCase() && toRow === 0) || // White pawn to rank 8
               (movingPiece === movingPiece.toLowerCase() && toRow === 7)); // Black pawn to rank 1
 
-          if (isPawnPromotion && piece) {
-            // This is a promotion - use the piece parameter (Q, R, B, N)
-            // Preserve the color: uppercase for white, lowercase for black
+          if (isPawnPromotion) {
+            // Prefer explicit Q/R/B/N from client. Legacy clients sometimes send "P"
+            // (the moving pawn) which must NOT be placed on the last rank.
+            const raw = typeof piece === "string" ? piece.trim() : "";
+            const letter = raw.toLowerCase();
+            const promoLetter =
+              letter === "q" || letter === "r" || letter === "b" || letter === "n"
+                ? letter
+                : "q";
             const promotedPiece =
               movingPiece === movingPiece.toUpperCase()
-                ? piece.toUpperCase()
-                : piece.toLowerCase();
+                ? promoLetter.toUpperCase()
+                : promoLetter.toLowerCase();
             newBoard[to] = promotedPiece;
           } else {
             // Regular move - just move the piece
