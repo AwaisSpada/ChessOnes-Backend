@@ -399,6 +399,98 @@ router.get("/custom-arenas", optionalAuth, async (req, res) => {
   }
 });
 
+// @route   GET /api/tournaments/custom-arenas/winners
+// @desc    Hall of Fame — count of 1st-place finishes in ended arenas by game type
+// @access  Public (optional auth)
+router.get("/custom-arenas/winners", optionalAuth, async (req, res) => {
+  try {
+    const io = req.app.get("io");
+    await syncCustomArenaStatuses(io);
+
+    const rawType = String(req.query.gameType || req.query.category || "blitz").toLowerCase();
+    const gameType = GAME_TYPES.includes(rawType) ? rawType : "blitz";
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 30));
+
+    const arenas = await CustomArena.find({
+      status: "ended",
+      gameType,
+    })
+      .select("leaderboard name endedAt gameType")
+      .lean();
+
+    /** @type {Map<string, { userId: string, username: string, displayName: string, avatar: string, country: string, wins: number, lastWonAt: number }>} */
+    const byUser = new Map();
+
+    for (const arena of arenas) {
+      const board = Array.isArray(arena.leaderboard) ? arena.leaderboard : [];
+      if (board.length === 0) continue;
+
+      // Standings are stored points-desc; treat top non-discarded row as champion.
+      const active = board.filter((row) => row && !row.discarded);
+      const sorted = [...active].sort((a, b) => {
+        if ((b.points || 0) !== (a.points || 0)) return (b.points || 0) - (a.points || 0);
+        if ((b.wins || 0) !== (a.wins || 0)) return (b.wins || 0) - (a.wins || 0);
+        return (a.losses || 0) - (b.losses || 0);
+      });
+      const champ = sorted[0];
+      if (!champ?.userId) continue;
+      // Require at least some scored activity so empty lobbies don't count.
+      if ((champ.gamesPlayed || 0) < 1 && (champ.points || 0) < 1) continue;
+
+      const userId = String(champ.userId);
+      const endedAt = arena.endedAt ? new Date(arena.endedAt).getTime() : 0;
+      const prev = byUser.get(userId);
+      if (prev) {
+        prev.wins += 1;
+        if (endedAt > prev.lastWonAt) {
+          prev.lastWonAt = endedAt;
+          if (champ.username) prev.username = champ.username;
+          if (champ.displayName) prev.displayName = champ.displayName;
+          if (champ.avatar) prev.avatar = champ.avatar;
+          if (champ.country) prev.country = champ.country;
+        }
+      } else {
+        byUser.set(userId, {
+          userId,
+          username: champ.username || "Player",
+          displayName: champ.displayName || champ.username || "Player",
+          avatar: champ.avatar || "",
+          country: champ.country || "",
+          wins: 1,
+          lastWonAt: endedAt,
+        });
+      }
+    }
+
+    const winners = [...byUser.values()]
+      .sort((a, b) => b.wins - a.wins || b.lastWonAt - a.lastWonAt)
+      .slice(0, limit)
+      .map((row, index) => ({
+        rank: index + 1,
+        userId: row.userId,
+        username: row.username,
+        displayName: row.displayName,
+        avatar: row.avatar,
+        country: row.country,
+        wins: row.wins,
+      }));
+
+    res.json({
+      success: true,
+      data: {
+        gameType,
+        winners,
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas winners error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to load tournament winners",
+    });
+  }
+});
+
 // @route   GET /api/tournaments/custom-arenas/:id
 router.get("/custom-arenas/:id", optionalAuth, async (req, res) => {
   try {
