@@ -168,6 +168,17 @@ function scheduleGameCompletionSideEffects(gameId, result, io) {
         } catch (badgeError) {
           console.error("[Game End] Error checking badges:", badgeError);
         }
+
+        if (gameForRating.players.white) {
+          await User.findByIdAndUpdate(gameForRating.players.white._id, {
+            status: "online",
+          });
+        }
+        if (gameForRating.players.black && gameForRating.type !== "bot") {
+          await User.findByIdAndUpdate(gameForRating.players.black._id, {
+            status: "online",
+          });
+        }
       } catch (err) {
         console.error("[Game End] post-completion side effects failed:", gameId, err);
       }
@@ -2132,8 +2143,8 @@ router.post(
               { $set: { status: "expired" } }
             );
 
-            const io = req.app.get("io");
-            if (io) {
+            const ioExpire = req.app.get("io");
+            if (ioExpire) {
               for (const invitation of expiredInvites) {
                 const formatted = {
                   id: invitation._id,
@@ -2163,13 +2174,13 @@ router.post(
                     : null,
                 };
                 if (invitation.fromUser?._id) {
-                  io.to(`user:${invitation.fromUser._id.toString()}`).emit(
+                  ioExpire.to(`user:${invitation.fromUser._id.toString()}`).emit(
                     "challenge:update",
                     formatted
                   );
                 }
                 if (invitation.toUser?._id) {
-                  io.to(`user:${invitation.toUser._id.toString()}`).emit(
+                  ioExpire.to(`user:${invitation.toUser._id.toString()}`).emit(
                     "challenge:update",
                     formatted
                   );
@@ -2182,153 +2193,10 @@ router.post(
         }
       }
 
-      try {
-        const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
-        await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));
-      } catch (arenaErr) {
-        console.error("[Arena] hook failed after /end:", arenaErr);
-      }
-
-      // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
-      if (!skipStats) {
-        try {
-          const { triggerReviewGeneration } = require("../utils/game-review/game-completion-hook");
-          triggerReviewGeneration(game.gameId);
-        } catch (error) {
-          // Don't fail game completion if review hook fails
-          console.error(`[GameReview] Error triggering review generation hook:`, error);
-        }
-      }
-
-      // Reload game to ensure all fields (including category) are present
-      const gameForRating = await Game.findOne({ gameId: req.params.gameId })
-        .populate("players.white players.black");
-      
-      // Ensure category is set
-      if (!gameForRating.category && gameForRating.timeControl) {
-        const { setGameCategory } = require("../services/ratingEngine");
-        setGameCategory(gameForRating);
-        await gameForRating.save();
-        console.log(`[Rating] Set missing category for game ${gameForRating.gameId}: ${gameForRating.category}`);
-      }
-
-      // Update player stats (WITH category for badge tracking)
-      const gameTime = Date.now() - gameForRating.createdAt.getTime();
-      const gameCategory = gameForRating.category; // bullet, blitz, or rapid
-
-      if (!skipStats && gameForRating.players.white) {
-        const whiteStats = await Stats.findOne({
-          user: gameForRating.players.white._id,
-        });
-        if (whiteStats) {
-          const whiteResult =
-            result.winner === "white"
-              ? "win"
-              : result.winner === "black"
-              ? "loss"
-              : "draw";
-          // Pass category to track category-specific stats for badges
-          await whiteStats.updateAfterGame(gameForRating.type, whiteResult, gameTime, gameCategory);
-          console.log(`[Game End] Updated white player stats with category: ${gameCategory}`);
-        }
-      }
-
-      if (!skipStats && gameForRating.players.black && gameForRating.type !== "bot") {
-        const blackStats = await Stats.findOne({
-          user: gameForRating.players.black._id,
-        });
-        if (blackStats) {
-          const blackResult =
-            result.winner === "black"
-              ? "win"
-              : result.winner === "white"
-              ? "loss"
-              : "draw";
-          // Pass category to track category-specific stats for badges
-          await blackStats.updateAfterGame(gameForRating.type, blackResult, gameTime, gameCategory);
-          console.log(`[Game End] Updated black player stats with category: ${gameCategory}`);
-        }
-      }
-
-      // For bot games, also update stats for the user (bot games only have one human player)
-      if (!skipStats && gameForRating.type === "bot" && gameForRating.players.white) {
-        const userStats = await Stats.findOne({
-          user: gameForRating.players.white._id,
-        });
-        if (userStats) {
-          const userResult =
-            result.winner === "white"
-              ? "win"
-              : result.winner === "black"
-              ? "loss"
-              : "draw";
-          await userStats.updateAfterGame(gameForRating.type, userResult, gameTime, gameCategory);
-          console.log(`[Game End] Updated bot game user stats with category: ${gameCategory}`);
-        }
-      } else if (!skipStats && gameForRating.type === "bot" && gameForRating.players.black) {
-        const userStats = await Stats.findOne({
-          user: gameForRating.players.black._id,
-        });
-        if (userStats) {
-          const userResult =
-            result.winner === "black"
-              ? "win"
-              : result.winner === "white"
-              ? "loss"
-              : "draw";
-          await userStats.updateAfterGame(gameForRating.type, userResult, gameTime, gameCategory);
-          console.log(`[Game End] Updated bot game user stats with category: ${gameCategory}`);
-        }
-      }
-
-      // Update Glicko-2 ratings using reusable function (only for multiplayer games)
-      const { updateGameRatings } = require("../services/updateGameRatings");
       const io = req.app.get("io");
-      await updateGameRatings(gameForRating, io);
 
-      // Check badges for ALL game types (including bot games)
-      // This ensures badges are awarded regardless of game type
-      if (!skipStats) {
-      try {
-        const { checkAndAwardBadges } = require("../services/achievementService");
-        
-        // For bot games, check badges for the human player
-        if (gameForRating.type === "bot") {
-          const userId = gameForRating.players.white?._id || gameForRating.players.black?._id;
-          if (userId) {
-            console.log(`[Game End] 🎖️ Checking badges for bot game user: ${userId}`);
-            await checkAndAwardBadges(userId.toString(), gameForRating.gameId, io);
-          }
-        } else {
-          // For multiplayer games, check badges for both players
-          if (gameForRating.players.white) {
-            console.log(`[Game End] 🎖️ Checking badges for white player: ${gameForRating.players.white._id}`);
-            await checkAndAwardBadges(gameForRating.players.white._id.toString(), gameForRating.gameId, io);
-          }
-          if (gameForRating.players.black) {
-            console.log(`[Game End] 🎖️ Checking badges for black player: ${gameForRating.players.black._id}`);
-            await checkAndAwardBadges(gameForRating.players.black._id.toString(), gameForRating.gameId, io);
-          }
-        }
-      } catch (badgeError) {
-        console.error("[Game End] Error checking badges:", badgeError);
-      }
-      }
-
-      // Update player status
-      if (game.players.white) {
-        await User.findByIdAndUpdate(game.players.white._id, {
-          status: "online",
-        });
-      }
-      if (game.players.black && game.type !== "bot") {
-        await User.findByIdAndUpdate(game.players.black._id, {
-          status: "online",
-        });
-      }
-
-      // Notify players
-      req.app.get("io").to(req.params.gameId).emit("game-ended", {
+      // Notify clients immediately — do not wait for ratings / badges / stats.
+      io.to(req.params.gameId).emit("game-ended", {
         gameId: req.params.gameId,
         result,
       });
@@ -2338,6 +2206,31 @@ router.post(
         message: "Game ended successfully",
         data: { game },
       });
+
+      if (!skipStats) {
+        scheduleGameCompletionSideEffects(game.gameId, result, io);
+      } else {
+        // Still flip presence offline→online without blocking the client.
+        setImmediate(() => {
+          void (async () => {
+            try {
+              if (game.players.white?._id) {
+                await User.findByIdAndUpdate(game.players.white._id, {
+                  status: "online",
+                });
+              }
+              if (game.players.black?._id && game.type !== "bot") {
+                await User.findByIdAndUpdate(game.players.black._id, {
+                  status: "online",
+                });
+              }
+            } catch (err) {
+              console.error("[Game End] status update failed:", err);
+            }
+          })();
+        });
+      }
+      return;
     } catch (error) {
       console.error("End game error:", error);
       res.status(500).json({
@@ -2735,63 +2628,9 @@ router.post(
     game.drawRequest = { from: null, timestamp: null };
     await game.save();
 
-    try {
-      const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
-      await syncArenaGameCompletion(game.gameId, game.result, req.app.get("io"));
-    } catch (arenaErr) {
-      console.error("[Arena] hook failed after draw accept:", arenaErr);
-    }
-
-    // Update Glicko-2 ratings
-    const { updateGameRatings } = require("../services/updateGameRatings");
     const io = req.app.get("io");
-    await updateGameRatings(game, io);
 
-    // ✅ SAFE: Trigger review generation after game completion (async, non-blocking)
-    // COPY EXACT FLOW FROM /end ENDPOINT (timeout handler) - DO NOT CHANGE
-    try {
-      const { triggerReviewGeneration } = require("../utils/game-review/game-completion-hook");
-      triggerReviewGeneration(game.gameId);
-    } catch (error) {
-      // Don't fail game completion if review hook fails
-      console.error(`[GameReview] Error triggering review generation hook:`, error);
-    }
-
-    // Update player stats
-    const gameTime = Date.now() - game.createdAt.getTime();
-
-    if (game.players.white) {
-      const whiteStats = await Stats.findOne({
-        user: game.players.white._id,
-      });
-      if (whiteStats) {
-        await whiteStats.updateAfterGame(game.type, "draw", gameTime);
-      }
-    }
-
-    if (game.players.black && game.type !== "bot") {
-      const blackStats = await Stats.findOne({
-        user: game.players.black._id,
-      });
-      if (blackStats) {
-        await blackStats.updateAfterGame(game.type, "draw", gameTime);
-      }
-    }
-
-    // Update player status
-    if (game.players.white) {
-      await User.findByIdAndUpdate(game.players.white._id, {
-        status: "online",
-      });
-    }
-    if (game.players.black && game.type !== "bot") {
-      await User.findByIdAndUpdate(game.players.black._id, {
-        status: "online",
-      });
-    }
-
-    // Emit draw accepted and game ended events via WebSocket
-    // (io is already declared above for rating updates)
+    // Clients first — ratings / stats run in background.
     io.to(req.params.gameId).emit("draw-accepted", {
       gameId: req.params.gameId,
     });
@@ -2809,6 +2648,9 @@ router.post(
       message: "Draw request accepted",
       data: { game },
     });
+
+    scheduleGameCompletionSideEffects(game.gameId, game.result, io);
+    return;
   } catch (error) {
     console.error("Draw accept error:", error);
     res.status(500).json({
