@@ -339,10 +339,31 @@ async function completeGameOnUserDisconnect(game, userId, io) {
 
   await game.save();
 
-  // Clients first — disconnect forfeiture must feel instant.
+  // Elo first, then notify — dialog shows ±delta immediately.
+  let ratingChanges = null;
+  try {
+    if (game.result?.reason !== "first-move-abandon") {
+      const gameForRating = await Game.findOne({ gameId: game.gameId }).populate(
+        "players.white players.black"
+      );
+      if (gameForRating) {
+        if (!gameForRating.category && gameForRating.timeControl) {
+          const { setGameCategory } = require("./services/ratingEngine");
+          setGameCategory(gameForRating);
+          await gameForRating.save();
+        }
+        const { updateGameRatings } = require("./services/updateGameRatings");
+        ratingChanges = (await updateGameRatings(gameForRating, io)) || null;
+      }
+    }
+  } catch (err) {
+    console.error("[Disconnect] rating update failed:", game.gameId, err);
+  }
+
   io.to(game.gameId).emit("game-ended", {
     gameId: game.gameId,
     result: game.result,
+    ...(ratingChanges ? { ratingChanges } : {}),
   });
 
   setImmediate(() => {
@@ -397,9 +418,6 @@ async function completeGameOnUserDisconnect(game, userId, io) {
             status: "online",
           });
         }
-
-        const { updateGameRatings } = require("./services/updateGameRatings");
-        await updateGameRatings(game, io);
 
         try {
           const { syncArenaGameCompletion } = require("./utils/arenaGameCompletionHook");

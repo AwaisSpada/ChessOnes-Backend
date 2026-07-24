@@ -42,8 +42,52 @@ function serializePerGameMutation(gameId, fn) {
   return next;
 }
 
-/** Ratings, stats, badges, arena sync — must not block move-made / HTTP response on game end. */
-function scheduleGameCompletionSideEffects(gameId, result, io) {
+/**
+ * Fast path: compute Elo first, then notify clients with ratingChanges on game-ended.
+ * Arena / stats / badges stay in the background so the end dialog is not blocked by them.
+ */
+async function applyRatingsForGameEnd(gameId, io) {
+  try {
+    const gameForRating = await Game.findOne({ gameId }).populate(
+      "players.white players.black"
+    );
+    if (!gameForRating) return null;
+
+    if (!gameForRating.category && gameForRating.timeControl) {
+      const { setGameCategory } = require("../services/ratingEngine");
+      setGameCategory(gameForRating);
+      await gameForRating.save();
+    }
+
+    const { updateGameRatings } = require("../services/updateGameRatings");
+    return (await updateGameRatings(gameForRating, io)) || null;
+  } catch (err) {
+    console.error("[Game End] applyRatingsForGameEnd failed:", gameId, err);
+    return null;
+  }
+}
+
+async function emitGameEnded(gameId, result, io, ratingChanges = null) {
+  const payload = {
+    gameId,
+    result,
+    ...(ratingChanges ? { ratingChanges } : {}),
+  };
+  io.to(gameId).emit("game-ended", payload);
+  return payload;
+}
+
+/** Elo first → game-ended (with deltas) → heavy work in background. */
+async function notifyGameEndedFast(gameId, result, io) {
+  const ratingChanges = await applyRatingsForGameEnd(gameId, io);
+  await emitGameEnded(gameId, result, io, ratingChanges);
+  scheduleGameCompletionSideEffects(gameId, result, io, { skipRatings: true });
+  return ratingChanges;
+}
+
+/** Stats, badges, arena, review — ratings already applied (skipRatings). */
+function scheduleGameCompletionSideEffects(gameId, result, io, options = {}) {
+  const skipRatings = Boolean(options.skipRatings);
   setImmediate(() => {
     void (async () => {
       try {
@@ -138,8 +182,10 @@ function scheduleGameCompletionSideEffects(gameId, result, io) {
           }
         }
 
-        const { updateGameRatings } = require("../services/updateGameRatings");
-        await updateGameRatings(gameForRating, io);
+        if (!skipRatings) {
+          const { updateGameRatings } = require("../services/updateGameRatings");
+          await updateGameRatings(gameForRating, io);
+        }
 
         try {
           const { checkAndAwardBadges } = require("../services/achievementService");
@@ -782,6 +828,8 @@ router.post(
           await game.save();
 
           const io = req.app.get("io");
+          // Elo first so move-made + game-ended both carry ratingChanges (dialog ±delta instant).
+          const ratingChanges = await applyRatingsForGameEnd(game.gameId, io);
           const terminalPayload = {
             gameId: req.params.gameId,
             move,
@@ -791,15 +839,14 @@ router.post(
             gameEnded: true,
             isCheckmate: true,
             result: game.result,
+            ratingChanges,
           };
 
-          // Notify immediately — ratings / badges in background.
           io.to(req.params.gameId).emit("move-made", terminalPayload);
-          io.to(req.params.gameId).emit("game-ended", {
-            gameId: req.params.gameId,
-            result: game.result,
+          await emitGameEnded(game.gameId, game.result, io, ratingChanges);
+          scheduleGameCompletionSideEffects(game.gameId, game.result, io, {
+            skipRatings: true,
           });
-          scheduleGameCompletionSideEffects(game.gameId, game.result, io);
 
           return res.json({
             success: true,
@@ -811,6 +858,7 @@ router.post(
               timeRemaining: game.timeRemaining,
               gameEnded: true,
               result: game.result,
+              ratingChanges,
             },
           });
         }
@@ -980,6 +1028,7 @@ router.post(
         await game.save();
 
         const io = req.app.get("io");
+        const ratingChanges = await applyRatingsForGameEnd(game.gameId, io);
         const terminalMoveData = {
           gameId: req.params.gameId,
           move,
@@ -993,15 +1042,14 @@ router.post(
           isInsufficientMaterial: isInsufficientMaterialState,
           gameEnded: true,
           result: game.result,
+          ratingChanges,
         };
 
         io.to(req.params.gameId).emit("move-made", terminalMoveData);
-        io.to(req.params.gameId).emit("game-ended", {
-          gameId: req.params.gameId,
-          result: game.result,
+        await emitGameEnded(game.gameId, game.result, io, ratingChanges);
+        scheduleGameCompletionSideEffects(game.gameId, game.result, io, {
+          skipRatings: true,
         });
-
-        scheduleGameCompletionSideEffects(game.gameId, game.result, io);
 
         return res.json({
           success: true,
@@ -1018,6 +1066,7 @@ router.post(
             isThreefoldRepetition,
             isInsufficientMaterial: isInsufficientMaterialState,
             result: game.result,
+            ratingChanges,
           },
         });
       }
@@ -1039,10 +1088,14 @@ router.post(
       };
 
       if (game.status === "completed") {
-        req.app.get("io").to(req.params.gameId).emit("game-ended", {
-          gameId: req.params.gameId,
-          result: game.result,
-        });
+        const ratingChanges = await notifyGameEndedFast(
+          game.gameId,
+          game.result,
+          req.app.get("io")
+        );
+        moveData.gameEnded = true;
+        moveData.result = game.result;
+        moveData.ratingChanges = ratingChanges;
       }
 
       req.app.get("io").to(req.params.gameId).emit("move-made", moveData);
@@ -2112,22 +2165,12 @@ router.post(
 
       const io = req.app.get("io");
 
-      // Notify clients immediately — do not wait for ratings / badges / stats.
-      io.to(req.params.gameId).emit("game-ended", {
-        gameId: req.params.gameId,
-        result,
-      });
-
-      res.json({
-        success: true,
-        message: "Game ended successfully",
-        data: { game },
-      });
-
+      let ratingChanges = null;
       if (!skipStats) {
-        scheduleGameCompletionSideEffects(game.gameId, result, io);
+        // Elo before notify so end dialog shows ±delta immediately.
+        ratingChanges = await notifyGameEndedFast(game.gameId, result, io);
       } else {
-        // Still flip presence offline→online without blocking the client.
+        await emitGameEnded(game.gameId, result, io, null);
         setImmediate(() => {
           void (async () => {
             try {
@@ -2147,7 +2190,12 @@ router.post(
           })();
         });
       }
-      return;
+
+      return res.json({
+        success: true,
+        message: "Game ended successfully",
+        data: { game, ratingChanges },
+      });
     } catch (error) {
       console.error("End game error:", error);
       res.status(500).json({
@@ -2547,27 +2595,25 @@ router.post(
 
     const io = req.app.get("io");
 
-    // Clients first — ratings / stats run in background.
+    const ratingChanges = await applyRatingsForGameEnd(game.gameId, io);
     io.to(req.params.gameId).emit("draw-accepted", {
       gameId: req.params.gameId,
+      ratingChanges,
     });
-    io.to(req.params.gameId).emit("game-ended", {
-      gameId: req.params.gameId,
-      result: game.result,
+    await emitGameEnded(game.gameId, game.result, io, ratingChanges);
+    scheduleGameCompletionSideEffects(game.gameId, game.result, io, {
+      skipRatings: true,
     });
 
     console.log(
       `[draw-accept] Player ${playerColor} accepted draw request in game ${req.params.gameId}`
     );
 
-    res.json({
+    return res.json({
       success: true,
       message: "Draw request accepted",
-      data: { game },
+      data: { game, ratingChanges },
     });
-
-    scheduleGameCompletionSideEffects(game.gameId, game.result, io);
-    return;
   } catch (error) {
     console.error("Draw accept error:", error);
     res.status(500).json({

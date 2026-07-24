@@ -21,7 +21,7 @@ async function updateGameRatings(game, io) {
 
   if (game.result?.reason === "first-move-abandon") {
     console.log(`[Rating] Skipping rating update for first-move abandon ${game.gameId}`);
-    return;
+    return null;
   }
 
   // Check if game was aborted (no moves made)
@@ -47,7 +47,7 @@ async function updateGameRatings(game, io) {
     } else {
       console.log(`[Rating] Skipping rating update for game ${game.gameId} - missing players or other issue`);
     }
-    return;
+    return null;
   }
 
   try {
@@ -63,7 +63,7 @@ async function updateGameRatings(game, io) {
         black: blackPlayerId,
         gameId: game.gameId,
       });
-      return;
+      return null;
     }
     
     // Fetch full user objects with ratings
@@ -77,7 +77,7 @@ async function updateGameRatings(game, io) {
         whiteFound: !!whiteUser,
         blackFound: !!blackUser,
       });
-      return;
+      return null;
     }
 
     // Determine result from white player's perspective
@@ -107,14 +107,14 @@ async function updateGameRatings(game, io) {
     
     if (!ratingType) {
       console.error(`[Rating] Cannot determine game category for game ${game.gameId}`);
-      return;
+      return null;
     }
 
     if (ratingType === "un-timed") {
       console.log(
         `[Rating] Skipping Glicko update for un-timed game ${game.gameId} (no rating pool)`
       );
-      return;
+      return null;
     }
     
     console.log(`[Rating] Using category: ${ratingType} for rating update`);
@@ -265,16 +265,21 @@ async function updateGameRatings(game, io) {
       console.warn(`[Rating] Socket.io instance not available, cannot emit RATING_UPDATED events`);
     }
     
-      console.log(`[Rating] Updated ${ratingType} ratings for game ${game.gameId}:`, {
+    console.log(`[Rating] Updated ${ratingType} ratings for game ${game.gameId}:`, {
       white: { old: whiteOldRating, new: updatedRatings.player1.rating, change: whiteRatingChange },
       black: { old: blackOldRating, new: updatedRatings.player2.rating, change: blackRatingChange },
     });
 
     // Badge awarding intentionally happens in routes/games.js only, via
     // services/achievementService, to keep a single source of truth.
+    return {
+      white: whiteRatingChange,
+      black: blackRatingChange,
+    };
   } catch (ratingError) {
     // Don't fail game completion if rating calculation fails
     console.error("[Rating] Error updating ratings:", ratingError);
+    return null;
   }
 }
 
