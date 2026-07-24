@@ -339,70 +339,79 @@ async function completeGameOnUserDisconnect(game, userId, io) {
 
   await game.save();
 
-  try {
-    const { triggerReviewGeneration } = require("./utils/game-review/game-completion-hook");
-    triggerReviewGeneration(game.gameId);
-  } catch (error) {
-    console.error(`[GameReview] Error triggering review generation hook:`, error);
-  }
-
-  const gameTime = Date.now() - game.createdAt.getTime();
-
-  if (game.players.white) {
-    const whiteStats = await Stats.findOne({
-      user: game.players.white._id,
-    });
-    if (whiteStats) {
-      const whiteResult =
-        game.result.winner === "white"
-          ? "win"
-          : game.result.winner === "black"
-          ? "loss"
-          : "draw";
-      await whiteStats.updateAfterGame(game.type, whiteResult, gameTime);
-    }
-  }
-
-  if (game.players.black && game.type !== "bot") {
-    const blackStats = await Stats.findOne({
-      user: game.players.black._id,
-    });
-    if (blackStats) {
-      const blackResult =
-        game.result.winner === "black"
-          ? "win"
-          : game.result.winner === "white"
-          ? "loss"
-          : "draw";
-      await blackStats.updateAfterGame(game.type, blackResult, gameTime);
-    }
-  }
-
-  if (game.players.white) {
-    await User.findByIdAndUpdate(game.players.white._id, {
-      status: "online",
-    });
-  }
-  if (game.players.black && game.type !== "bot") {
-    await User.findByIdAndUpdate(game.players.black._id, {
-      status: "online",
-    });
-  }
-
-  const { updateGameRatings } = require("./services/updateGameRatings");
-  await updateGameRatings(game, io);
-
+  // Clients first — disconnect forfeiture must feel instant.
   io.to(game.gameId).emit("game-ended", {
     gameId: game.gameId,
     result: game.result,
   });
 
-  try {
-    const { syncArenaGameCompletion } = require("./utils/arenaGameCompletionHook");
-    await syncArenaGameCompletion(game.gameId, game.result, io);
-  } catch (err) {
-    console.error("[Arena] disconnect completion sync failed:", game.gameId, err);
-  }
+  setImmediate(() => {
+    void (async () => {
+      try {
+        const { triggerReviewGeneration } = require("./utils/game-review/game-completion-hook");
+        triggerReviewGeneration(game.gameId);
+      } catch (error) {
+        console.error(`[GameReview] Error triggering review generation hook:`, error);
+      }
+
+      try {
+        const gameTime = Date.now() - game.createdAt.getTime();
+
+        if (game.players.white) {
+          const whiteStats = await Stats.findOne({
+            user: game.players.white._id,
+          });
+          if (whiteStats) {
+            const whiteResult =
+              game.result.winner === "white"
+                ? "win"
+                : game.result.winner === "black"
+                  ? "loss"
+                  : "draw";
+            await whiteStats.updateAfterGame(game.type, whiteResult, gameTime);
+          }
+        }
+
+        if (game.players.black && game.type !== "bot") {
+          const blackStats = await Stats.findOne({
+            user: game.players.black._id,
+          });
+          if (blackStats) {
+            const blackResult =
+              game.result.winner === "black"
+                ? "win"
+                : game.result.winner === "white"
+                  ? "loss"
+                  : "draw";
+            await blackStats.updateAfterGame(game.type, blackResult, gameTime);
+          }
+        }
+
+        if (game.players.white) {
+          await User.findByIdAndUpdate(game.players.white._id, {
+            status: "online",
+          });
+        }
+        if (game.players.black && game.type !== "bot") {
+          await User.findByIdAndUpdate(game.players.black._id, {
+            status: "online",
+          });
+        }
+
+        const { updateGameRatings } = require("./services/updateGameRatings");
+        await updateGameRatings(game, io);
+
+        try {
+          const { syncArenaGameCompletion } = require("./utils/arenaGameCompletionHook");
+          await syncArenaGameCompletion(game.gameId, game.result, io);
+        } catch (err) {
+          console.error("[Arena] disconnect completion sync failed:", game.gameId, err);
+        }
+      } catch (err) {
+        console.error("[Disconnect] post game-ended side effects failed:", game.gameId, err);
+      }
+    })();
+  });
 }
 
 function scheduleDisconnectGameEnd(userId, gameId, graceMs) {
