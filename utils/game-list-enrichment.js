@@ -28,7 +28,16 @@ function toObjectId(id) {
 function userGamesMatch(userId) {
   const oid = toObjectId(userId);
   return {
-    $or: [{ "players.white": oid }, { "players.black": oid }],
+    $and: [
+      { $or: [{ "players.white": oid }, { "players.black": oid }] },
+      // Pass-and-play imports are review-only — never show in history/home.
+      {
+        $nor: [
+          { hideFromHistory: true },
+          { "passPlay.whiteName": { $type: "string" } },
+        ],
+      },
+    ],
   };
 }
 
@@ -237,7 +246,15 @@ async function getPlatformGamesTodayCount() {
   startOfDay.setHours(0, 0, 0, 0);
 
   const rows = await Game.aggregate([
-    { $match: { status: "completed" } },
+    {
+      $match: {
+        status: "completed",
+        $nor: [
+          { hideFromHistory: true },
+          { "passPlay.whiteName": { $type: "string" } },
+        ],
+      },
+    },
     { $addFields: END_TIME_ADD_FIELDS },
     { $match: { endTime: { $gte: startOfDay } } },
     { $count: "total" },

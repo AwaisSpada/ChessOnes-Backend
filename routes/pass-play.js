@@ -190,6 +190,7 @@ router.post(
           whiteName: String(whiteName || "White").slice(0, 80),
           blackName: String(blackName || "Black").slice(0, 80),
         },
+        hideFromHistory: true,
         board: chessBoardToGameArray(chess),
         moves,
         currentTurn: chess.turn() === "w" ? "white" : "black",

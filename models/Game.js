@@ -271,6 +271,15 @@ const gameSchema = new mongoose.Schema(
       whiteName: { type: String, default: null },
       blackName: { type: String, default: null },
     },
+    /**
+     * When true, omit from game history / recent games / played-today.
+     * Used for pass-and-play imports that only exist for cloud review.
+     */
+    hideFromHistory: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
   },
   {
     timestamps: true,

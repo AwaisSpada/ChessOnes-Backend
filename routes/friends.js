@@ -26,6 +26,10 @@ router.get("/nemesis", auth, async (req, res) => {
     const games = await Game.find({
       $or: [{ "players.white": myId }, { "players.black": myId }],
       status: "completed",
+      $nor: [
+        { hideFromHistory: true },
+        { "passPlay.whiteName": { $type: "string" } },
+      ],
     })
       .populate("players.white players.black", "username fullName avatar rating ratings")
       .sort({ createdAt: -1 })

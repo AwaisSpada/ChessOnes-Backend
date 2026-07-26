@@ -413,6 +413,10 @@ router.get("/:userId", auth, async (req, res) => {
     const query = {
       status: "completed",
       $or: [{ "players.white": userId }, { "players.black": userId }],
+      $nor: [
+        { hideFromHistory: true },
+        { "passPlay.whiteName": { $type: "string" } },
+      ],
       ...(type !== "all" ? { category: type } : {}),
       ...(since ? { updatedAt: { $gte: since } } : {}),
     }
