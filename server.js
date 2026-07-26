@@ -169,6 +169,7 @@ app.use("/api/stats", require("./routes/stats"));
 app.use("/api/bot", require("./routes/bot")); // legacy simple bot endpoints
 app.use("/api/bots", require("./routes/bots")); // new Bot definitions for Bot Battles
 app.use("/api/bot-games", require("./routes/bot-games")); // Bot game creation
+app.use("/api/pass-play", require("./routes/pass-play")); // Pass-and-play import for review
 app.use("/api/invitations", require("./routes/invitations"));
 app.use("/api/game-review", require("./routes/game-review")); // Game review analysis
 app.use("/api/puzzles", require("./routes/puzzles")); // Puzzles endpoints

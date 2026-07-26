@@ -269,6 +269,21 @@ function enrichReviewWithGameData(review, game, userId) {
       rating: game.bot.elo,
       isBot: true,
     };
+  } else if (game.passPlay?.blackName || game.passPlay?.whiteName) {
+    const guestName =
+      userSide === "white"
+        ? game.passPlay.blackName
+        : game.passPlay.whiteName;
+    if (guestName) {
+      opponentInfo = {
+        id: null,
+        username: guestName,
+        name: guestName,
+        avatar: null,
+        rating: null,
+        isBot: false,
+      };
+    }
   } else {
     const opponentPlayer = userSide === "white" ? game.players.black : game.players.white;
     if (opponentPlayer) {
@@ -307,7 +322,16 @@ function enrichReviewWithGameData(review, game, userId) {
     userSide: userSide,
     botSide: botSide,
     players: {
-      white: game.players.white ? {
+      white: game.passPlay?.whiteName
+        ? {
+            id: game.players.white?._id || null,
+            username: game.passPlay.whiteName,
+            name: game.passPlay.whiteName,
+            avatar: game.players.white?.avatar || null,
+            rating: null,
+            isDeleted: false,
+          }
+        : game.players.white ? {
         id: game.players.white._id,
         username: game.players.white.isDeleted ? "Closed Account" : game.players.white.username,
         name: game.players.white.isDeleted ? "Closed Account" : (game.players.white.fullName || game.players.white.username),
@@ -322,7 +346,16 @@ function enrichReviewWithGameData(review, game, userId) {
         rating: game.bot.elo,
         isBot: true,
       } : null),
-      black: game.players.black ? {
+      black: game.passPlay?.blackName
+        ? {
+            id: game.players.black?._id || null,
+            username: game.passPlay.blackName,
+            name: game.passPlay.blackName,
+            avatar: game.players.black?.avatar || null,
+            rating: null,
+            isDeleted: false,
+          }
+        : game.players.black ? {
         id: game.players.black._id,
         username: game.players.black.isDeleted ? "Closed Account" : game.players.black.username,
         name: game.players.black.isDeleted ? "Closed Account" : (game.players.black.fullName || game.players.black.username),

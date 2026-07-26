@@ -266,6 +266,11 @@ const gameSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    /** Display names for local pass-and-play (OTB) games. */
+    passPlay: {
+      whiteName: { type: String, default: null },
+      blackName: { type: String, default: null },
+    },
   },
   {
     timestamps: true,
