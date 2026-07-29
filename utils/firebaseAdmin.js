@@ -1,9 +1,22 @@
 const fs = require("fs");
 const path = require("path");
-const admin = require("firebase-admin");
+const { initializeApp, getApps, cert } = require("firebase-admin/app");
+const { getMessaging: getFirebaseMessaging } = require("firebase-admin/messaging");
 
 let initAttempted = false;
 let initOk = false;
+
+function parseServiceAccountJson(raw) {
+  let text = String(raw || "").trim();
+  // Render / dotenv sometimes wraps the whole value in quotes.
+  if (
+    (text.startsWith("'") && text.endsWith("'")) ||
+    (text.startsWith('"') && text.endsWith('"'))
+  ) {
+    text = text.slice(1, -1);
+  }
+  return JSON.parse(text);
+}
 
 /**
  * Init firebase-admin from env:
@@ -15,7 +28,7 @@ function initFirebaseAdmin() {
   initAttempted = true;
 
   try {
-    if (admin.apps.length) {
+    if (getApps().length > 0) {
       initOk = true;
       return true;
     }
@@ -25,12 +38,12 @@ function initFirebaseAdmin() {
     const filePath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
 
     if (jsonEnv && String(jsonEnv).trim()) {
-      credentials = JSON.parse(jsonEnv);
+      credentials = parseServiceAccountJson(jsonEnv);
     } else if (filePath && String(filePath).trim()) {
       const resolved = path.isAbsolute(filePath)
         ? filePath
         : path.join(process.cwd(), filePath);
-      credentials = JSON.parse(fs.readFileSync(resolved, "utf8"));
+      credentials = parseServiceAccountJson(fs.readFileSync(resolved, "utf8"));
     }
 
     if (!credentials) {
@@ -40,8 +53,20 @@ function initFirebaseAdmin() {
       return false;
     }
 
-    admin.initializeApp({
-      credential: admin.credential.cert(credentials),
+    if (!credentials.client_email || !credentials.private_key) {
+      console.error(
+        "[firebase] Service account JSON missing client_email / private_key"
+      );
+      return false;
+    }
+
+    // Env paste sometimes turns real newlines into "\\n" twice — normalize once.
+    if (typeof credentials.private_key === "string") {
+      credentials.private_key = credentials.private_key.replace(/\\n/g, "\n");
+    }
+
+    initializeApp({
+      credential: cert(credentials),
     });
     initOk = true;
     console.log("[firebase] Admin SDK initialized");
@@ -55,11 +80,10 @@ function initFirebaseAdmin() {
 
 function getMessaging() {
   if (!initFirebaseAdmin()) return null;
-  return admin.messaging();
+  return getFirebaseMessaging();
 }
 
 module.exports = {
   initFirebaseAdmin,
   getMessaging,
-  admin,
 };
