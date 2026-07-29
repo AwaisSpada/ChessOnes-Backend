@@ -478,6 +478,13 @@ router.post(
             },
           });
 
+        try {
+          const { sendFriendRequestPush } = require("../utils/pushNotifications");
+          void sendFriendRequestPush(friendId, sender);
+        } catch (pushErr) {
+          console.warn("friend-request push skipped:", pushErr.message);
+        }
+
         return res.json({
           success: true,
           message: "Friend request sent successfully",

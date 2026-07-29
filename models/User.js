@@ -191,6 +191,21 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    /** FCM device tokens for push notifications (Android / iOS). */
+    fcmTokens: {
+      type: [
+        {
+          token: { type: String, required: true },
+          platform: {
+            type: String,
+            enum: ["android", "ios", "web"],
+            default: "android",
+          },
+          updatedAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
     accountStatus: {
       type: String,
       enum: ["active", "pending_deletion", "deleted"],

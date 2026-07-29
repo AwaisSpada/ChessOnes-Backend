@@ -886,4 +886,91 @@ router.delete("/avatar", auth, async (req, res) => {
   }
 });
 
+// @route   POST /api/users/device-token
+// @desc    Register / refresh an FCM device token for push
+// @access  Private
+router.post(
+  "/device-token",
+  auth,
+  [
+    body("token").isString().trim().notEmpty().withMessage("token is required"),
+    body("platform").optional().isIn(["android", "ios", "web"]),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const token = String(req.body.token).trim();
+      const platform = req.body.platform || "android";
+      const user = await User.findById(req.user._id);
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User not found" });
+      }
+
+      user.fcmTokens = Array.isArray(user.fcmTokens) ? user.fcmTokens : [];
+      // Drop same token elsewhere, then upsert for this device.
+      user.fcmTokens = user.fcmTokens.filter((row) => {
+        const t = typeof row === "string" ? row : row?.token;
+        return t && t !== token;
+      });
+      user.fcmTokens.push({ token, platform, updatedAt: new Date() });
+      // Keep last 10 devices
+      if (user.fcmTokens.length > 10) {
+        user.fcmTokens = user.fcmTokens.slice(-10);
+      }
+      await user.save();
+
+      res.json({ success: true, message: "Device token registered" });
+    } catch (error) {
+      console.error("device-token register error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to register device token",
+      });
+    }
+  }
+);
+
+// @route   DELETE /api/users/device-token
+// @desc    Unregister an FCM device token (logout)
+// @access  Private
+router.delete(
+  "/device-token",
+  auth,
+  [body("token").isString().trim().notEmpty().withMessage("token is required")],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const token = String(req.body.token).trim();
+      await User.updateOne(
+        { _id: req.user._id },
+        { $pull: { fcmTokens: { token } } }
+      );
+
+      res.json({ success: true, message: "Device token removed" });
+    } catch (error) {
+      console.error("device-token delete error:", error);
+      res.status(500).json({
+        success: false,
+        message: error.message || "Failed to remove device token",
+      });
+    }
+  }
+);
+
 module.exports = router;

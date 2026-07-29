@@ -2,3 +2,5 @@ node_modules
 _MACOSX
 .env
 Daily Puzzles.xlsx
+*firebase-adminsdk*.json
+firebase-service-account.json

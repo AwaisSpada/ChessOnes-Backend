@@ -284,6 +284,13 @@ router.post(
         );
       }
 
+      try {
+        const { sendChallengePush } = require("../utils/pushNotifications");
+        void sendChallengePush(opponent._id, invitation.fromUser || req.user);
+      } catch (pushErr) {
+        console.warn("challenge push skipped:", pushErr.message);
+      }
+
       res.status(201).json({
         success: true,
         message: "Challenge invitation sent",
@@ -514,6 +521,13 @@ router.post(
           "challenge:incoming",
           formatted
         );
+      }
+
+      try {
+        const { sendChallengePush } = require("../utils/pushNotifications");
+        void sendChallengePush(opponent._id, invitation.fromUser || req.user);
+      } catch (pushErr) {
+        console.warn("challenge push skipped:", pushErr.message);
       }
 
       res.status(201).json({

@@ -13,6 +13,8 @@ const GameInvitation = require("./models/GameInvitation");
 const Stats = require("./models/Stats");
 const { appendArenaChatMessage } = require("./utils/arenaChat");
 require("dotenv").config();
+const { initFirebaseAdmin } = require("./utils/firebaseAdmin");
+initFirebaseAdmin();
 
 const app = express();
 
@@ -1493,6 +1495,13 @@ io.on("connection", (socket) => {
 
       // Emit confirmation to sender
       socket.emit("invite-sent", formatted);
+
+      try {
+        const { sendChallengePush } = require("./utils/pushNotifications");
+        void sendChallengePush(opponent._id, sender);
+      } catch (pushErr) {
+        console.warn("challenge push skipped:", pushErr.message);
+      }
 
       console.log(
         `✅ Invitation sent via WebSocket: ${token} from ${sender._id} to ${opponent._id}`
