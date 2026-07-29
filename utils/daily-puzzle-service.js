@@ -55,15 +55,46 @@ async function getUserProgress(userId, dateKey) {
   return DailyPuzzleUserProgress.findOne({ user: userId, dateKey }).lean();
 }
 
-function computeDisplayStreak(user) {
-  const streak = user?.dailyPuzzleStreak ?? 0;
-  const last = user?.dailyPuzzleLastStreakDate;
-  if (!last || streak <= 0) return 0;
+async function computeDisplayStreak(userOrId) {
+  const userId = userOrId?._id || userOrId?.id || userOrId;
+  if (!userId) return 0;
 
   const today = todayDateKey();
-  const yesterday = addDaysToDateKey(today, -1);
-  if (last === today || last === yesterday) return streak;
-  return 0;
+  const fromKey = addDaysToDateKey(today, -365);
+
+  const progressList = await DailyPuzzleUserProgress.find({
+    user: userId,
+    dateKey: { $gte: fromKey, $lte: today },
+    solved: true,
+  })
+    .select("dateKey")
+    .lean();
+
+  const solvedSet = new Set(progressList.map((p) => p.dateKey));
+  let cursor = today;
+  let count = 0;
+  while (solvedSet.has(cursor)) {
+    count += 1;
+    cursor = addDaysToDateKey(cursor, -1);
+  }
+
+  // If we were called with a real user document, keep DB fields in sync.
+  if (userOrId && typeof userOrId.save === "function") {
+    const expectedLast =
+      count > 0 ? addDaysToDateKey(today, -(count - 1)) : null;
+
+    const currentStreak = userOrId.dailyPuzzleStreak ?? 0;
+    const currentLast = userOrId.dailyPuzzleLastStreakDate ?? null;
+
+    const shouldUpdate = currentStreak !== count || currentLast !== expectedLast;
+    if (shouldUpdate) {
+      userOrId.dailyPuzzleStreak = count;
+      userOrId.dailyPuzzleLastStreakDate = expectedLast;
+      await userOrId.save();
+    }
+  }
+
+  return count;
 }
 
 /**

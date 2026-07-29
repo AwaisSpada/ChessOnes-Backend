@@ -92,7 +92,7 @@ router.get("/", optionalAuth, async (req, res) => {
       const user = await User.findById(userId).select(
         "dailyPuzzleStreak dailyPuzzleLastStreakDate"
       );
-      streak = computeDisplayStreak(user);
+      streak = await computeDisplayStreak(user);
     }
 
     res.json({
@@ -167,7 +167,7 @@ router.post("/:dateKey/solve", auth, async (req, res) => {
         solved: true,
         alreadySolved,
         solvedAt: progress.solvedAt,
-        streak: computeDisplayStreak(user),
+        streak: await computeDisplayStreak(user),
         todayDateKey: todayDateKey(),
       },
     });
@@ -196,7 +196,7 @@ router.get("/stats/user", auth, async (req, res) => {
     res.json({
       success: true,
       data: {
-        streak: computeDisplayStreak(user),
+        streak: await computeDisplayStreak(user),
         todayDateKey: today,
         todaySolved: Boolean(progressToday?.solved),
         lastStreakDate: user?.dailyPuzzleLastStreakDate || null,
