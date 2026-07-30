@@ -28,7 +28,7 @@ const io = new Server(server, {
   pingTimeout: 2000,
   cors: {
     origin: [
-      process.env.FRONTEND_URL || "https://chessones-frontend-v2.vercel.app",
+      process.env.FRONTEND_URL || "https://www.chessones.com",
       "https://chessones-frontend-v2.vercel.app", // Current production frontend
       "https://chessones.com",
       "https://www.chessones.com",
@@ -50,7 +50,7 @@ console.log("Allowed origin (Socket.io):", process.env.FRONTEND_URL);
 
 // CORS configuration - must be before helmet to work properly
 const allowedOrigins = [
-  process.env.FRONTEND_URL || "https://chessones-frontend-v2.vercel.app",
+  process.env.FRONTEND_URL || "https://www.chessones.com",
   "https://chessones-frontend-v2.vercel.app",
   "https://chessones.com",
   "https://www.chessones.com",
@@ -180,6 +180,47 @@ app.use("/api/tournaments", require("./routes/tournaments"));
 app.use("/api/learn", require("./routes/learn")); // Learn SRS progress sync
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
 app.use("/api/public", require("./routes/public")); // Contact + newsletter (public, uses sendMail)
+
+// Smart challenge-link landing: prefer app deep link, else web /home?invite=
+const {
+  buildChallengeJoinUrls,
+  getPublicFrontendUrl,
+} = require("./utils/frontendUrl");
+app.get("/join/:token", (req, res) => {
+  const token = String(req.params.token || "").trim();
+  if (!token) {
+    return res.redirect(302, `${getPublicFrontendUrl()}/home`);
+  }
+  const { webJoinUrl, appDeepLink } = buildChallengeJoinUrls(token);
+  const ua = String(req.headers["user-agent"] || "").toLowerCase();
+  const isMobile =
+    /android|iphone|ipad|ipod|mobile|opera mini|iemobile/.test(ua);
+
+  if (isMobile) {
+    // Try custom scheme first; meta-refresh falls back to web if app missing.
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(`<!doctype html>
+<html><head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Join ChessOnes Challenge</title>
+<meta http-equiv="refresh" content="1;url=${webJoinUrl}"/>
+<script>
+  window.location.href = ${JSON.stringify(appDeepLink)};
+  setTimeout(function () { window.location.href = ${JSON.stringify(webJoinUrl)}; }, 800);
+</script>
+</head>
+<body style="font-family:system-ui,sans-serif;background:#050812;color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">
+  <div style="text-align:center;padding:24px">
+    <h1 style="font-size:1.25rem;margin:0 0 8px">Opening ChessOnes…</h1>
+    <p style="opacity:.7;margin:0 0 16px">If the app does not open, continue in the browser.</p>
+    <a href="${webJoinUrl}" style="color:#1FC6FF;font-weight:700">Continue on web</a>
+  </div>
+</body></html>`);
+  }
+
+  return res.redirect(302, webJoinUrl);
+});
 
 // Socket.io for real-time features
 const onlineUsers = new Map();
@@ -1687,6 +1728,8 @@ io.on("connection", (socket) => {
 
       const GameInvitation = require("./models/GameInvitation");
       const Game = require("./models/Game");
+      const User = require("./models/User");
+      const { claimOpenLinkInvitation } = require("./utils/openLinkInvite");
 
       const invitation = await GameInvitation.findOne({ token }).populate([
         { path: "fromUser", select: "username fullName avatar rating ratings country" },
@@ -1698,7 +1741,89 @@ io.on("connection", (socket) => {
         return;
       }
 
-      if (!invitation.toUser._id.equals(socket.data.userId)) {
+      // Open challenge links: claim via shared helper (toUser starts null).
+      if (invitation.isOpenLink) {
+        const acceptor = await User.findById(socket.data.userId);
+        if (!acceptor) {
+          socket.emit("invite-error", { message: "User not found" });
+          return;
+        }
+        try {
+          const { invitation: claimed, game } = await claimOpenLinkInvitation(
+            invitation,
+            acceptor,
+            io
+          );
+          const formatted = {
+            id: claimed._id,
+            token: claimed.token,
+            status: claimed.status,
+            gameType: claimed.gameType,
+            matchType: claimed.matchType || "rated",
+            gameFormat: "open_link",
+            isOpenLink: true,
+            inviterSide:
+              claimed.preferredColor === "black" ? "black" : "white",
+            inviteeSide:
+              claimed.preferredColor === "black" ? "white" : "black",
+            timeControl: claimed.timeControl,
+            gameId: game.gameId,
+            from: claimed.fromUser
+              ? {
+                  id: claimed.fromUser._id,
+                  username: claimed.fromUser.username,
+                  fullName: claimed.fromUser.fullName,
+                  rating: claimed.fromUser.rating,
+                  avatar: claimed.fromUser.avatar,
+                  country: claimed.fromUser.country || "",
+                }
+              : null,
+            to: claimed.toUser
+              ? {
+                  id: claimed.toUser._id,
+                  username: claimed.toUser.username,
+                  fullName: claimed.toUser.fullName,
+                  rating: claimed.toUser.rating,
+                  avatar: claimed.toUser.avatar,
+                  country: claimed.toUser.country || "",
+                }
+              : null,
+          };
+
+          const gameId = game.gameId;
+          if (!gameRoomSockets.has(gameId)) {
+            gameRoomSockets.set(gameId, new Set());
+          }
+          if (!gameRoomUsers.has(gameId)) {
+            gameRoomUsers.set(gameId, new Set());
+          }
+          const socketSet = gameRoomSockets.get(gameId);
+          const userSet = gameRoomUsers.get(gameId);
+          socket.join(gameId);
+          socketSet.add(socket.id);
+          const acceptingUserId = String(acceptor._id);
+          if (!userSet.has(acceptingUserId)) userSet.add(acceptingUserId);
+
+          io.to(`user:${claimed.fromUser._id.toString()}`).emit(
+            "challenge:update",
+            formatted
+          );
+          io.to(`user:${acceptingUserId}`).emit("challenge:update", formatted);
+          socket.emit("invite-accepted", {
+            gameId: game.gameId,
+            invitation: formatted,
+          });
+          console.log(`✅ Open challenge link accepted via WebSocket: ${token}`);
+        } catch (claimErr) {
+          socket.emit("invite-error", {
+            message: claimErr.message || "Failed to accept challenge link",
+            code: claimErr.code,
+          });
+        }
+        return;
+      }
+
+      if (!invitation.toUser || !invitation.toUser._id.equals(socket.data.userId)) {
         socket.emit("invite-error", {
           message: "You are not allowed to accept this invite",
         });

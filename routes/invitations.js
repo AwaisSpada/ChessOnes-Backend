@@ -12,7 +12,8 @@ const {
   dismissAllArenaNotificationsForUser,
 } = require("../services/arenaNotificationService");
 
-const { getPublicFrontendUrl } = require("../utils/frontendUrl");
+const { buildChallengeJoinUrls } = require("../utils/frontendUrl");
+const { claimOpenLinkInvitation } = require("../utils/openLinkInvite");
 
 const router = express.Router();
 
@@ -268,12 +269,13 @@ router.post(
         { path: "toUser", select: "username fullName avatar rating country" },
       ]);
 
-      const baseUrl = getPublicFrontendUrl();
-      const joinUrl = `${baseUrl}/dashboard?invite=${token}`;
+      const { joinUrl, webJoinUrl, appDeepLink } = buildChallengeJoinUrls(token);
 
       const formatted = {
         ...formatInvitation(invitation),
         joinUrl,
+        webJoinUrl,
+        appDeepLink,
       };
 
       const io = req.app.get("io");
@@ -369,12 +371,13 @@ router.post(
         { path: "fromUser", select: "username fullName avatar rating country" },
       ]);
 
-      const baseUrl = getPublicFrontendUrl();
-      const joinUrl = `${baseUrl}/dashboard?invite=${token}`;
+      const { joinUrl, webJoinUrl, appDeepLink } = buildChallengeJoinUrls(token);
 
       const formatted = {
         ...formatInvitation(invitation),
         joinUrl,
+        webJoinUrl,
+        appDeepLink,
       };
 
       res.status(201).json({
@@ -507,12 +510,13 @@ router.post(
         { path: "toUser", select: "username fullName avatar rating country" },
       ]);
 
-      const baseUrl = getPublicFrontendUrl();
-      const joinUrl = `${baseUrl}/dashboard?invite=${token}`;
+      const { joinUrl, webJoinUrl, appDeepLink } = buildChallengeJoinUrls(token);
 
       const formatted = {
         ...formatInvitation(invitation),
         joinUrl,
+        webJoinUrl,
+        appDeepLink,
       };
 
       const io = req.app.get("io");
@@ -544,6 +548,55 @@ router.post(
     }
   }
 );
+
+/**
+ * Public preview for challenge links (no auth) — used by web join UX.
+ */
+router.get("/open/:token", async (req, res) => {
+  try {
+    const token = String(req.params.token || "").trim();
+    if (!token) {
+      return res.status(400).json({ success: false, message: "Token required" });
+    }
+    const invitation = await GameInvitation.findOne({ token }).populate([
+      { path: "fromUser", select: "username fullName avatar rating country" },
+    ]);
+    if (!invitation) {
+      return res.status(404).json({ success: false, message: "Invitation not found" });
+    }
+    const effectiveStatus = await resolveInvitationEffectiveStatus(invitation);
+    const urls = buildChallengeJoinUrls(token);
+    return res.json({
+      success: true,
+      data: {
+        token: invitation.token,
+        status: effectiveStatus,
+        isOpenLink: Boolean(invitation.isOpenLink),
+        gameType: invitation.gameType,
+        matchType: invitation.matchType || "rated",
+        preferredColor: invitation.preferredColor || "random",
+        timeControl: invitation.timeControl,
+        expiresAt: invitation.expiresAt,
+        from: invitation.fromUser
+          ? {
+              username: invitation.fromUser.username,
+              fullName: invitation.fromUser.fullName,
+              avatar: invitation.fromUser.avatar,
+              rating: invitation.fromUser.rating,
+              country: invitation.fromUser.country || "",
+            }
+          : null,
+        ...urls,
+      },
+    });
+  } catch (error) {
+    console.error("Open invite preview error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load challenge link",
+    });
+  }
+});
 
 router.get("/", auth, async (req, res) => {
   try {
@@ -899,83 +952,30 @@ router.post(
         }
 
         // Open challenge link: claim + create game on accept
-        if (isOpenLink && !invitation.gameId) {
-          const { setGameCategory } = require("../services/ratingEngine");
-          const isRated = (invitation.matchType || "rated") === "rated";
-          const inviterColor =
-            invitation.preferredColor === "black" ? "black" : "white";
-          const gameId = Math.random().toString(36).substr(2, 9);
-          const players =
-            inviterColor === "white"
-              ? { white: invitation.fromUser._id, black: req.user._id }
-              : { white: req.user._id, black: invitation.fromUser._id };
-
-          game = new Game({
-            gameId,
-            type: "friend",
-            isRated,
-            players,
-            timeControl: invitation.timeControl,
-            timeRemaining: {
-              white: invitation.timeControl.initial,
-              black: invitation.timeControl.initial,
-            },
-            status: "active",
-          });
-          setGameCategory(game);
-          await game.save();
-
-          invitation.toUser = req.user._id;
-          invitation.toEmail = req.user.email || null;
-          invitation.gameId = gameId;
-          invitation.status = "accepted";
-          await invitation.save();
-          await invitation.populate([
-            { path: "fromUser", select: "username fullName avatar rating ratings country" },
-            { path: "toUser", select: "username fullName avatar rating ratings country" },
-          ]);
-
-          const ioOpen = req.app.get("io");
-          if (ioOpen) {
-            ioOpen.to(`user:${invitation.fromUser._id.toString()}`).emit(
-              "opponent-joined",
-              {
-                gameId: game.gameId,
-                opponent: {
-                  id: req.user._id,
-                  username: req.user.username,
-                  fullName: req.user.fullName,
-                  avatar: req.user.avatar,
-                  rating: req.user.rating,
-                  ratings: req.user.ratings,
-                  country: req.user.country || "",
-                },
-              }
+        if (isOpenLink) {
+          try {
+            const claimed = await claimOpenLinkInvitation(
+              invitation,
+              req.user,
+              req.app.get("io")
             );
-            ioOpen.to(game.gameId).emit("player-joined", {
-              gameId: game.gameId,
-              userId: req.user._id.toString(),
-              player: {
-                id: req.user._id,
-                username: req.user.username,
-                fullName: req.user.fullName,
-                avatar: req.user.avatar,
-                rating: req.user.rating,
-                ratings: req.user.ratings,
-                country: req.user.country || "",
+            broadcastInvite(req.app.get("io"), claimed.invitation);
+            return res.json({
+              success: true,
+              message: "Invitation accepted",
+              data: {
+                invitation: formatInvitation(claimed.invitation),
+                game: claimed.game,
               },
             });
+          } catch (claimErr) {
+            const status = claimErr.status || 500;
+            return res.status(status).json({
+              success: false,
+              message: claimErr.message || "Failed to accept challenge link",
+              code: claimErr.code,
+            });
           }
-
-          broadcastInvite(ioOpen, invitation);
-          return res.json({
-            success: true,
-            message: "Invitation accepted",
-            data: {
-              invitation: formatInvitation(invitation),
-              game,
-            },
-          });
         }
         
         // Game was already created when invitation was sent
