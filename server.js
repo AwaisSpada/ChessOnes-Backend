@@ -1781,7 +1781,6 @@ io.on("connection", (socket) => {
       const GameInvitation = require("./models/GameInvitation");
       const Game = require("./models/Game");
       const User = require("./models/User");
-      const { claimOpenLinkInvitation } = require("./utils/openLinkInvite");
 
       const invitation = await GameInvitation.findOne({ token }).populate([
         { path: "fromUser", select: "username fullName avatar rating ratings country" },
@@ -1793,55 +1792,60 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Open challenge links: claim via shared helper (toUser starts null).
+      // Open challenge links: B claims (awaiting host) OR A confirms if already claimed.
       if (invitation.isOpenLink) {
         const acceptor = await User.findById(socket.data.userId);
         if (!acceptor) {
           socket.emit("invite-error", { message: "User not found" });
           return;
         }
-        try {
-          const { invitation: claimed, game } = await claimOpenLinkInvitation(
-            invitation,
-            acceptor,
-            io
-          );
-          const formatted = {
-            id: claimed._id,
-            token: claimed.token,
-            status: claimed.status,
-            gameType: claimed.gameType,
-            matchType: claimed.matchType || "rated",
-            gameFormat: "open_link",
-            isOpenLink: true,
-            inviterSide:
-              claimed.preferredColor === "black" ? "black" : "white",
-            inviteeSide:
-              claimed.preferredColor === "black" ? "white" : "black",
-            timeControl: claimed.timeControl,
-            gameId: game.gameId,
-            from: claimed.fromUser
-              ? {
-                  id: claimed.fromUser._id,
-                  username: claimed.fromUser.username,
-                  fullName: claimed.fromUser.fullName,
-                  rating: claimed.fromUser.rating,
-                  avatar: claimed.fromUser.avatar,
-                  country: claimed.fromUser.country || "",
-                }
-              : null,
-            to: claimed.toUser
-              ? {
-                  id: claimed.toUser._id,
-                  username: claimed.toUser.username,
-                  fullName: claimed.toUser.fullName,
-                  rating: claimed.toUser.rating,
-                  avatar: claimed.toUser.avatar,
-                  country: claimed.toUser.country || "",
-                }
-              : null,
-          };
+        const {
+          claimOpenLinkInvitation,
+          confirmOpenLinkByHost,
+          formatOpenLinkSocketPayload,
+        } = require("./utils/openLinkInvite");
 
+        const fromId = String(invitation.fromUser?._id || invitation.fromUser);
+        const isHost = fromId === String(socket.data.userId);
+
+        if (invitation.status === "claimed" && isHost) {
+          try {
+            const result = await confirmOpenLinkByHost(
+              invitation,
+              acceptor,
+              "accept",
+              io
+            );
+            if (result.game) {
+              const gameId = result.game.gameId;
+              if (!gameRoomSockets.has(gameId)) {
+                gameRoomSockets.set(gameId, new Set());
+              }
+              if (!gameRoomUsers.has(gameId)) {
+                gameRoomUsers.set(gameId, new Set());
+              }
+              socket.join(gameId);
+              gameRoomSockets.get(gameId).add(socket.id);
+              gameRoomUsers.get(gameId).add(String(acceptor._id));
+              socket.emit("invite-accepted", {
+                gameId,
+                invitation: formatOpenLinkSocketPayload(result.invitation),
+              });
+            }
+            console.log(`✅ Open challenge link confirmed by host: ${token}`);
+          } catch (confirmErr) {
+            socket.emit("invite-error", {
+              message: confirmErr.message || "Failed to confirm challenge link",
+              code: confirmErr.code,
+            });
+          }
+          return;
+        }
+
+        try {
+          const { invitation: claimed, game, awaitingHostConfirm } =
+            await claimOpenLinkInvitation(invitation, acceptor, io);
+          const formatted = formatOpenLinkSocketPayload(claimed);
           const gameId = game.gameId;
           if (!gameRoomSockets.has(gameId)) {
             gameRoomSockets.set(gameId, new Set());
@@ -1856,16 +1860,14 @@ io.on("connection", (socket) => {
           const acceptingUserId = String(acceptor._id);
           if (!userSet.has(acceptingUserId)) userSet.add(acceptingUserId);
 
-          io.to(`user:${claimed.fromUser._id.toString()}`).emit(
-            "challenge:update",
-            formatted
-          );
-          io.to(`user:${acceptingUserId}`).emit("challenge:update", formatted);
           socket.emit("invite-accepted", {
             gameId: game.gameId,
             invitation: formatted,
+            awaitingHostConfirm: Boolean(awaitingHostConfirm),
           });
-          console.log(`✅ Open challenge link accepted via WebSocket: ${token}`);
+          console.log(
+            `✅ Open challenge link claimed via WebSocket: ${token} (awaiting host=${!!awaitingHostConfirm})`
+          );
         } catch (claimErr) {
           socket.emit("invite-error", {
             message: claimErr.message || "Failed to accept challenge link",
@@ -2155,13 +2157,43 @@ io.on("connection", (socket) => {
         return;
       }
 
-      if (!invitation.toUser._id.equals(socket.data.userId)) {
+      // Host (A) declines a claimed open-link challenge
+      if (
+        invitation.isOpenLink &&
+        invitation.status === "claimed" &&
+        String(invitation.fromUser?._id || invitation.fromUser) ===
+          String(socket.data.userId)
+      ) {
+        const { confirmOpenLinkByHost } = require("./utils/openLinkInvite");
+        const host = await require("./models/User").findById(socket.data.userId);
+        if (!host) {
+          socket.emit("invite-error", { message: "User not found" });
+          return;
+        }
+        try {
+          await confirmOpenLinkByHost(invitation, host, "decline", io);
+          socket.emit("invite-declined", {
+            token: invitation.token,
+            gameId: invitation.gameId,
+            status: "declined",
+          });
+          console.log(`✅ Open challenge link declined by host: ${token}`);
+        } catch (err) {
+          socket.emit("invite-error", {
+            message: err.message || "Failed to decline challenge",
+            code: err.code,
+          });
+        }
+        return;
+      }
+
+      if (!invitation.toUser || !invitation.toUser._id.equals(socket.data.userId)) {
         socket.emit("invite-error", {
           message: "You are not allowed to decline this invite",
         });
         return;
       }
-      if (invitation.status !== "pending") {
+      if (invitation.status !== "pending" && invitation.status !== "claimed") {
         socket.emit("invite-error", {
           message: `Invitation already ${invitation.status}`,
         });

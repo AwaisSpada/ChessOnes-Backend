@@ -1,14 +1,58 @@
 const Game = require("../models/Game");
 const GameInvitation = require("../models/GameInvitation");
 
+function formatOpenLinkSocketPayload(invitation, extra = {}) {
+  return {
+    id: invitation._id,
+    token: invitation.token,
+    status: invitation.status,
+    gameType: invitation.gameType,
+    matchType: invitation.matchType || "rated",
+    gameFormat: "open_link",
+    isOpenLink: true,
+    needsHostConfirm: invitation.status === "claimed",
+    preferredColor: invitation.preferredColor || "random",
+    inviterSide:
+      invitation.preferredColor === "black" ? "black" : "white",
+    inviteeSide:
+      invitation.preferredColor === "black" ? "white" : "black",
+    timeControl: invitation.timeControl,
+    expiresAt: invitation.expiresAt,
+    createdAt: invitation.createdAt,
+    gameId: invitation.gameId || null,
+    from: invitation.fromUser
+      ? {
+          id: invitation.fromUser._id,
+          username: invitation.fromUser.username,
+          fullName: invitation.fromUser.fullName,
+          rating: invitation.fromUser.rating,
+          ratings: invitation.fromUser.ratings,
+          avatar: invitation.fromUser.avatar,
+          country: invitation.fromUser.country || "",
+        }
+      : null,
+    to: invitation.toUser
+      ? {
+          id: invitation.toUser._id,
+          username: invitation.toUser.username,
+          fullName: invitation.toUser.fullName,
+          rating: invitation.toUser.rating,
+          ratings: invitation.toUser.ratings,
+          avatar: invitation.toUser.avatar,
+          country: invitation.toUser.country || "",
+        }
+      : null,
+    ...extra,
+  };
+}
+
 /**
- * Claim an open challenge link and create the live game.
- * Shared by HTTP respond + socket accept-invite.
+ * B claims an open challenge link.
+ * Creates the game but does NOT fully accept — host (A) must confirm.
+ * Emits `open-link:needs-confirm` to A (on-screen tick/cross).
+ * Does NOT emit challenge:update accepted / opponent-joined (no A auto-nav).
  *
- * @param {object} invitation - populated GameInvitation (fromUser)
- * @param {object} acceptor - authenticated user doc (req.user / socket user)
- * @param {import('socket.io').Server | null} io
- * @returns {Promise<{ invitation: object, game: object }>}
+ * @returns {Promise<{ invitation: object, game: object, awaitingHostConfirm: boolean }>}
  */
 async function claimOpenLinkInvitation(invitation, acceptor, io) {
   if (!invitation?.isOpenLink) {
@@ -36,7 +80,23 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
     );
   }
 
-  if (invitation.status !== "pending") {
+  if (invitation.status === "accepted" && invitation.gameId) {
+    const existing = await Game.findOne({ gameId: invitation.gameId });
+    if (existing) {
+      return { invitation, game: existing, awaitingHostConfirm: false };
+    }
+  }
+
+  if (invitation.status === "claimed" && invitation.gameId) {
+    if (toUserId && String(toUserId) === String(acceptorId)) {
+      const existing = await Game.findOne({ gameId: invitation.gameId });
+      if (existing) {
+        return { invitation, game: existing, awaitingHostConfirm: true };
+      }
+    }
+  }
+
+  if (!["pending", "claimed"].includes(invitation.status)) {
     throw Object.assign(new Error(`Invitation already ${invitation.status}`), {
       status: 400,
       code: "NOT_PENDING",
@@ -52,15 +112,7 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
     });
   }
 
-  // Already claimed by this user with a game — idempotent return.
-  if (invitation.gameId && toUserId && String(toUserId) === String(acceptorId)) {
-    const existing = await Game.findOne({ gameId: invitation.gameId });
-    if (existing) {
-      return { invitation, game: existing };
-    }
-  }
-
-  if (invitation.gameId) {
+  if (invitation.status === "pending" && invitation.gameId) {
     const currentGame = await Game.findOne({ gameId: invitation.gameId }).select(
       "status"
     );
@@ -74,6 +126,14 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
         status: 409,
         code: "INVITATION_COMPLETED",
       });
+    }
+  }
+
+  // Already claimed with game — return as-is.
+  if (invitation.status === "claimed" && invitation.gameId) {
+    const existing = await Game.findOne({ gameId: invitation.gameId });
+    if (existing) {
+      return { invitation, game: existing, awaitingHostConfirm: true };
     }
   }
 
@@ -105,7 +165,8 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
   invitation.toUser = acceptorId;
   invitation.toEmail = acceptor.email || null;
   invitation.gameId = gameId;
-  invitation.status = "accepted";
+  // Claimed = waiting for host (A) tick/cross — NOT fully accepted yet.
+  invitation.status = "claimed";
   await invitation.save();
   await invitation.populate([
     {
@@ -119,35 +180,157 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
   ]);
 
   if (io) {
-    const fromId = invitation.fromUser._id.toString();
-    io.to(`user:${fromId}`).emit("opponent-joined", {
-      gameId: game.gameId,
-      opponent: {
-        id: acceptorId,
-        username: acceptor.username,
-        fullName: acceptor.fullName,
-        avatar: acceptor.avatar,
-        rating: acceptor.rating,
-        ratings: acceptor.ratings,
-        country: acceptor.country || "",
+    const fromId = String(invitation.fromUser._id);
+    const claimer = invitation.toUser;
+    // On-screen permission for A — show claimer (B) as the person joining.
+    const confirmPayload = formatOpenLinkSocketPayload(invitation, {
+      needsHostConfirm: true,
+      // Reuse IncomingChallengeModal `from` field for who is challenging A.
+      from: {
+        id: claimer._id,
+        username: claimer.username,
+        fullName: claimer.fullName,
+        rating: claimer.rating,
+        ratings: claimer.ratings,
+        avatar: claimer.avatar,
+        country: claimer.country || "",
       },
+      hostId: fromId,
+      claimerId: String(claimer._id),
     });
-    io.to(game.gameId).emit("player-joined", {
-      gameId: game.gameId,
-      userId: String(acceptorId),
-      player: {
-        id: acceptorId,
-        username: acceptor.username,
-        fullName: acceptor.fullName,
-        avatar: acceptor.avatar,
-        rating: acceptor.rating,
-        ratings: acceptor.ratings,
-        country: acceptor.country || "",
-      },
+    io.to(`user:${fromId}`).emit("open-link:needs-confirm", confirmPayload);
+    // Soft notify lists without auto-navigating (status is claimed, not accepted).
+    io.to(`user:${fromId}`).emit("challenge:update", confirmPayload);
+    io.to(`user:${String(claimer._id)}`).emit(
+      "challenge:update",
+      formatOpenLinkSocketPayload(invitation)
+    );
+  }
+
+  return { invitation, game, awaitingHostConfirm: true };
+}
+
+/**
+ * Host (A) confirms or declines a claimed open-link challenge.
+ * @param {"accept"|"decline"} action
+ */
+async function confirmOpenLinkByHost(invitation, host, action, io) {
+  if (!invitation?.isOpenLink) {
+    throw Object.assign(new Error("Not an open challenge link"), {
+      status: 400,
+      code: "NOT_OPEN_LINK",
     });
   }
 
-  return { invitation, game };
+  const hostId = String(host._id || host.id);
+  const fromUserId = String(invitation.fromUser?._id || invitation.fromUser);
+
+  if (fromUserId !== hostId) {
+    throw Object.assign(
+      new Error("Only the challenge creator can confirm this link"),
+      { status: 403, code: "NOT_HOST" }
+    );
+  }
+
+  if (invitation.status !== "claimed") {
+    if (invitation.status === "accepted" && action === "accept" && invitation.gameId) {
+      const existing = await Game.findOne({ gameId: invitation.gameId });
+      if (existing) {
+        return { invitation, game: existing, action: "accept" };
+      }
+    }
+    throw Object.assign(
+      new Error(`Invitation is ${invitation.status}, not awaiting confirm`),
+      { status: 400, code: "NOT_CLAIMED" }
+    );
+  }
+
+  await invitation.populate([
+    {
+      path: "fromUser",
+      select: "username fullName avatar rating ratings country",
+    },
+    {
+      path: "toUser",
+      select: "username fullName avatar rating ratings country",
+    },
+  ]);
+
+  const claimerId = invitation.toUser
+    ? String(invitation.toUser._id || invitation.toUser)
+    : null;
+
+  if (action === "decline") {
+    invitation.status = "declined";
+    await invitation.save();
+
+    if (invitation.gameId) {
+      await Game.updateOne(
+        { gameId: invitation.gameId, status: "active" },
+        {
+          $set: {
+            status: "abandoned",
+            result: { winner: "draw", reason: "first-move-abandon" },
+          },
+        }
+      );
+    }
+
+    const payload = formatOpenLinkSocketPayload(invitation);
+    if (io) {
+      io.to(`user:${fromUserId}`).emit("challenge:update", payload);
+      if (claimerId) {
+        io.to(`user:${claimerId}`).emit("challenge:update", payload);
+        io.to(`user:${claimerId}`).emit("invite-declined", {
+          gameId: invitation.gameId,
+          token: invitation.token,
+          message: "Challenge declined by the creator",
+        });
+      }
+    }
+
+    return { invitation, game: null, action: "decline" };
+  }
+
+  // accept
+  invitation.status = "accepted";
+  await invitation.save();
+
+  const game = invitation.gameId
+    ? await Game.findOne({ gameId: invitation.gameId })
+    : null;
+  if (!game) {
+    throw Object.assign(new Error("Game not found for this challenge"), {
+      status: 404,
+      code: "GAME_NOT_FOUND",
+    });
+  }
+
+  const payload = formatOpenLinkSocketPayload(invitation);
+  if (io) {
+    io.to(`user:${fromUserId}`).emit("challenge:update", payload);
+    if (claimerId) {
+      io.to(`user:${claimerId}`).emit("challenge:update", payload);
+    }
+    // A can navigate into the game.
+    io.to(`user:${fromUserId}`).emit("invite-accepted", {
+      gameId: game.gameId,
+      invitation: payload,
+    });
+    // B unlocks waiting gate.
+    if (claimerId) {
+      io.to(`user:${claimerId}`).emit("opponent-joined", {
+        gameId: game.gameId,
+        opponent: payload.from,
+      });
+    }
+  }
+
+  return { invitation, game, action: "accept" };
 }
 
-module.exports = { claimOpenLinkInvitation };
+module.exports = {
+  claimOpenLinkInvitation,
+  confirmOpenLinkByHost,
+  formatOpenLinkSocketPayload,
+};

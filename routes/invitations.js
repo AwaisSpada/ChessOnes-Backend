@@ -70,6 +70,7 @@ function formatInvitation(invitation) {
     matchType,
     gameFormat: invitation.isOpenLink ? "open_link" : "friend",
     isOpenLink: Boolean(invitation.isOpenLink),
+    needsHostConfirm: invitation.status === "claimed",
     preferredColor,
     inviterSide,
     inviteeSide,
@@ -803,9 +804,44 @@ router.post(
       const isOpenLink = Boolean(invitation.isOpenLink);
       const toUserId = invitation.toUser?._id || invitation.toUser || null;
       const fromUserId = invitation.fromUser?._id || invitation.fromUser;
+      const isHost = String(fromUserId) === String(req.user._id);
+      const {
+        claimOpenLinkInvitation,
+        confirmOpenLinkByHost,
+      } = require("../utils/openLinkInvite");
+
+      // Open-link host confirm/decline (A) after B claimed
+      if (isOpenLink && invitation.status === "claimed" && isHost) {
+        try {
+          const result = await confirmOpenLinkByHost(
+            invitation,
+            req.user,
+            action === "decline" ? "decline" : "accept",
+            req.app.get("io")
+          );
+          return res.json({
+            success: true,
+            message:
+              action === "decline"
+                ? "Challenge declined"
+                : "Challenge confirmed",
+            data: {
+              invitation: formatInvitation(result.invitation),
+              game: result.game,
+              awaitingHostConfirm: false,
+            },
+          });
+        } catch (confirmErr) {
+          return res.status(confirmErr.status || 500).json({
+            success: false,
+            message: confirmErr.message || "Failed to confirm challenge",
+            code: confirmErr.code,
+          });
+        }
+      }
 
       if (isOpenLink) {
-        if (String(fromUserId) === String(req.user._id)) {
+        if (isHost) {
           return res.status(400).json({
             success: false,
             message: "You cannot accept your own challenge link",
@@ -826,11 +862,59 @@ router.post(
         }
       }
 
-      if (invitation.status !== "pending") {
+      if (invitation.status !== "pending" && invitation.status !== "claimed") {
         return res.status(400).json({
           success: false,
           message: `Invitation already ${invitation.status}`,
         });
+      }
+
+      // Claimed open-link: only the claimer may re-hit accept (idempotent); decline by claimer cancels.
+      if (isOpenLink && invitation.status === "claimed") {
+        if (action === "decline") {
+          invitation.status = "declined";
+          await invitation.save();
+          if (invitation.gameId) {
+            await Game.updateOne(
+              { gameId: invitation.gameId, status: "active" },
+              {
+                $set: {
+                  status: "abandoned",
+                  result: { winner: "draw", reason: "first-move-abandon" },
+                },
+              }
+            );
+          }
+          broadcastInvite(req.app.get("io"), invitation);
+          return res.json({
+            success: true,
+            message: "Challenge cancelled",
+            data: { invitation: formatInvitation(invitation) },
+          });
+        }
+        // accept while claimed by same claimer → idempotent return
+        try {
+          const claimed = await claimOpenLinkInvitation(
+            invitation,
+            req.user,
+            req.app.get("io")
+          );
+          return res.json({
+            success: true,
+            message: "Waiting for challenge creator to confirm",
+            data: {
+              invitation: formatInvitation(claimed.invitation),
+              game: claimed.game,
+              awaitingHostConfirm: true,
+            },
+          });
+        } catch (claimErr) {
+          return res.status(claimErr.status || 500).json({
+            success: false,
+            message: claimErr.message || "Failed to join challenge link",
+            code: claimErr.code,
+          });
+        }
       }
 
       if (!isRematch && invitation.expiresAt < new Date()) {
@@ -951,7 +1035,7 @@ router.post(
           });
         }
 
-        // Open challenge link: claim + create game on accept
+        // Open challenge link: B claims; A must confirm (awaitingHostConfirm)
         if (isOpenLink) {
           try {
             const claimed = await claimOpenLinkInvitation(
@@ -959,13 +1043,15 @@ router.post(
               req.user,
               req.app.get("io")
             );
-            broadcastInvite(req.app.get("io"), claimed.invitation);
             return res.json({
               success: true,
-              message: "Invitation accepted",
+              message: claimed.awaitingHostConfirm
+                ? "Waiting for challenge creator to confirm"
+                : "Invitation accepted",
               data: {
                 invitation: formatInvitation(claimed.invitation),
                 game: claimed.game,
+                awaitingHostConfirm: Boolean(claimed.awaitingHostConfirm),
               },
             });
           } catch (claimErr) {
