@@ -1,6 +1,9 @@
 const Game = require("../models/Game");
 const GameInvitation = require("../models/GameInvitation");
 
+/** After B claims the link, A has this long to tick/cross. */
+const HOST_CONFIRM_MS = 60 * 1000;
+
 function formatOpenLinkSocketPayload(invitation, extra = {}) {
   return {
     id: invitation._id,
@@ -168,6 +171,16 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
   invitation.gameId = gameId;
   // Claimed = waiting for host (A) tick/cross — NOT fully accepted yet.
   invitation.status = "claimed";
+  // Host confirm window starts NOW (1 min), not from original link create.
+  const claimedAt = new Date();
+  const hostConfirmExpiresAt = new Date(claimedAt.getTime() + HOST_CONFIRM_MS);
+  const linkExpiresAt = invitation.expiresAt
+    ? new Date(invitation.expiresAt)
+    : hostConfirmExpiresAt;
+  invitation.expiresAt =
+    hostConfirmExpiresAt < linkExpiresAt
+      ? hostConfirmExpiresAt
+      : linkExpiresAt;
   await invitation.save();
   await invitation.populate([
     {
@@ -184,8 +197,12 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
     const fromId = String(invitation.fromUser._id);
     const claimer = invitation.toUser;
     // On-screen permission for A — show claimer (B) as the person joining.
+    // createdAt/expiresAt reset to claim window so UI timers are 1 min from claim.
     const confirmPayload = formatOpenLinkSocketPayload(invitation, {
       needsHostConfirm: true,
+      createdAt: claimedAt,
+      expiresAt: invitation.expiresAt,
+      hostConfirmMs: HOST_CONFIRM_MS,
       // Reuse IncomingChallengeModal `from` field for who is challenging A.
       from: {
         id: claimer._id,
@@ -209,6 +226,9 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
       "challenge:update",
       formatOpenLinkSocketPayload(invitation, {
         needsHostConfirm: false,
+        createdAt: claimedAt,
+        expiresAt: invitation.expiresAt,
+        hostConfirmMs: HOST_CONFIRM_MS,
         hostId: fromId,
         claimerId: String(claimer._id),
       })
@@ -251,6 +271,26 @@ async function confirmOpenLinkByHost(invitation, host, action, io) {
       new Error(`Invitation is ${invitation.status}, not awaiting confirm`),
       { status: 400, code: "NOT_CLAIMED" }
     );
+  }
+
+  if (invitation.expiresAt && invitation.expiresAt < new Date()) {
+    invitation.status = "expired";
+    await invitation.save();
+    if (invitation.gameId) {
+      await Game.updateOne(
+        { gameId: invitation.gameId, status: "active" },
+        {
+          $set: {
+            status: "abandoned",
+            result: { winner: "draw", reason: "first-move-abandon" },
+          },
+        }
+      );
+    }
+    throw Object.assign(new Error("Challenge confirm window expired"), {
+      status: 410,
+      code: "EXPIRED",
+    });
   }
 
   await invitation.populate([
@@ -341,4 +381,5 @@ module.exports = {
   claimOpenLinkInvitation,
   confirmOpenLinkByHost,
   formatOpenLinkSocketPayload,
+  HOST_CONFIRM_MS,
 };
