@@ -202,6 +202,8 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
     io.to(`user:${fromId}`).emit("open-link:needs-confirm", confirmPayload);
     // Soft notify lists without auto-navigating (status is claimed, not accepted).
     io.to(`user:${fromId}`).emit("challenge:update", confirmPayload);
+    // Also land in notifications section (same payload as friend incoming).
+    io.to(`user:${fromId}`).emit("challenge:incoming", confirmPayload);
     // Claimer (B) gets status sync only — must NOT get needsHostConfirm UI.
     io.to(`user:${String(claimer._id)}`).emit(
       "challenge:update",

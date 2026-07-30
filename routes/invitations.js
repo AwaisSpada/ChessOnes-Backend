@@ -604,10 +604,25 @@ router.get("/", auth, async (req, res) => {
     const now = new Date();
     const direction =
       req.query.direction === "outgoing" ? "fromUser" : "toUser";
-    const match = {
-      [direction]: req.user._id,
-      isClearedByRecipient: false,
-    };
+
+    // Incoming: normal toUser rows + open-link host confirms (claimed, fromUser=me).
+    const match =
+      direction === "toUser"
+        ? {
+            isClearedByRecipient: false,
+            $or: [
+              { toUser: req.user._id },
+              {
+                fromUser: req.user._id,
+                isOpenLink: true,
+                status: "claimed",
+              },
+            ],
+          }
+        : {
+            fromUser: req.user._id,
+            isClearedByRecipient: false,
+          };
 
     const invitations = await GameInvitation.find(match)
       .sort({ createdAt: -1 })
@@ -621,6 +636,40 @@ router.get("/", auth, async (req, res) => {
       invitations.map(async (invitation) => {
         const effectiveStatus = await resolveInvitationEffectiveStatus(invitation, now);
         const base = formatInvitation(invitation);
+        const isHostOpenLinkConfirm =
+          Boolean(invitation.isOpenLink) &&
+          effectiveStatus === "claimed" &&
+          String(invitation.fromUser?._id || invitation.fromUser) ===
+            String(req.user._id);
+
+        // Host confirm rows: show claimer as "from" so notifications UI matches friend invites.
+        if (isHostOpenLinkConfirm && invitation.toUser) {
+          const claimer = invitation.toUser;
+          return {
+            ...base,
+            status: effectiveStatus,
+            effectiveStatus,
+            needsHostConfirm: true,
+            isActionable: true,
+            from: {
+              id: claimer._id,
+              username: claimer.username,
+              fullName: claimer.fullName,
+              rating: claimer.rating,
+              avatar: claimer.avatar,
+              country: claimer.country || "",
+            },
+            to: {
+              id: invitation.fromUser?._id || invitation.fromUser,
+              username: invitation.fromUser?.username,
+              fullName: invitation.fromUser?.fullName,
+              rating: invitation.fromUser?.rating,
+              avatar: invitation.fromUser?.avatar,
+              country: invitation.fromUser?.country || "",
+            },
+          };
+        }
+
         return {
           ...base,
           status: effectiveStatus,
@@ -709,7 +758,17 @@ router.post("/clear-all", auth, async (req, res) => {
   try {
     const [invitesResult, rematchesResult, clearedArenaNotifications] = await Promise.all([
       GameInvitation.updateMany(
-        { toUser: req.user._id, isClearedByRecipient: false },
+        {
+          isClearedByRecipient: false,
+          $or: [
+            { toUser: req.user._id },
+            {
+              fromUser: req.user._id,
+              isOpenLink: true,
+              status: "claimed",
+            },
+          ],
+        },
         { $set: { isClearedByRecipient: true } }
       ),
       RematchRequest.updateMany(
