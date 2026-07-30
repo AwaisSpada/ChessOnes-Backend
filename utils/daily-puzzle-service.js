@@ -71,17 +71,23 @@ async function computeDisplayStreak(userOrId) {
     .lean();
 
   const solvedSet = new Set(progressList.map((p) => p.dateKey));
-  let cursor = today;
+  // End-of-day grace: until today is solved, keep showing the chain from
+  // yesterday if yesterday was solved (user still has the rest of today).
+  const yesterday = addDaysToDateKey(today, -1);
+  let cursor = null;
+  if (solvedSet.has(today)) cursor = today;
+  else if (solvedSet.has(yesterday)) cursor = yesterday;
+
   let count = 0;
-  while (solvedSet.has(cursor)) {
+  const newestInChain = cursor;
+  while (cursor && solvedSet.has(cursor)) {
     count += 1;
     cursor = addDaysToDateKey(cursor, -1);
   }
 
   // If we were called with a real user document, keep DB fields in sync.
   if (userOrId && typeof userOrId.save === "function") {
-    const expectedLast =
-      count > 0 ? addDaysToDateKey(today, -(count - 1)) : null;
+    const expectedLast = count > 0 ? newestInChain : null;
 
     const currentStreak = userOrId.dailyPuzzleStreak ?? 0;
     const currentLast = userOrId.dailyPuzzleLastStreakDate ?? null;
