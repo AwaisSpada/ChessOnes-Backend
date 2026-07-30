@@ -605,7 +605,8 @@ router.get("/", auth, async (req, res) => {
     const direction =
       req.query.direction === "outgoing" ? "fromUser" : "toUser";
 
-    // Incoming: normal toUser rows + open-link host confirms (claimed, fromUser=me).
+    // Incoming: normal toUser rows + open-link host rows (A) after B claimed.
+    // Keep accepted/declined/expired until Clear all (same as friend invites).
     const match =
       direction === "toUser"
         ? {
@@ -615,7 +616,10 @@ router.get("/", auth, async (req, res) => {
               {
                 fromUser: req.user._id,
                 isOpenLink: true,
-                status: "claimed",
+                toUser: { $ne: null },
+                status: {
+                  $in: ["claimed", "accepted", "declined", "expired"],
+                },
               },
             ],
           }
@@ -636,21 +640,22 @@ router.get("/", auth, async (req, res) => {
       invitations.map(async (invitation) => {
         const effectiveStatus = await resolveInvitationEffectiveStatus(invitation, now);
         const base = formatInvitation(invitation);
-        const isHostOpenLinkConfirm =
+        const isHostOpenLinkRow =
           Boolean(invitation.isOpenLink) &&
-          effectiveStatus === "claimed" &&
+          Boolean(invitation.toUser) &&
           String(invitation.fromUser?._id || invitation.fromUser) ===
             String(req.user._id);
 
-        // Host confirm rows: show claimer as "from" so notifications UI matches friend invites.
-        if (isHostOpenLinkConfirm && invitation.toUser) {
+        // Host rows: show claimer as "from" so notifications UI matches friend invites.
+        if (isHostOpenLinkRow && invitation.toUser) {
           const claimer = invitation.toUser;
+          const actionable = effectiveStatus === "claimed";
           return {
             ...base,
             status: effectiveStatus,
             effectiveStatus,
-            needsHostConfirm: true,
-            isActionable: true,
+            needsHostConfirm: actionable,
+            isActionable: actionable,
             from: {
               id: claimer._id,
               username: claimer.username,
@@ -765,7 +770,7 @@ router.post("/clear-all", auth, async (req, res) => {
             {
               fromUser: req.user._id,
               isOpenLink: true,
-              status: "claimed",
+              toUser: { $ne: null },
             },
           ],
         },
