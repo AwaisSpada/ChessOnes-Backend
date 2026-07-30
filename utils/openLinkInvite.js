@@ -10,7 +10,8 @@ function formatOpenLinkSocketPayload(invitation, extra = {}) {
     matchType: invitation.matchType || "rated",
     gameFormat: "open_link",
     isOpenLink: true,
-    needsHostConfirm: invitation.status === "claimed",
+    // Default false — only host confirm payload sets this true.
+    needsHostConfirm: false,
     preferredColor: invitation.preferredColor || "random",
     inviterSide:
       invitation.preferredColor === "black" ? "black" : "white",
@@ -201,9 +202,14 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
     io.to(`user:${fromId}`).emit("open-link:needs-confirm", confirmPayload);
     // Soft notify lists without auto-navigating (status is claimed, not accepted).
     io.to(`user:${fromId}`).emit("challenge:update", confirmPayload);
+    // Claimer (B) gets status sync only — must NOT get needsHostConfirm UI.
     io.to(`user:${String(claimer._id)}`).emit(
       "challenge:update",
-      formatOpenLinkSocketPayload(invitation)
+      formatOpenLinkSocketPayload(invitation, {
+        needsHostConfirm: false,
+        hostId: fromId,
+        claimerId: String(claimer._id),
+      })
     );
   }
 
