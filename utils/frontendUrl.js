@@ -35,8 +35,10 @@ function buildChallengeJoinUrls(token) {
   const frontend = getPublicFrontendUrl();
   const api = getPublicApiUrl();
   return {
-    /** One share URL — smart redirect (app preferred, else web). */
-    joinUrl: `${api}/join/${token}`,
+    /** Share URL — brand domain (OG preview + WhatsApp). */
+    joinUrl: `${frontend}/join/${token}`,
+    /** API smart chooser (legacy / deep redirects). */
+    apiJoinUrl: `${api}/join/${token}`,
     webJoinUrl: `${frontend}/home?invite=${encodeURIComponent(token)}`,
     appDeepLink: `chessones://invite/${token}`,
   };

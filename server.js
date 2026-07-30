@@ -181,97 +181,17 @@ app.use("/api/learn", require("./routes/learn")); // Learn SRS progress sync
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
 app.use("/api/public", require("./routes/public")); // Contact + newsletter (public, uses sendMail)
 
-// Challenge-link landing: ask App vs Web (no silent auto-fallback to web).
-// WhatsApp/in-app browsers often block custom schemes; auto-redirect then dumps users on web.
-const {
-  buildChallengeJoinUrls,
-  getPublicFrontendUrl,
-} = require("./utils/frontendUrl");
+// Legacy API /join/:token → brand-domain landing (OG + masked share URL).
+const { getPublicFrontendUrl } = require("./utils/frontendUrl");
 app.get("/join/:token", (req, res) => {
   const token = String(req.params.token || "").trim();
   if (!token) {
     return res.redirect(302, `${getPublicFrontendUrl()}/home`);
   }
-  const { webJoinUrl, appDeepLink } = buildChallengeJoinUrls(token);
-  const ua = String(req.headers["user-agent"] || "").toLowerCase();
-  const isAndroid = /android/.test(ua);
-  // Android intent URL — more reliable from Chrome/WhatsApp than raw custom scheme alone
-  const androidIntent = `intent://invite/${encodeURIComponent(token)}#Intent;scheme=chessones;package=com.chessones.mobile;end`;
-  const appHref = isAndroid ? androidIntent : appDeepLink;
-
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.setHeader("Cache-Control", "no-store");
-  return res.status(200).send(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1"/>
-<meta name="theme-color" content="#050812"/>
-<title>Join ChessOnes Challenge</title>
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
-    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
-    background: radial-gradient(1200px 600px at 50% -10%, #0b3a55 0%, #050812 55%);
-    color: #fff; padding: 24px;
-  }
-  .card {
-    width: 100%; max-width: 420px; padding: 28px 24px;
-    border-radius: 20px; border: 1px solid rgba(56,189,248,.35);
-    background: rgba(10,15,27,.85); backdrop-filter: blur(12px);
-    box-shadow: 0 20px 60px rgba(0,0,0,.45);
-  }
-  h1 { margin: 0 0 8px; font-size: 1.35rem; letter-spacing: -0.02em; }
-  p { margin: 0 0 22px; opacity: .72; line-height: 1.45; font-size: .95rem; }
-  .stack { display: flex; flex-direction: column; gap: 12px; }
-  a.btn {
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    text-decoration: none; font-weight: 800; font-size: .95rem;
-    border-radius: 14px; padding: 14px 16px; transition: transform .12s ease, opacity .12s ease;
-  }
-  a.btn:active { transform: scale(.98); }
-  a.primary { background: #1FC6FF; color: #050812; }
-  a.secondary {
-    background: rgba(255,255,255,.06); color: #fff;
-    border: 1px solid rgba(255,255,255,.14);
-  }
-  .hint { margin: 16px 0 0; font-size: .8rem; opacity: .55; text-align: center; }
-</style>
-</head>
-<body>
-  <main class="card">
-    <h1>Open this challenge</h1>
-    <p>How do you want to play? Choose the ChessOnes app if it is installed, or continue in the browser.</p>
-    <div class="stack">
-      <a class="btn primary" id="openApp" href="${appHref}">Open in ChessOnes App</a>
-      <a class="btn secondary" href="${webJoinUrl}">Continue on Web</a>
-    </div>
-    <p class="hint">If the app does not open, use Continue on Web — or open the link again from Chrome/Safari (not inside WhatsApp).</p>
-  </main>
-  <script>
-    (function () {
-      var appLink = ${JSON.stringify(appDeepLink)};
-      var intentLink = ${JSON.stringify(androidIntent)};
-      var isAndroid = ${isAndroid ? "true" : "false"};
-      var btn = document.getElementById("openApp");
-      if (!btn) return;
-      btn.addEventListener("click", function (e) {
-        // Prefer explicit user gesture; try custom scheme as well on Android.
-        if (isAndroid) {
-          e.preventDefault();
-          // 1) custom scheme  2) intent URL (Chrome / some WebViews)
-          window.location.href = appLink;
-          setTimeout(function () {
-            window.location.href = intentLink;
-          }, 250);
-        }
-      });
-    })();
-  </script>
-</body>
-</html>`);
+  return res.redirect(
+    302,
+    `${getPublicFrontendUrl()}/join/${encodeURIComponent(token)}`
+  );
 });
 
 // Socket.io for real-time features
