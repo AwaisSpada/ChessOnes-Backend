@@ -235,6 +235,17 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
     );
   }
 
+  // Push to host (A) even if app is backgrounded — mirrors friend-challenge push.
+  try {
+    const { sendOpenLinkHostConfirmPush } = require("./pushNotifications");
+    void sendOpenLinkHostConfirmPush(fromUserId, acceptor, {
+      token: invitation.token,
+      gameId: game.gameId,
+    });
+  } catch (pushErr) {
+    console.warn("open-link host confirm push skipped:", pushErr.message);
+  }
+
   return { invitation, game, awaitingHostConfirm: true };
 }
 

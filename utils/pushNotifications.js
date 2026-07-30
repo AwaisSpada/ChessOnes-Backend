@@ -95,6 +95,23 @@ async function sendChallengePush(toUserId, fromUser) {
   });
 }
 
+/** B claimed A's open challenge link — notify host to confirm (1 min window). */
+async function sendOpenLinkHostConfirmPush(hostUserId, claimerUser, meta = {}) {
+  const name = claimerUser?.fullName || claimerUser?.username || "A player";
+  return sendPushToUser(hostUserId, {
+    title: "Challenge ready",
+    body: `${name} joined your challenge — accept to play`,
+    data: {
+      type: "game_challenge",
+      needsHostConfirm: "true",
+      token: meta.token || "",
+      gameId: meta.gameId || "",
+      fromUserId:
+        claimerUser?._id?.toString?.() || claimerUser?.id || "",
+    },
+  });
+}
+
 async function sendFriendRequestPush(toUserId, fromUser) {
   const name = fromUser?.fullName || fromUser?.username || "Someone";
   return sendPushToUser(toUserId, {
@@ -110,5 +127,6 @@ async function sendFriendRequestPush(toUserId, fromUser) {
 module.exports = {
   sendPushToUser,
   sendChallengePush,
+  sendOpenLinkHostConfirmPush,
   sendFriendRequestPush,
 };
