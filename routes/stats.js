@@ -32,7 +32,7 @@ function reasonLabel(reason) {
     resignation: "Resignation",
     disconnect: "Disconnect",
     stalemate: "Stalemate",
-    "draw-agreement": "Draw Agreement",
+    "draw-agreement": "Draw by Agreement",
     "threefold-repetition": "Threefold Repetition",
     "insufficient-material": "Insufficient Material",
     other: "Other",
