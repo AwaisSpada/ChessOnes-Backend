@@ -6,6 +6,7 @@ const Stats = require("../models/Stats");
 const UserInvite = require("../models/UserInvite");
 const PasswordReset = require("../models/PasswordReset");
 const auth = require("../middleware/auth");
+const { disconnectUserSockets } = require("../utils/presence");
 const {
   sendMail,
   buildPasswordResetEmail,
@@ -348,6 +349,20 @@ router.post("/logout", auth, async (req, res) => {
   try {
     req.user.status = "offline"
     await req.user.save()
+
+    // Web keeps its socket open across client-side navigation, so close every
+    // live socket and tell friends now instead of waiting for a refresh.
+    const io = req.app.get("io")
+    disconnectUserSockets(io, req.user._id)
+
+    if (io && Array.isArray(req.user.friends)) {
+      req.user.friends.forEach((friendId) => {
+        io.to(`user:${friendId.toString()}`).emit("presence:update", {
+          userId: String(req.user._id),
+          status: "offline",
+        })
+      })
+    }
 
     res.json({
       success: true,
