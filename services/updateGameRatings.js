@@ -6,6 +6,7 @@ const DEFAULT_RATING = {
   rd: 350,
   volatility: 0.06,
   gamesPlayed: 0,
+  ratingChange: 0,
 };
 
 function playerId(player) {
@@ -128,6 +129,11 @@ async function updateGameRatings(game, io) {
       white: whiteRatingChange,
       black: blackRatingChange,
     };
+
+    // Persist the latest rated-game effect per time category. It remains on
+    // the profile until the next rated game in this same category replaces it.
+    updatedRatings.player1.ratingChange = whiteRatingChange;
+    updatedRatings.player2.ratingChange = blackRatingChange;
 
     // Mark in-memory immediately so callers/emits are not blocked on Mongo writes.
     game.ratingChanges = ratingChanges;

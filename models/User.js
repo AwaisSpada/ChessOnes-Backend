@@ -89,18 +89,21 @@ const userSchema = new mongoose.Schema(
         rd: { type: Number, default: 350.0 }, // Rating Deviation
         volatility: { type: Number, default: 0.06 },
         gamesPlayed: { type: Number, default: 0 },
+        ratingChange: { type: Number, default: 0 },
       },
       blitz: {
         rating: { type: Number, default: 1500.0 },
         rd: { type: Number, default: 350.0 },
         volatility: { type: Number, default: 0.06 },
         gamesPlayed: { type: Number, default: 0 },
+        ratingChange: { type: Number, default: 0 },
       },
       rapid: {
         rating: { type: Number, default: 1500.0 },
         rd: { type: Number, default: 350.0 },
         volatility: { type: Number, default: 0.06 },
         gamesPlayed: { type: Number, default: 0 },
+        ratingChange: { type: Number, default: 0 },
       },
     },
     puzzleRating: {
