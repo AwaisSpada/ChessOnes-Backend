@@ -452,6 +452,12 @@ router.get("/stats/user", auth, async (req, res) => {
       },
     });
 
+    // Rating effect of the most recent attempt — drives the "▲8 / ▼10" chip and
+    // stays put until the next puzzle is played.
+    const lastAttempt = await PuzzleAttempt.findOne({ user: uidObj })
+      .sort({ updatedAt: -1 })
+      .select("ratingChange updatedAt");
+
     const user = await User.findById(userId).select("puzzleRating puzzleStreak");
 
     const L = lifetime[0] || {};
@@ -470,6 +476,8 @@ router.get("/stats/user", auth, async (req, res) => {
       accuracy: totalPuzzles > 0 ? Number(((solved / totalPuzzles) * 100).toFixed(1)) : 0,
       todayCompleted: todaySolved || 0,
       streak: user?.puzzleStreak ?? 0,
+      lastRatingChange: Math.round(Number(lastAttempt?.ratingChange || 0)),
+      lastAttemptAt: lastAttempt?.updatedAt ?? null,
       inPeriod: {
         puzzlesTouched: P.inPeriodPuzzles || 0,
         solved: P.inPeriodSolved || 0,
