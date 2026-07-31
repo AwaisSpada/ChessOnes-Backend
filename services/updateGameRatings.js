@@ -7,6 +7,7 @@ const DEFAULT_RATING = {
   volatility: 0.06,
   gamesPlayed: 0,
   ratingChange: 0,
+  ratingChangeAt: null,
 };
 
 function playerId(player) {
@@ -131,9 +132,13 @@ async function updateGameRatings(game, io) {
     };
 
     // Persist the latest rated-game effect per time category. It remains on
-    // the profile until the next rated game in this same category replaces it.
+    // the profile until the next rated game in this same category replaces it,
+    // or until clients hide it after 7 days via ratingChangeAt.
+    const ratingChangeAt = new Date();
     updatedRatings.player1.ratingChange = whiteRatingChange;
+    updatedRatings.player1.ratingChangeAt = ratingChangeAt;
     updatedRatings.player2.ratingChange = blackRatingChange;
+    updatedRatings.player2.ratingChangeAt = ratingChangeAt;
 
     // Mark in-memory immediately so callers/emits are not blocked on Mongo writes.
     game.ratingChanges = ratingChanges;

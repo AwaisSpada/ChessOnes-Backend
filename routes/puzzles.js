@@ -465,6 +465,12 @@ router.get("/stats/user", auth, async (req, res) => {
 
     const totalPuzzles = L.totalPuzzles || 0;
     const solved = L.solved || 0;
+    const lastAttemptAt = lastAttempt?.updatedAt ?? null;
+    const lastRatingRaw = Math.round(Number(lastAttempt?.ratingChange || 0));
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+    const lastAttemptFresh =
+      lastAttemptAt != null &&
+      Date.now() - new Date(lastAttemptAt).getTime() <= SEVEN_DAYS_MS;
     const result = {
       period,
       puzzleRating: user?.puzzleRating ?? 100,
@@ -476,8 +482,9 @@ router.get("/stats/user", auth, async (req, res) => {
       accuracy: totalPuzzles > 0 ? Number(((solved / totalPuzzles) * 100).toFixed(1)) : 0,
       todayCompleted: todaySolved || 0,
       streak: user?.puzzleStreak ?? 0,
-      lastRatingChange: Math.round(Number(lastAttempt?.ratingChange || 0)),
-      lastAttemptAt: lastAttempt?.updatedAt ?? null,
+      // Chip indicator: last attempt effect, auto-clears after 7 days.
+      lastRatingChange: lastAttemptFresh ? lastRatingRaw : 0,
+      lastAttemptAt,
       inPeriod: {
         puzzlesTouched: P.inPeriodPuzzles || 0,
         solved: P.inPeriodSolved || 0,

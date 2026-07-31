@@ -90,6 +90,8 @@ const userSchema = new mongoose.Schema(
         volatility: { type: Number, default: 0.06 },
         gamesPlayed: { type: Number, default: 0 },
         ratingChange: { type: Number, default: 0 },
+        /** When ratingChange was last written — chip indicator expires after 7 days. */
+        ratingChangeAt: { type: Date, default: null },
       },
       blitz: {
         rating: { type: Number, default: 1500.0 },
@@ -97,6 +99,7 @@ const userSchema = new mongoose.Schema(
         volatility: { type: Number, default: 0.06 },
         gamesPlayed: { type: Number, default: 0 },
         ratingChange: { type: Number, default: 0 },
+        ratingChangeAt: { type: Date, default: null },
       },
       rapid: {
         rating: { type: Number, default: 1500.0 },
@@ -104,6 +107,7 @@ const userSchema = new mongoose.Schema(
         volatility: { type: Number, default: 0.06 },
         gamesPlayed: { type: Number, default: 0 },
         ratingChange: { type: Number, default: 0 },
+        ratingChangeAt: { type: Date, default: null },
       },
     },
     puzzleRating: {
