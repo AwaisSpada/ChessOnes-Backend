@@ -513,7 +513,13 @@ router.get("/:gameId", auth, async (req, res) => {
         game.players.black._id &&
         game.players.black._id.equals(req.user._id));
 
-    if (!isPlayer && game.type !== "multiplayer") {
+    // Chess.com-style: any authenticated user may open finished games from history
+    // (friend / bot / online). Live non-multiplayer games stay private to players
+    // (plus arena spectate exception).
+    const isFinished =
+      game.status === "completed" || game.status === "abandoned";
+
+    if (!isPlayer && game.type !== "multiplayer" && !isFinished) {
       const canSpectate = await canUserSpectateArenaGame(
         req.user._id,
         game.gameId
