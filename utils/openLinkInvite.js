@@ -203,6 +203,9 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
       createdAt: claimedAt,
       expiresAt: invitation.expiresAt,
       hostConfirmMs: HOST_CONFIRM_MS,
+      // `from` is the claimer here, so spell out the host's own side.
+      viewerSide: inviterColor,
+      opponentSide: inviterColor === "white" ? "black" : "white",
       // Reuse IncomingChallengeModal `from` field for who is challenging A.
       from: {
         id: claimer._id,
@@ -229,6 +232,8 @@ async function claimOpenLinkInvitation(invitation, acceptor, io) {
         createdAt: claimedAt,
         expiresAt: invitation.expiresAt,
         hostConfirmMs: HOST_CONFIRM_MS,
+        viewerSide: inviterColor === "white" ? "black" : "white",
+        opponentSide: inviterColor,
         hostId: fromId,
         claimerId: String(claimer._id),
       })

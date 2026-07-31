@@ -656,6 +656,10 @@ router.get("/", auth, async (req, res) => {
             effectiveStatus,
             needsHostConfirm: actionable,
             isActionable: actionable,
+            // From/to are swapped below for the UI, so state the viewer's own
+            // side explicitly — the host keeps the color they picked.
+            viewerSide: base.inviterSide,
+            opponentSide: base.inviteeSide,
             from: {
               id: claimer._id,
               username: claimer.username,
@@ -680,6 +684,10 @@ router.get("/", auth, async (req, res) => {
           status: effectiveStatus,
           effectiveStatus,
           isActionable: effectiveStatus === "pending",
+          viewerSide:
+            direction === "fromUser" ? base.inviterSide : base.inviteeSide,
+          opponentSide:
+            direction === "fromUser" ? base.inviteeSide : base.inviterSide,
         };
       })
     );
