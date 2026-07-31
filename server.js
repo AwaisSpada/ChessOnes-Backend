@@ -143,6 +143,21 @@ mongoose
       console.error("[Game] clientGameId index repair failed:", err);
     });
 
+    // A restart drops every socket, so any "online"/"in-game" row is stale and
+    // would otherwise show friends as online forever.
+    void User.updateMany(
+      { status: { $in: ["online", "in-game"] } },
+      { $set: { status: "offline" } }
+    )
+      .then(({ modifiedCount }) => {
+        if (modifiedCount) {
+          console.log(`👥 Reset ${modifiedCount} stale presence rows to offline`);
+        }
+      })
+      .catch((err) => {
+        console.error("[Presence] stale status reset failed:", err.message);
+      });
+
     const { startDailyPuzzleMidnightScheduler } = require("./utils/daily-puzzle-cron");
     startDailyPuzzleMidnightScheduler().catch((err) => {
       console.error("[Daily Puzzle] scheduler startup failed:", err);
@@ -195,7 +210,12 @@ app.get("/join/:token", (req, res) => {
 });
 
 // Socket.io for real-time features
-const onlineUsers = new Map();
+// Shared with HTTP routes so presence answers come from live sockets, not DB status.
+const {
+  onlineUsers,
+  isUserOnline,
+  presenceStatus,
+} = require("./utils/presence");
 // Track which sockets have joined each game room to avoid resetting ready state on duplicate joins
 const gameRoomSockets = new Map(); // gameId -> Set of socket IDs
 // Track which users (by userId) are in each game room for presence sync
@@ -321,8 +341,38 @@ setInterval(() => {
 }, 500);
 
 function isUserFullyOffline(userId) {
-  const sockets = onlineUsers.get(String(userId));
-  return !sockets || sockets.size === 0;
+  return !isUserOnline(userId);
+}
+
+/** Full presence list of a user's friends, computed from live sockets. */
+async function emitPresenceSnapshot(socket, userId) {
+  if (!socket || !userId) return;
+  try {
+    const doc = await User.findById(userId).select("friends").lean();
+    const users = (doc?.friends || []).map((friendId) => ({
+      userId: String(friendId),
+      status: presenceStatus(friendId),
+    }));
+    socket.emit("presence:snapshot", { users });
+  } catch (err) {
+    console.error("Presence snapshot error:", err.message);
+  }
+}
+
+/** Tell a user's friends that their presence changed. */
+async function broadcastPresence(userId, status) {
+  if (!userId) return;
+  try {
+    const doc = await User.findById(userId).select("friends").lean();
+    (doc?.friends || []).forEach((friendId) => {
+      io.to(`user:${friendId.toString()}`).emit("presence:update", {
+        userId: String(userId),
+        status,
+      });
+    });
+  } catch (err) {
+    console.error("Presence broadcast error:", err.message);
+  }
 }
 
 async function completeGameOnUserDisconnect(game, userId, io) {
@@ -870,25 +920,25 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Update DB status and notify friends via presence socket event
+    // Update DB status, notify friends, and hand this client a fresh snapshot.
     try {
       await User.findByIdAndUpdate(userId, {
         status: "online",
         lastActive: new Date(),
       }).exec();
 
-      const userDoc = await User.findById(userId).select("friends").lean();
-      if (userDoc?.friends?.length) {
-        userDoc.friends.forEach((friendId) => {
-          io.to(`user:${friendId.toString()}`).emit("presence:update", {
-            userId,
-            status: "online",
-          });
-        });
-      }
+      await broadcastPresence(userId, "online");
+      await emitPresenceSnapshot(socket, userId);
     } catch (err) {
       console.error("Presence register-user error:", err);
     }
+  });
+
+  // Client asks for the current online state of its friends (app foreground, reconnect).
+  socket.on("presence:subscribe", async () => {
+    const userId = socket.data.userId;
+    if (!userId) return;
+    await emitPresenceSnapshot(socket, userId);
   });
 
   socket.on("join-game", (gameId) => {
@@ -2685,12 +2735,7 @@ io.on("connection", (socket) => {
           }
 
           if (userDoc?.friends?.length) {
-            userDoc.friends.forEach((friendId) => {
-              io.to(`user:${friendId.toString()}`).emit("presence:update", {
-                userId,
-                status: "offline",
-              });
-            });
+            await broadcastPresence(userId, "offline");
           }
         } catch (err) {
           console.error("Presence disconnect error:", err);

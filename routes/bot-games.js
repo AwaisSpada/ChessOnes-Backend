@@ -520,6 +520,7 @@ function chessBoardToGameArray(chess) {
 function mapImportReason(reason) {
   const r = String(reason || "").toLowerCase();
   if (r === "agreement" || r === "draw-by-agreement") return "draw-agreement";
+  if (r === "abandon") return "first-move-abandon";
   const allowed = new Set([
     "checkmate",
     "stalemate",

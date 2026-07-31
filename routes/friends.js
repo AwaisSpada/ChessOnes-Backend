@@ -13,8 +13,37 @@ const {
 const { getPublicFrontendUrl } = require("../utils/frontendUrl");
 const auth = require("../middleware/auth");
 const { usersAreBlocked, applyBlock } = require("../utils/user-blocks");
+const { presenceStatus } = require("../utils/presence");
 
 const router = express.Router();
+
+// @route   GET /api/friends/presence
+// @desc    Live online/offline state of my friends, read from socket presence
+//          (DB `status` can be stale after restarts / dropped connections).
+// @access  Private
+router.get("/presence", auth, async (req, res) => {
+  try {
+    const me = await User.findById(req.user._id).select("friends").lean();
+    const users = (me?.friends || []).map((friendId) => ({
+      userId: String(friendId),
+      status: presenceStatus(friendId),
+    }));
+
+    return res.json({
+      success: true,
+      data: {
+        users,
+        online: users.filter((u) => u.status === "online").map((u) => u.userId),
+      },
+    });
+  } catch (error) {
+    console.error("Friends presence error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load friends presence",
+    });
+  }
+});
 
 // @route   GET /api/friends/nemesis
 // @desc    Get the logged-in user's nemesis: the opponent they have lost to the most (from DB).
