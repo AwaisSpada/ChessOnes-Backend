@@ -1,6 +1,7 @@
 /**
  * Code-owned achievements catalog — matches Profile / Achievements UI.
- * Base art lives in assets/badges (win-bullet, win-blitz, win-rapid, puzzle, anniversary).
+ * Base art lives in assets/badges:
+ * win-bullet/blitz/rapid, rating-bullet/blitz/rapid, puzzle, anniversary.
  * Pill labels (1st, 50, 1000, 1Y…) are rendered by the client.
  */
 
@@ -69,9 +70,9 @@ pushWin("bullet", "win-bullet", "Bullet");
 pushWin("blitz", "win-blitz", "Blitz");
 pushWin("rapid", "win-rapid", "Rapid");
 
-pushRatings("bullet", "win-bullet", "Bullet");
-pushRatings("blitz", "win-blitz", "Blitz");
-pushRatings("rapid", "win-rapid", "Rapid");
+pushRatings("bullet", "rating-bullet", "Bullet");
+pushRatings("blitz", "rating-blitz", "Blitz");
+pushRatings("rapid", "rating-rapid", "Rapid");
 
 ACHIEVEMENTS.push(
   {
