@@ -725,24 +725,28 @@ router.put(
       user.markModified("preferences");
       await user.save();
 
-      // If they hide/show online status, push the visible presence to friends now.
+      // If Show Online Status was in this save, sync Mongo + push friends live
+      // (always broadcast — not only on change — so toggles feel realtime).
       try {
-        const prevShow =
-          currentPrefs?.privacy?.showOnlineStatus !== false;
-        const nextShow =
-          mergedPreferences?.privacy?.showOnlineStatus !== false;
-        if (prevShow !== nextShow) {
+        const touchedShowOnline =
+          preferences?.privacy != null &&
+          Object.prototype.hasOwnProperty.call(
+            preferences.privacy,
+            "showOnlineStatus"
+          );
+        if (touchedShowOnline) {
           const io = req.app.get("io");
           const {
             isUserOnline,
             visiblePresenceStatus: visibleStatus,
           } = require("../utils/presence");
+          const nextShow =
+            mergedPreferences?.privacy?.showOnlineStatus !== false;
           const status = nextShow
             ? isUserOnline(user._id)
               ? await visibleStatus(user._id)
               : "offline"
             : "offline";
-          // Keep Mongo status in sync so GET /friends & web don't show a stale green dot.
           user.status = status;
           await user.save();
           const friendIds = user.friends || [];
