@@ -275,7 +275,7 @@ router.get("/:id", optionalAuth, async (req, res) => {
 // Submit puzzle attempt
 router.post("/:id/attempt", auth, async (req, res) => {
   try {
-    const { solved, timeSpent } = req.body;
+    const { solved, timeSpent, usedHints } = req.body;
     const puzzleId = req.params.id;
     const userId = req.user._id || req.user.id;
 
@@ -338,6 +338,15 @@ router.post("/:id/attempt", auth, async (req, res) => {
     if (solved) {
       // Win: gain points
       ratingChange = Math.round(K * (1 - expectedScore));
+
+      // Hint penalty on gains only (matches web puzzle UI):
+      // 0 hints → 100%, 1 → 70%, 2 → 40%, 3+ → 0%
+      const hints = Math.max(0, Number(usedHints) || 0);
+      let hintMultiplier = 1;
+      if (hints === 1) hintMultiplier = 0.7;
+      else if (hints === 2) hintMultiplier = 0.4;
+      else if (hints >= 3) hintMultiplier = 0;
+      ratingChange = Math.round(ratingChange * hintMultiplier);
     } else {
       // Loss: lose points (but less than if we won)
       ratingChange = Math.round(K * (0 - expectedScore) * 0.5); // Lose half of what we would have gained
