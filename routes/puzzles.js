@@ -275,7 +275,7 @@ router.get("/:id", optionalAuth, async (req, res) => {
 // Submit puzzle attempt
 router.post("/:id/attempt", auth, async (req, res) => {
   try {
-    const { solved, timeSpent, usedHints } = req.body;
+    const { solved, timeSpent, usedHints, skipped } = req.body;
     const puzzleId = req.params.id;
     const userId = req.user._id || req.user.id;
 
@@ -321,8 +321,29 @@ router.post("/:id/attempt", auth, async (req, res) => {
 
     await attempt.save();
 
-    // Calculate rating change using ELO-like system
     const user = await User.findById(userId);
+
+    // Skip: mark puzzle as seen so it won't return.
+    // Streak breaks, but rating does NOT change.
+    if (skipped === true) {
+      user.puzzleStreak = 0;
+      await user.save();
+      attempt.ratingChange = 0;
+      await attempt.save();
+      return res.json({
+        success: true,
+        data: {
+          solved: false,
+          skipped: true,
+          ratingChange: 0,
+          newRating: user.puzzleRating || 100,
+          newStreak: 0,
+          attempts: attempt.attempts,
+        },
+      });
+    }
+
+    // Calculate rating change using ELO-like system
     const userRating = user.puzzleRating || 100;
     const puzzleRating = puzzle.rating;
 
