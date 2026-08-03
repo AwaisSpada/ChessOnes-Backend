@@ -1,7 +1,11 @@
 const User = require("../models/User");
 const Stats = require("../models/Stats");
+const Game = require("../models/Game");
 const PuzzleAttempt = require("../models/PuzzleAttempt");
 const { ACHIEVEMENTS, CATEGORIES } = require("../constants/achievementsCatalog");
+
+/** Matches updateGameRatings / client star: provisional until 5 rated games in that TC. */
+const RATING_CONFIRM_GAMES = 5;
 
 function accountYears(createdAt) {
   if (!createdAt) return 0;
@@ -11,9 +15,15 @@ function accountYears(createdAt) {
   return Math.max(0, Math.floor(ms / (365.25 * 24 * 60 * 60 * 1000)));
 }
 
+function isRatingConfirmed(user, timeControl) {
+  const games = user?.ratings?.[timeControl]?.gamesPlayed;
+  return typeof games === "number" && games >= RATING_CONFIRM_GAMES;
+}
+
 /**
  * Resolve a dotted path against stats + user + extras.
- * Supports: wins.*, ratings.*, puzzles.solved, account.years, bestStreak, currentStreak
+ * wins.* → rated online wins only (extras.ratedWins)
+ * ratings.* → rating value (unlock gated separately via confirmation)
  */
 function resolveStatValue(path, stats, user, extras = {}) {
   if (!path) return 0;
@@ -31,6 +41,17 @@ function resolveStatValue(path, stats, user, extras = {}) {
     return typeof rating === "number" ? rating : 0;
   }
 
+  if (path.startsWith("wins.")) {
+    const key = path.split(".")[1]; // bullet | blitz | rapid | total
+    const rated = extras.ratedWins || {};
+    if (key === "total") {
+      return (
+        (rated.bullet || 0) + (rated.blitz || 0) + (rated.rapid || 0)
+      );
+    }
+    return rated[key] || 0;
+  }
+
   if (path === "bestStreak") return stats?.bestStreak || 0;
   if (path === "currentStreak") return stats?.currentStreak || 0;
 
@@ -45,6 +66,14 @@ function resolveStatValue(path, stats, user, extras = {}) {
 
 function ruleSatisfied(rule, stats, user, extras = {}) {
   if (!rule || rule.type !== "stat") return false;
+
+  // Rating milestones: never while provisional (★); once confirmed, all
+  // thresholds ≤ current rating unlock (and stay unlocked forever).
+  if (rule.path && rule.path.startsWith("ratings.")) {
+    const tc = rule.path.split(".")[1];
+    if (!isRatingConfirmed(user, tc)) return false;
+  }
+
   const current = resolveStatValue(rule.path, stats, user, extras);
   if (rule.op === "gte") return current >= rule.value;
   if (rule.op === "exact") return current === rule.value;
@@ -55,23 +84,85 @@ function assetUrlFor(assetKey) {
   return `/badges/${assetKey}.png`;
 }
 
+/**
+ * Count wins in rated human-vs-human games only (multiplayer + friend).
+ * Bot / unrated / casual never count toward win achievements.
+ */
+async function loadRatedWinCounts(userId) {
+  const mongoose = require("mongoose");
+  const oid =
+    userId instanceof mongoose.Types.ObjectId
+      ? userId
+      : new mongoose.Types.ObjectId(String(userId));
+  const uid = String(oid);
+
+  const rows = await Game.aggregate([
+    {
+      $match: {
+        status: "completed",
+        isRated: true,
+        type: { $in: ["multiplayer", "friend"] },
+        category: { $in: ["bullet", "blitz", "rapid"] },
+        "result.winner": { $in: ["white", "black"] },
+        $or: [{ "players.white": oid }, { "players.black": oid }],
+      },
+    },
+    {
+      $project: {
+        category: 1,
+        isWhiteWin: {
+          $and: [
+            { $eq: ["$result.winner", "white"] },
+            { $eq: [{ $toString: "$players.white" }, uid] },
+          ],
+        },
+        isBlackWin: {
+          $and: [
+            { $eq: ["$result.winner", "black"] },
+            { $eq: [{ $toString: "$players.black" }, uid] },
+          ],
+        },
+      },
+    },
+    {
+      $match: {
+        $or: [{ isWhiteWin: true }, { isBlackWin: true }],
+      },
+    },
+    {
+      $group: {
+        _id: "$category",
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const ratedWins = { bullet: 0, blitz: 0, rapid: 0 };
+  for (const row of rows) {
+    if (row._id && Object.prototype.hasOwnProperty.call(ratedWins, row._id)) {
+      ratedWins[row._id] = row.count;
+    }
+  }
+  return ratedWins;
+}
+
 async function loadExtras(userId) {
-  const puzzlesSolved = await PuzzleAttempt.countDocuments({
-    user: userId,
-    solved: true,
-  });
-  return { puzzlesSolved };
+  const [puzzlesSolved, ratedWins] = await Promise.all([
+    PuzzleAttempt.countDocuments({ user: userId, solved: true }),
+    loadRatedWinCounts(userId),
+  ]);
+  return { puzzlesSolved, ratedWins };
 }
 
 /**
  * Persist newly qualified catalog achievements and emit ACHIEVEMENT_UNLOCKED.
+ * Never revokes existing unlocks (rating drop / loss streak cannot remove badges).
  */
 async function checkAndUnlockAchievements(userId, io = null) {
   const user = await User.findById(userId);
   if (!user) return [];
 
   const stats = await Stats.findOne({ user: userId });
-  // Stats optional for puzzle/anniversary-only unlocks
   const extras = await loadExtras(userId);
 
   if (!Array.isArray(user.unlockedAchievements)) {
@@ -144,6 +235,15 @@ async function buildAchievementsPayload(userId) {
     const unlocked =
       unlockedMap.has(def.id) || ruleSatisfied(def.rule, stats, user, extras);
 
+    // For display: provisional ratings still show numeric progress, but stay locked.
+    const ratingPath =
+      def.rule.path && def.rule.path.startsWith("ratings.")
+        ? def.rule.path.split(".")[1]
+        : null;
+    const ratingConfirmed = ratingPath
+      ? isRatingConfirmed(user, ratingPath)
+      : true;
+
     return {
       id: def.id,
       category: def.category,
@@ -156,6 +256,9 @@ async function buildAchievementsPayload(userId) {
       unlockedAt: unlockedMap.get(def.id) || null,
       progress: Math.min(progress, target),
       target,
+      ...(ratingPath
+        ? { ratingConfirmed, provisional: !ratingConfirmed }
+        : {}),
     };
   });
 
@@ -179,5 +282,9 @@ module.exports = {
   checkAndUnlockAchievements,
   buildAchievementsPayload,
   resolveStatValue,
+  ruleSatisfied,
+  isRatingConfirmed,
   assetUrlFor,
+  loadRatedWinCounts,
+  RATING_CONFIRM_GAMES,
 };

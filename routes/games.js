@@ -201,13 +201,10 @@ function scheduleGameCompletionSideEffects(gameId, result, io, options = {}) {
           const {
             checkAndUnlockAchievements,
           } = require("../services/achievementUnlockService");
-          if (gameForRating.type === "bot") {
-            const userId =
-              gameForRating.players.white?._id || gameForRating.players.black?._id;
-            if (userId) {
-              await checkAndUnlockAchievements(userId.toString(), io);
-            }
-          } else {
+          // Wins/ratings achievements are rated-human only. Still run unlock after
+          // any human game (friend unrated won't match win rules; rated will).
+          // Skip bot games — bot wins must never grant play badges.
+          if (gameForRating.type !== "bot") {
             if (gameForRating.players.white) {
               await checkAndUnlockAchievements(
                 gameForRating.players.white._id.toString(),
