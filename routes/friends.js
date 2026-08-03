@@ -13,7 +13,10 @@ const {
 const { getPublicFrontendUrl } = require("../utils/frontendUrl");
 const auth = require("../middleware/auth");
 const { usersAreBlocked, applyBlock } = require("../utils/user-blocks");
-const { visiblePresenceMap } = require("../utils/presence");
+const {
+  visiblePresenceMap,
+  attachVisiblePresence,
+} = require("../utils/presence");
 
 const router = express.Router();
 
@@ -146,9 +149,11 @@ router.get("/", auth, async (req, res) => {
       .populate("friends", "username fullName avatar status rating lastActive ratings puzzleRating country")
       .select("friends");
 
+    const friends = await attachVisiblePresence(user?.friends || []);
+
     res.json({
       success: true,
-      data: { friends: user.friends },
+      data: { friends },
     });
   } catch (error) {
     console.error("Get friends error:", error);
@@ -1081,8 +1086,11 @@ router.get("/search", auth, async (req, res) => {
       }
     }
 
-    // Format users with friend status
+    // Format users with friend status (mask online if they hid presence)
     const myIdStr = currentUserId.toString();
+    const presenceMap = await visiblePresenceMap(
+      users.map((u) => String(u._id))
+    );
     const formattedUsers = users
       .filter((user) => {
         const uid = user._id.toString();
@@ -1120,7 +1128,7 @@ router.get("/search", auth, async (req, res) => {
         avatar: user.avatar,
         country: user.country,
         rating: user.rating,
-        status: user.status,
+        status: presenceMap[userId] || "offline",
         isFriend,
         requestSent,
         hasPendingRequest,

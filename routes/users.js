@@ -33,6 +33,10 @@ const upload = multer({
 const UserReport = require("../models/UserReport");
 const { OTHER_USER_FIELDS, formatMemberSince } = require("../utils/userProjections");
 const {
+  attachVisiblePresence,
+  visiblePresenceStatus,
+} = require("../utils/presence");
+const {
   isValidReportReason,
   getCategoryLabel,
   getReasonLabel,
@@ -304,6 +308,14 @@ router.get("/profile", auth, async (req, res) => {
     const userPayload = user.toObject();
     const memberSince = formatMemberSince(userPayload.createdAt);
     if (memberSince) userPayload.memberSince = memberSince;
+
+    // Friends list / other-user profile: never leak real online if privacy hides it.
+    if (Array.isArray(userPayload.friends) && userPayload.friends.length) {
+      userPayload.friends = await attachVisiblePresence(userPayload.friends);
+    }
+    if (!isOwnProfile) {
+      userPayload.status = await visiblePresenceStatus(userPayload._id);
+    }
 
     res.json({
       success: true,
@@ -709,6 +721,8 @@ router.put(
 
       // Update user with merged preferences
       user.preferences = mergedPreferences;
+      // Mixed subdocs sometimes skip change detection — force write.
+      user.markModified("preferences");
       await user.save();
 
       // If they hide/show online status, push the visible presence to friends now.
@@ -721,13 +735,16 @@ router.put(
           const io = req.app.get("io");
           const {
             isUserOnline,
-            visiblePresenceStatus,
+            visiblePresenceStatus: visibleStatus,
           } = require("../utils/presence");
           const status = nextShow
             ? isUserOnline(user._id)
-              ? await visiblePresenceStatus(user._id)
+              ? await visibleStatus(user._id)
               : "offline"
             : "offline";
+          // Keep Mongo status in sync so GET /friends & web don't show a stale green dot.
+          user.status = status;
+          await user.save();
           const friendIds = user.friends || [];
           friendIds.forEach((friendId) => {
             io?.to(`user:${friendId.toString()}`).emit("presence:update", {

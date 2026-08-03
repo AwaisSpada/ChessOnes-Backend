@@ -296,7 +296,10 @@ router.post(
               fullName: user.fullName,
               ratings: user.ratings,
               avatar: user.avatar,
-              status: "online",
+              status:
+                user.preferences?.privacy?.showOnlineStatus === false
+                  ? "offline"
+                  : "online",
               country: user.country,
               role: user.role || "USER", // Include role for admin check
               puzzleRating: user.puzzleRating ?? 100,
@@ -310,8 +313,11 @@ router.post(
         });
       }
 
-      // Update last active and status
-      user.status = "online"
+      // Update last active — only advertise "online" if privacy allows it.
+      // Real presence still comes from the socket registry after register-user.
+      const showOnline =
+        user.preferences?.privacy?.showOnlineStatus !== false;
+      user.status = showOnline ? "online" : "offline";
       await user.updateLastActive()
 
       // Generate token

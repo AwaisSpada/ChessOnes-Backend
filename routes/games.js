@@ -226,14 +226,12 @@ function scheduleGameCompletionSideEffects(gameId, result, io, options = {}) {
         }
 
         if (gameForRating.players.white) {
-          await User.findByIdAndUpdate(gameForRating.players.white._id, {
-            status: "online",
-          });
+          const { syncStoredPresenceStatus } = require("../utils/presence");
+          await syncStoredPresenceStatus(gameForRating.players.white._id);
         }
         if (gameForRating.players.black && gameForRating.type !== "bot") {
-          await User.findByIdAndUpdate(gameForRating.players.black._id, {
-            status: "online",
-          });
+          const { syncStoredPresenceStatus } = require("../utils/presence");
+          await syncStoredPresenceStatus(gameForRating.players.black._id);
         }
       } catch (err) {
         console.error("[Game End] post-completion side effects failed:", gameId, err);
@@ -2150,14 +2148,12 @@ router.post(
           void (async () => {
             try {
               if (game.players.white?._id) {
-                await User.findByIdAndUpdate(game.players.white._id, {
-                  status: "online",
-                });
+                const { syncStoredPresenceStatus } = require("../utils/presence");
+                await syncStoredPresenceStatus(game.players.white._id);
               }
               if (game.players.black?._id && game.type !== "bot") {
-                await User.findByIdAndUpdate(game.players.black._id, {
-                  status: "online",
-                });
+                const { syncStoredPresenceStatus } = require("../utils/presence");
+                await syncStoredPresenceStatus(game.players.black._id);
               }
             } catch (err) {
               console.error("[Game End] status update failed:", err);

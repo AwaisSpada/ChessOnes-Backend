@@ -482,14 +482,12 @@ async function completeGameOnUserDisconnect(game, userId, io) {
         }
 
         if (game.players.white) {
-          await User.findByIdAndUpdate(game.players.white._id, {
-            status: "online",
-          });
+          const { syncStoredPresenceStatus } = require("./utils/presence");
+          await syncStoredPresenceStatus(game.players.white._id);
         }
         if (game.players.black && game.type !== "bot") {
-          await User.findByIdAndUpdate(game.players.black._id, {
-            status: "online",
-          });
+          const { syncStoredPresenceStatus } = require("./utils/presence");
+          await syncStoredPresenceStatus(game.players.black._id);
         }
 
         try {
@@ -927,10 +925,11 @@ io.on("connection", (socket) => {
       }
     }
 
-    // Update DB status, notify friends, and hand this client a fresh snapshot.
+    // Update DB status (honors showOnlineStatus), notify friends, snapshot.
     try {
+      const visible = await visiblePresenceStatus(userId);
       await User.findByIdAndUpdate(userId, {
-        status: "online",
+        status: visible,
         lastActive: new Date(),
       }).exec();
 

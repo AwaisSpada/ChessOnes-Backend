@@ -45,7 +45,9 @@ async function loadHiddenOnlineUserIds(userIds) {
 
   const hidden = new Set();
   for (const doc of docs) {
-    if (doc?.preferences?.privacy?.showOnlineStatus === false) {
+    const flag = doc?.preferences?.privacy?.showOnlineStatus;
+    // Strict false, plus defensive coerce if a bad client ever wrote a string.
+    if (flag === false || flag === "false" || flag === 0) {
       hidden.add(String(doc._id));
     }
   }
@@ -57,6 +59,15 @@ async function visiblePresenceStatus(userId) {
   if (!isUserOnline(userId)) return "offline";
   const hidden = await loadHiddenOnlineUserIds([userId]);
   return hidden.has(String(userId)) ? "offline" : "online";
+}
+
+/** Persist the *visible* status to Mongo (never force "online" past privacy). */
+async function syncStoredPresenceStatus(userId) {
+  if (!userId) return "offline";
+  const status = await visiblePresenceStatus(userId);
+  const User = require("../models/User");
+  await User.findByIdAndUpdate(userId, { status }).exec();
+  return status;
 }
 
 /**
@@ -72,6 +83,30 @@ async function visiblePresenceMap(userIds) {
     map[id] = isUserOnline(id) && !hidden.has(id) ? "online" : "offline";
   }
   return map;
+}
+
+/**
+ * Rewrite friend/user docs so API consumers (web + mobile) never see a green
+ * dot for someone who turned off "Show online status".
+ * Live sockets stay registered — only the *visible* status is masked.
+ *
+ * @param {Array<object>|null|undefined} users
+ * @returns {Promise<object[]>}
+ */
+async function attachVisiblePresence(users) {
+  const list = Array.isArray(users) ? users.filter(Boolean) : [];
+  if (!list.length) return [];
+
+  const ids = list.map((u) => String(u._id || u.id || "")).filter(Boolean);
+  const map = await visiblePresenceMap(ids);
+
+  return list.map((u) => {
+    const id = String(u._id || u.id || "");
+    const obj =
+      typeof u.toObject === "function" ? u.toObject() : { ...u };
+    obj.status = map[id] || "offline";
+    return obj;
+  });
 }
 
 /**
@@ -104,5 +139,7 @@ module.exports = {
   presenceStatus,
   visiblePresenceStatus,
   visiblePresenceMap,
+  attachVisiblePresence,
+  syncStoredPresenceStatus,
   disconnectUserSockets,
 };
