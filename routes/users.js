@@ -272,16 +272,14 @@ router.get("/profile", auth, async (req, res) => {
       // Full profile for own profile
       user = await User.findById(req.user._id)
         .select("-password")
-        .populate("friends", "username fullName avatar status rating country")
-        .populate("badges.badgeId", "name description imageUrl");
+        .populate("friends", "username fullName avatar status rating country");
     } else {
       // Public profile for other users — explicit allow-list (see
       // utils/userProjections). Sensitive fields like email, preferences,
       // friendRequests, blockedUsers, oauth provider, role, suspension and
       // policy-acceptance flags never reach the client this way.
       user = await User.findById(targetUserId)
-        .select(OTHER_USER_FIELDS)
-        .populate("badges.badgeId", "name description imageUrl");
+        .select(OTHER_USER_FIELDS);
       if (user && user.friends && user.friends.length > 0) {
         await user.populate("friends", "username fullName avatar status rating country");
       }

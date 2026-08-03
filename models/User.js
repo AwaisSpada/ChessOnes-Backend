@@ -234,7 +234,7 @@ const userSchema = new mongoose.Schema(
       default: "USER",
       index: true,
     },
-    // Badges earned by the user
+    // Legacy badges (admin/DB system) — kept for data safety; no longer awarded.
     badges: [
       {
         badgeId: {
@@ -243,6 +243,19 @@ const userSchema = new mongoose.Schema(
           required: true,
         },
         earnedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    // Catalog achievements unlocked by id (see constants/achievementsCatalog.js)
+    unlockedAchievements: [
+      {
+        id: {
+          type: String,
+          required: true,
+        },
+        unlockedAt: {
           type: Date,
           default: Date.now,
         },

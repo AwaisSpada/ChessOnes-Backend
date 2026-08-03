@@ -198,31 +198,31 @@ function scheduleGameCompletionSideEffects(gameId, result, io, options = {}) {
         }
 
         try {
-          const { checkAndAwardBadges } = require("../services/achievementService");
+          const {
+            checkAndUnlockAchievements,
+          } = require("../services/achievementUnlockService");
           if (gameForRating.type === "bot") {
             const userId =
               gameForRating.players.white?._id || gameForRating.players.black?._id;
             if (userId) {
-              await checkAndAwardBadges(userId.toString(), gameForRating.gameId, io);
+              await checkAndUnlockAchievements(userId.toString(), io);
             }
           } else {
             if (gameForRating.players.white) {
-              await checkAndAwardBadges(
+              await checkAndUnlockAchievements(
                 gameForRating.players.white._id.toString(),
-                gameForRating.gameId,
                 io
               );
             }
             if (gameForRating.players.black) {
-              await checkAndAwardBadges(
+              await checkAndUnlockAchievements(
                 gameForRating.players.black._id.toString(),
-                gameForRating.gameId,
                 io
               );
             }
           }
-        } catch (badgeError) {
-          console.error("[Game End] Error checking badges:", badgeError);
+        } catch (achievementError) {
+          console.error("[Game End] Error checking achievements:", achievementError);
         }
 
         if (gameForRating.players.white) {

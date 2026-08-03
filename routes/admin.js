@@ -4,7 +4,6 @@ const { body, validationResult } = require("express-validator");
 const multer = require("multer");
 const User = require("../models/User");
 const News = require("../models/News");
-const Badge = require("../models/Badge");
 const Stats = require("../models/Stats");
 const DailyPuzzleUserProgress = require("../models/DailyPuzzleUserProgress");
 const PuzzleAttempt = require("../models/PuzzleAttempt");
@@ -88,7 +87,7 @@ router.get("/users", async (req, res) => {
 
     const users = await User.find(query)
       .select("-password")
-      .select("username email fullName avatar status role ratings badges createdAt isSuspended")
+      .select("username email fullName avatar status role ratings createdAt isSuspended")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -182,7 +181,6 @@ router.get("/users/:userId", async (req, res) => {
   try {
     const user = await User.findById(req.params.userId)
       .select("-password")
-      .populate("badges.badgeId", "name description imageUrl")
       .lean();
 
     if (!user) {
@@ -579,302 +577,22 @@ router.delete("/news/:newsId", async (req, res) => {
   }
 });
 
-// ========== BADGE MANAGEMENT ==========
+// ========== BADGE MANAGEMENT (DEPRECATED) ==========
+// Legacy admin Badge CRUD retired — achievements are code-catalog based.
+// See constants/achievementsCatalog.js + /api/achievements/me
+const badgesDeprecated = (_req, res) => {
+  res.status(410).json({
+    success: false,
+    message:
+      "Admin badge CRUD is deprecated. Achievements are defined in the code catalog.",
+  });
+};
 
-// @route   GET /api/admin/badges
-// @desc    Get all badges
-// @access  Private (Admin only)
-router.get("/badges", async (req, res) => {
-  try {
-    const badges = await Badge.find().sort({ createdAt: -1 }).lean();
-
-    // Get count of users who have each badge
-    const badgesWithCounts = await Promise.all(
-      badges.map(async (badge) => {
-        const count = await User.countDocuments({
-          "badges.badgeId": badge._id,
-        });
-        return {
-          ...badge,
-          usersCount: count,
-        };
-      })
-    );
-
-    res.json({
-      success: true,
-      data: { badges: badgesWithCounts },
-    });
-  } catch (error) {
-    console.error("[Admin] Error fetching badges:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to fetch badges",
-    });
-  }
-});
-
-// @route   POST /api/admin/badges
-// @desc    Create badge
-// @access  Private (Admin only)
-router.post(
-  "/badges",
-  [
-    body("name").trim().isLength({ min: 1, max: 100 }),
-    body("description").trim().isLength({ min: 1, max: 500 }),
-    body("imageUrl").optional().custom((value) => {
-      if (!value || value === "") return true; // Allow empty string
-      // If provided, must be a valid URL
-      try {
-        new URL(value);
-        return true;
-      } catch {
-        return false;
-      }
-    }).withMessage("imageUrl must be a valid URL or empty"),
-    body("key").optional().trim(),
-    body("badgeCategory").optional().isIn(["STATISTIC", "GAME_EVENT", "OPENING"]),
-    body("logicConfig").optional().isObject(),
-    body("criteria").optional().notEmpty(),
-    body("targetValue").optional().isNumeric().withMessage("Target value must be a number"),
-    body("condition").optional().isIn(["gte", "exact"]),
-    body("autoAward").optional().isBoolean(),
-    body("category").optional().isIn(["wins", "streak", "rating", "games", "botWins", "highestRating", "winStreak", "totalGames", "bulletWins", "blitzWins", "rapidWins", "bulletRating", "blitzRating", "rapidRating", "bulletGames", "blitzGames", "rapidGames", "custom"]),
-  ],
-  async (req, res) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: "Validation failed",
-          errors: errors.array(),
-        });
-      }
-
-      const { name, description, imageUrl, key, badgeCategory, logicConfig, criteria, targetValue, condition, autoAward, category } = req.body;
-
-      const badge = new Badge({
-        name,
-        description,
-        imageUrl: imageUrl && imageUrl.trim() !== "" ? imageUrl : null,
-        key: key || null,
-        badgeCategory: badgeCategory || "STATISTIC",
-        logicConfig: logicConfig || {},
-        criteria: criteria || {},
-        targetValue: targetValue || 0,
-        condition: condition || "gte",
-        autoAward: autoAward !== undefined ? autoAward : false,
-        category: category || "custom",
-      });
-
-      await badge.save();
-
-      res.status(201).json({
-        success: true,
-        message: "Badge created successfully",
-        data: { badge },
-      });
-    } catch (error) {
-      console.error("[Admin] Error creating badge:", error);
-      if (error.code === 11000) {
-        return res.status(400).json({
-          success: false,
-          message: "Badge with this name already exists",
-        });
-      }
-      res.status(500).json({
-        success: false,
-        message: "Failed to create badge",
-      });
-    }
-  }
-);
-
-// @route   PATCH /api/admin/badges/:badgeId
-// @desc    Update badge
-// @access  Private (Admin only)
-router.patch(
-  "/badges/:badgeId",
-  [
-    body("name").optional().trim().isLength({ min: 1, max: 100 }),
-    body("description").optional().trim().isLength({ min: 1, max: 500 }),
-    body("imageUrl").optional().custom((value) => {
-      if (!value || value === "") return true; // Allow empty string
-      // If provided, must be a valid URL
-      try {
-        new URL(value);
-        return true;
-      } catch {
-        return false;
-      }
-    }).withMessage("imageUrl must be a valid URL or empty"),
-    body("key").optional().trim(),
-    body("badgeCategory").optional().isIn(["STATISTIC", "GAME_EVENT", "OPENING"]),
-    body("logicConfig").optional().isObject(),
-    body("criteria").optional().notEmpty(),
-    body("targetValue").optional().isNumeric().withMessage("Target value must be a number"),
-    body("condition").optional().isIn(["gte", "exact"]),
-    body("autoAward").optional().isBoolean(),
-    body("category").optional().isIn(["wins", "streak", "rating", "games", "botWins", "highestRating", "winStreak", "totalGames", "bulletWins", "blitzWins", "rapidWins", "bulletRating", "blitzRating", "rapidRating", "bulletGames", "blitzGames", "rapidGames", "custom"]),
-  ],
-  async (req, res) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return res.status(400).json({
-          success: false,
-          message: "Validation failed",
-          errors: errors.array(),
-        });
-      }
-
-      const updateData = {};
-      const { name, description, imageUrl, key, badgeCategory, logicConfig, criteria, targetValue, condition, autoAward, category } = req.body;
-
-      if (name !== undefined) updateData.name = name;
-      if (description !== undefined) updateData.description = description;
-      if (key !== undefined) updateData.key = key;
-      if (badgeCategory !== undefined) updateData.badgeCategory = badgeCategory;
-      if (logicConfig !== undefined) updateData.logicConfig = logicConfig;
-      if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
-      if (criteria !== undefined) updateData.criteria = criteria;
-      if (targetValue !== undefined) updateData.targetValue = targetValue;
-      if (condition !== undefined) updateData.condition = condition;
-      if (autoAward !== undefined) updateData.autoAward = autoAward;
-      if (category !== undefined) updateData.category = category;
-
-      const badge = await Badge.findByIdAndUpdate(
-        req.params.badgeId,
-        updateData,
-        { new: true, runValidators: true }
-      );
-
-      if (!badge) {
-        return res.status(404).json({
-          success: false,
-          message: "Badge not found",
-        });
-      }
-
-      res.json({
-        success: true,
-        message: "Badge updated successfully",
-        data: { badge },
-      });
-    } catch (error) {
-      console.error("[Admin] Error updating badge:", error);
-      if (error.code === 11000) {
-        return res.status(400).json({
-          success: false,
-          message: "Badge with this name already exists",
-        });
-      }
-      res.status(500).json({
-        success: false,
-        message: "Failed to update badge",
-      });
-    }
-  }
-);
-
-// @route   POST /api/admin/badges/:badgeId/image
-// @desc    Upload badge image to Cloudinary
-// @access  Private (Admin only)
-router.post("/badges/:badgeId/image", upload.single("image"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: "No image file provided",
-      });
-    }
-
-    const badge = await Badge.findById(req.params.badgeId);
-    if (!badge) {
-      return res.status(404).json({
-        success: false,
-        message: "Badge not found",
-      });
-    }
-
-    // Delete old image from Cloudinary if it exists
-    if (badge.imageUrl) {
-      try {
-        const oldPublicId = extractPublicId(badge.imageUrl);
-        if (oldPublicId) {
-          await deleteImage(oldPublicId);
-        }
-      } catch (error) {
-        console.error("[Admin] Error deleting old badge image:", error);
-        // Continue even if deletion fails
-      }
-    }
-
-    // Upload new image to Cloudinary
-    const publicId = `badges/${badge._id}`;
-    const uploadResult = await uploadImage(
-      req.file.buffer,
-      "badges",
-      publicId
-    );
-
-    // Update badge image URL
-    badge.imageUrl = uploadResult.secure_url;
-    await badge.save();
-
-    res.json({
-      success: true,
-      message: "Badge image uploaded successfully",
-      data: {
-        imageUrl: uploadResult.secure_url,
-        badge: {
-          _id: badge._id,
-          imageUrl: badge.imageUrl,
-        },
-      },
-    });
-  } catch (error) {
-    console.error("[Admin] Badge image upload error:", error);
-    res.status(500).json({
-      success: false,
-      message: error.message || "Failed to upload badge image",
-    });
-  }
-});
-
-// @route   DELETE /api/admin/badges/:badgeId
-// @desc    Delete badge
-// @access  Private (Admin only)
-router.delete("/badges/:badgeId", async (req, res) => {
-  try {
-    const badge = await Badge.findByIdAndDelete(req.params.badgeId);
-
-    if (!badge) {
-      return res.status(404).json({
-        success: false,
-        message: "Badge not found",
-      });
-    }
-
-    // Remove badge from all users
-    await User.updateMany(
-      { "badges.badgeId": badge._id },
-      { $pull: { badges: { badgeId: badge._id } } }
-    );
-
-    res.json({
-      success: true,
-      message: "Badge deleted successfully",
-    });
-  } catch (error) {
-    console.error("[Admin] Error deleting badge:", error);
-    res.status(500).json({
-      success: false,
-      message: "Failed to delete badge",
-    });
-  }
-});
+router.get("/badges", badgesDeprecated);
+router.post("/badges", badgesDeprecated);
+router.patch("/badges/:badgeId", badgesDeprecated);
+router.post("/badges/:badgeId/image", badgesDeprecated);
+router.delete("/badges/:badgeId", badgesDeprecated);
 
 // ========== MESSENGER INVESTIGATION ==========
 // Privacy Policy §11: admins may access message content to investigate abuse,

@@ -40,7 +40,7 @@ const OTHER_USER_FIELDS = [
   "puzzleStreak",
   "dailyPuzzleStreak",
   "dailyPuzzleLastStreakDate",
-  "badges",
+  "unlockedAchievements",
   "friends",
   "createdAt",
 ].join(" ");

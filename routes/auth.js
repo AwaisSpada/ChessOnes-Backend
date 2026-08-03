@@ -398,8 +398,7 @@ router.post("/logout", auth, async (req, res) => {
 router.get("/me", auth, async (req, res) => {
   try {
     const user = await User.findById(req.user._id)
-      .select("-password")
-      .populate("badges.badgeId", "name description imageUrl");
+      .select("-password");
     res.json({
       success: true,
       data: { user },

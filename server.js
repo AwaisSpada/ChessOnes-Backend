@@ -194,6 +194,7 @@ app.use("/api/daily-puzzle", require("./routes/daily-puzzle")); // Daily puzzle 
 app.use("/api/tournaments", require("./routes/tournaments"));
 app.use("/api/learn", require("./routes/learn")); // Learn SRS progress sync
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
+app.use("/api/achievements", require("./routes/achievements")); // Catalog achievements
 app.use("/api/public", require("./routes/public")); // Contact + newsletter (public, uses sendMail)
 
 // Legacy API /join/:token → brand-domain landing (OG + masked share URL).

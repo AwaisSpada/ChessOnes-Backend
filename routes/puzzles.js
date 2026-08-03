@@ -397,6 +397,18 @@ router.post("/:id/attempt", auth, async (req, res) => {
     attempt.ratingChange = ratingChange;
     await attempt.save();
 
+    if (solved) {
+      try {
+        const {
+          checkAndUnlockAchievements,
+        } = require("../services/achievementUnlockService");
+        const io = req.app.get("io");
+        await checkAndUnlockAchievements(userId.toString(), io);
+      } catch (achErr) {
+        console.error("[Puzzle] achievement unlock failed:", achErr);
+      }
+    }
+
     res.json({
       success: true,
       data: {

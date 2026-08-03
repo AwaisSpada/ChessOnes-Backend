@@ -237,23 +237,21 @@ router.get("/leaderboard", auth, async (req, res) => {
 })
 
 // @route   GET /api/stats/achievements/:userId
-// @desc    Get user achievements
+// @desc    Deprecated — use GET /api/achievements/me?userId=
 // @access  Private
 router.get("/achievements/:userId", auth, async (req, res) => {
   try {
-    const { userId } = req.params
-
-    const stats = await Stats.findOne({ user: userId })
-    if (!stats) {
+    const { buildAchievementsPayload } = require("../services/achievementUnlockService")
+    const payload = await buildAchievementsPayload(req.params.userId)
+    if (!payload) {
       return res.status(404).json({
         success: false,
-        message: "Statistics not found",
+        message: "User not found",
       })
     }
-
     res.json({
       success: true,
-      data: { achievements: stats.achievements },
+      data: payload,
     })
   } catch (error) {
     console.error("Get achievements error:", error)
@@ -322,50 +320,15 @@ router.post(
       // Update stats
       await stats.updateAfterGame(gameType, result, gameTime)
 
-      // Check for new achievements
-      const newAchievements = []
-
-      // First win achievement
-      if (stats.wins.total === 1 && result === "win") {
-        newAchievements.push({
-          name: "First Victory",
-          description: "Win your first game",
-        })
-      }
-
-      // Win streak achievements
-      if (stats.currentStreak === 5) {
-        newAchievements.push({
-          name: "Hot Streak",
-          description: "Win 5 games in a row",
-        })
-      }
-
-      // Games played milestones
-      if (stats.gamesPlayed.total === 10) {
-        newAchievements.push({
-          name: "Getting Started",
-          description: "Play 10 games",
-        })
-      }
-
-      // Add new achievements
-      if (newAchievements.length > 0) {
-        stats.achievements.push(...newAchievements)
-        await stats.save()
-
-        // Emit achievement notifications
-        req.app.get("io").to(req.user._id.toString()).emit("achievements-unlocked", {
-          achievements: newAchievements,
-        })
-      }
+      // Catalog achievements unlock on game-end side effects (/api/games).
+      // Legacy Stats.achievements + achievements-unlocked socket retired.
 
       res.json({
         success: true,
         message: "Statistics updated successfully",
         data: {
           stats,
-          newAchievements,
+          newAchievements: [],
         },
       })
     } catch (error) {
