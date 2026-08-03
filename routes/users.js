@@ -610,7 +610,8 @@ router.get("/preferences", auth, async (req, res) => {
         friendRequests: true,
         gameReminders: true,
         emailNotifications: false,
-        pushNotifications: false,
+        pushNotifications: true,
+        push: true,
         advertisementEmails: false,
       },
       privacy: userPrefs.privacy || {
@@ -709,6 +710,38 @@ router.put(
       // Update user with merged preferences
       user.preferences = mergedPreferences;
       await user.save();
+
+      // If they hide/show online status, push the visible presence to friends now.
+      try {
+        const prevShow =
+          currentPrefs?.privacy?.showOnlineStatus !== false;
+        const nextShow =
+          mergedPreferences?.privacy?.showOnlineStatus !== false;
+        if (prevShow !== nextShow) {
+          const io = req.app.get("io");
+          const {
+            isUserOnline,
+            visiblePresenceStatus,
+          } = require("../utils/presence");
+          const status = nextShow
+            ? isUserOnline(user._id)
+              ? await visiblePresenceStatus(user._id)
+              : "offline"
+            : "offline";
+          const friendIds = user.friends || [];
+          friendIds.forEach((friendId) => {
+            io?.to(`user:${friendId.toString()}`).emit("presence:update", {
+              userId: String(user._id),
+              status,
+            });
+          });
+        }
+      } catch (presenceErr) {
+        console.warn(
+          "Presence privacy broadcast skipped:",
+          presenceErr.message
+        );
+      }
 
       res.json({
         success: true,

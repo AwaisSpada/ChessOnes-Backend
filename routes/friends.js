@@ -13,7 +13,7 @@ const {
 const { getPublicFrontendUrl } = require("../utils/frontendUrl");
 const auth = require("../middleware/auth");
 const { usersAreBlocked, applyBlock } = require("../utils/user-blocks");
-const { presenceStatus } = require("../utils/presence");
+const { visiblePresenceMap } = require("../utils/presence");
 
 const router = express.Router();
 
@@ -24,9 +24,11 @@ const router = express.Router();
 router.get("/presence", auth, async (req, res) => {
   try {
     const me = await User.findById(req.user._id).select("friends").lean();
-    const users = (me?.friends || []).map((friendId) => ({
-      userId: String(friendId),
-      status: presenceStatus(friendId),
+    const friendIds = (me?.friends || []).map((id) => String(id));
+    const map = await visiblePresenceMap(friendIds);
+    const users = friendIds.map((friendId) => ({
+      userId: friendId,
+      status: map[friendId] || "offline",
     }));
 
     return res.json({
@@ -467,6 +469,15 @@ router.post(
       }
 
       if (action === "send") {
+        // Privacy: receiver turned off incoming friend requests.
+        if (receiver.preferences?.privacy?.allowFriendRequests === false) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "This user has currently turned off friend requests.",
+          });
+        }
+
         // check if already friends
         if (sender.friends.includes(friendId)) {
           return res.status(400).json({

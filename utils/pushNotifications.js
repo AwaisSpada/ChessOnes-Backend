@@ -28,11 +28,14 @@ async function sendPushToUser(userId, { title, body, data = {} } = {}) {
     const user = await User.findById(userId).select("fcmTokens preferences");
     if (!user) return { sent: 0, skipped: "user_missing" };
 
-    // Honor simple notifications preference when it is explicitly false.
+    // Honor notifications preference when explicitly disabled.
+    // Support both keys: pushNotifications (settings UI) and push (legacy).
     const prefs = user.preferences?.notifications;
     if (prefs === false) return { sent: 0, skipped: "notifications_disabled" };
-    if (prefs && typeof prefs === "object" && prefs.push === false) {
-      return { sent: 0, skipped: "notifications_disabled" };
+    if (prefs && typeof prefs === "object") {
+      if (prefs.push === false || prefs.pushNotifications === false) {
+        return { sent: 0, skipped: "notifications_disabled" };
+      }
     }
 
     const tokens = (user.fcmTokens || [])

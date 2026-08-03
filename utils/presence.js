@@ -29,6 +29,52 @@ function presenceStatus(userId) {
 }
 
 /**
+ * Users who opted out of "Show online status" — still connected, but appear offline.
+ * @param {string[]} userIds
+ * @returns {Promise<Set<string>>}
+ */
+async function loadHiddenOnlineUserIds(userIds) {
+  const ids = [...new Set((userIds || []).map(String).filter(Boolean))];
+  if (!ids.length) return new Set();
+
+  // Lazy require avoids circular imports with User consumers of this module.
+  const User = require("../models/User");
+  const docs = await User.find({ _id: { $in: ids } })
+    .select("_id preferences.privacy.showOnlineStatus")
+    .lean();
+
+  const hidden = new Set();
+  for (const doc of docs) {
+    if (doc?.preferences?.privacy?.showOnlineStatus === false) {
+      hidden.add(String(doc._id));
+    }
+  }
+  return hidden;
+}
+
+/** Live socket + privacy.onlineStatus — what friends should see. */
+async function visiblePresenceStatus(userId) {
+  if (!isUserOnline(userId)) return "offline";
+  const hidden = await loadHiddenOnlineUserIds([userId]);
+  return hidden.has(String(userId)) ? "offline" : "online";
+}
+
+/**
+ * @param {string[]} userIds
+ * @returns {Promise<Record<string, "online"|"offline">>}
+ */
+async function visiblePresenceMap(userIds) {
+  const ids = [...new Set((userIds || []).map(String).filter(Boolean))];
+  const hidden = await loadHiddenOnlineUserIds(ids);
+  /** @type {Record<string, "online"|"offline">} */
+  const map = {};
+  for (const id of ids) {
+    map[id] = isUserOnline(id) && !hidden.has(id) ? "online" : "offline";
+  }
+  return map;
+}
+
+/**
  * Drop every live socket of a user (logout). Web clients keep the socket open on
  * client-side navigation, so without this they stay "online" until a refresh.
  * The socket `disconnect` handler then clears the registry and tells friends.
@@ -56,5 +102,7 @@ module.exports = {
   isUserOnline,
   onlineUserIds,
   presenceStatus,
+  visiblePresenceStatus,
+  visiblePresenceMap,
   disconnectUserSockets,
 };

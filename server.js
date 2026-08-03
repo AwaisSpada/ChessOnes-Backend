@@ -214,7 +214,8 @@ app.get("/join/:token", (req, res) => {
 const {
   onlineUsers,
   isUserOnline,
-  presenceStatus,
+  visiblePresenceStatus,
+  visiblePresenceMap,
 } = require("./utils/presence");
 // Track which sockets have joined each game room to avoid resetting ready state on duplicate joins
 const gameRoomSockets = new Map(); // gameId -> Set of socket IDs
@@ -344,14 +345,16 @@ function isUserFullyOffline(userId) {
   return !isUserOnline(userId);
 }
 
-/** Full presence list of a user's friends, computed from live sockets. */
+/** Full presence list of a user's friends, computed from live sockets + privacy. */
 async function emitPresenceSnapshot(socket, userId) {
   if (!socket || !userId) return;
   try {
     const doc = await User.findById(userId).select("friends").lean();
-    const users = (doc?.friends || []).map((friendId) => ({
-      userId: String(friendId),
-      status: presenceStatus(friendId),
+    const friendIds = (doc?.friends || []).map((id) => String(id));
+    const map = await visiblePresenceMap(friendIds);
+    const users = friendIds.map((friendId) => ({
+      userId: friendId,
+      status: map[friendId] || "offline",
     }));
     socket.emit("presence:snapshot", { users });
   } catch (err) {
@@ -359,15 +362,19 @@ async function emitPresenceSnapshot(socket, userId) {
   }
 }
 
-/** Tell a user's friends that their presence changed. */
+/** Tell a user's friends that their presence changed (honors showOnlineStatus). */
 async function broadcastPresence(userId, status) {
   if (!userId) return;
   try {
+    let visible = status;
+    if (status === "online") {
+      visible = await visiblePresenceStatus(userId);
+    }
     const doc = await User.findById(userId).select("friends").lean();
     (doc?.friends || []).forEach((friendId) => {
       io.to(`user:${friendId.toString()}`).emit("presence:update", {
         userId: String(userId),
-        status,
+        status: visible,
       });
     });
   } catch (err) {
