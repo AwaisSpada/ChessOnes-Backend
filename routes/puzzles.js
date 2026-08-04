@@ -339,12 +339,53 @@ router.post("/:id/attempt", auth, async (req, res) => {
           newRating: user.puzzleRating || 100,
           newStreak: 0,
           attempts: attempt.attempts,
+          unrated: true,
         },
       });
     }
 
-    // Calculate rating change using ELO-like system
+    const hints = Math.max(0, Number(usedHints) || 0);
     const userRating = user.puzzleRating || 100;
+
+    /**
+     * Hint / reveal (Lichess-style soft unrated):
+     * Any hint (or Solve for me, which reports with usedHints >= 1) →
+     * rating Δ = 0, streak reset. Clean solve (0 hints) still uses Elo.
+     */
+    if (hints >= 1) {
+      user.puzzleStreak = 0;
+      await user.save();
+      attempt.ratingChange = 0;
+      await attempt.save();
+
+      // Still count a true board-solve toward achievement unlocks, without Elo.
+      if (solved) {
+        try {
+          const {
+            checkAndUnlockAchievements,
+          } = require("../services/achievementUnlockService");
+          const io = req.app.get("io");
+          await checkAndUnlockAchievements(userId.toString(), io);
+        } catch (achErr) {
+          console.error("[Puzzle] achievement unlock failed:", achErr);
+        }
+      }
+
+      return res.json({
+        success: true,
+        data: {
+          solved: !!solved,
+          ratingChange: 0,
+          newRating: userRating,
+          newStreak: 0,
+          attempts: attempt.attempts,
+          unrated: true,
+          usedHints: hints,
+        },
+      });
+    }
+
+    // Calculate rating change using ELO-like system (clean attempt, 0 hints)
     const puzzleRating = puzzle.rating;
 
     // Calculate expected score (probability of winning)
@@ -357,17 +398,8 @@ router.post("/:id/attempt", auth, async (req, res) => {
     // Calculate rating change
     let ratingChange = 0;
     if (solved) {
-      // Win: gain points
+      // Win: full gain (no hint soft-cut — hints already handled above)
       ratingChange = Math.round(K * (1 - expectedScore));
-
-      // Hint penalty on gains only (matches web puzzle UI):
-      // 0 hints → 100%, 1 → 70%, 2 → 40%, 3+ → 0%
-      const hints = Math.max(0, Number(usedHints) || 0);
-      let hintMultiplier = 1;
-      if (hints === 1) hintMultiplier = 0.7;
-      else if (hints === 2) hintMultiplier = 0.4;
-      else if (hints >= 3) hintMultiplier = 0;
-      ratingChange = Math.round(ratingChange * hintMultiplier);
     } else {
       // Loss: lose points (but less than if we won)
       ratingChange = Math.round(K * (0 - expectedScore) * 0.5); // Lose half of what we would have gained
@@ -417,6 +449,8 @@ router.post("/:id/attempt", auth, async (req, res) => {
         newRating,
         newStreak: user.puzzleStreak || 0,
         attempts: attempt.attempts,
+        unrated: false,
+        usedHints: 0,
       },
     });
   } catch (error) {
