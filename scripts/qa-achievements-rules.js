@@ -7,6 +7,7 @@ const {
   ruleSatisfied,
   resolveStatValue,
   isRatingConfirmed,
+  shouldRetainUnlock,
   RATING_CONFIRM_GAMES,
 } = require("../services/achievementUnlockService");
 const { ACHIEVEMENTS } = require("../constants/achievementsCatalog");
@@ -200,6 +201,50 @@ test("win achievements use win-* assets", () => {
 test("no Checkmates category", () => {
   const cats = new Set(ACHIEVEMENTS.map((a) => a.category));
   assert.ok(!cats.has("checkmates"));
+});
+
+console.log("\n6) Reconcile retain policy");
+test("provisional rating unlocks are revoked", () => {
+  const def = ACHIEVEMENTS.find((a) => a.id === "rating_bullet_1500");
+  assert.ok(def);
+  assert.strictEqual(
+    shouldRetainUnlock(def, {}, provisionalUser, {}),
+    false,
+  );
+});
+test("confirmed rating unlock kept after drop", () => {
+  const def = ACHIEVEMENTS.find((a) => a.id === "rating_bullet_1200");
+  assert.ok(def);
+  assert.strictEqual(
+    shouldRetainUnlock(def, {}, droppedFrom1200, {}),
+    true,
+  );
+});
+test("inflated Stats wins do not retain win badge", () => {
+  const def = ACHIEVEMENTS.find((a) => a.id === "bullet_wins_50");
+  assert.ok(def);
+  assert.strictEqual(
+    shouldRetainUnlock(
+      def,
+      { wins: { bullet: 50 } },
+      {},
+      { ratedWins: { bullet: 2, blitz: 0, rapid: 0 } },
+    ),
+    false,
+  );
+});
+test("real rated wins retain win badge", () => {
+  const def = ACHIEVEMENTS.find((a) => a.id === "bullet_wins_50");
+  assert.ok(def);
+  assert.strictEqual(
+    shouldRetainUnlock(
+      def,
+      {},
+      {},
+      { ratedWins: { bullet: 50, blitz: 0, rapid: 0 } },
+    ),
+    true,
+  );
 });
 
 console.log("\n=== Summary ===");

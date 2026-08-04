@@ -774,6 +774,9 @@ setInterval(() => {
       console.log(`[Matchmaking] Removed player ${userId} from pool after timeout`);
     }
   });
+  if (playersToRemove.length > 0) {
+    broadcastMatchmakingPool();
+  }
   
   // Only try to match if we have at least 2 players
   if (matchmakingPool.length < 2) return;
@@ -805,35 +808,30 @@ setInterval(() => {
         
         matchmakingSockets.delete(player1.userId);
         matchmakingSockets.delete(player2.userId);
+        broadcastMatchmakingPool();
         
         // Create game
         createMatchmakingGame(player1, player2, player1.category)
           .then((game) => {
             // Emit MATCH_FOUND to both players
-            const socket1 = io.sockets.sockets.get(player1.socketId);
-            const socket2 = io.sockets.sockets.get(player2.socketId);
-            
-            if (socket1) {
-              socket1.emit("MATCH_FOUND", {
-                gameId: game.gameId,
-                opponent: {
-                  userId: player2.userId,
-                  rating: player2.rating,
-                  category: player2.category,
-                },
-              });
-            }
-            
-            if (socket2) {
-              socket2.emit("MATCH_FOUND", {
-                gameId: game.gameId,
-                opponent: {
-                  userId: player1.userId,
-                  rating: player1.rating,
-                  category: player1.category,
-                },
-              });
-            }
+            emitMatchFoundToPlayer(player1, {
+              gameId: game.gameId,
+              opponent: {
+                userId: player2.userId,
+                rating: player2.rating,
+                category: player2.category,
+                username: player2.username,
+              },
+            });
+            emitMatchFoundToPlayer(player2, {
+              gameId: game.gameId,
+              opponent: {
+                userId: player1.userId,
+                rating: player1.rating,
+                category: player1.category,
+                username: player1.username,
+              },
+            });
             
             console.log(`[Matchmaking] Matched players ${player1.userId} and ${player2.userId} - Game ${game.gameId}`);
           })
@@ -860,13 +858,59 @@ setInterval(() => {
 /**
  * Helper function to remove player from matchmaking pool
  */
-function removeFromMatchmaking(userId) {
+function removeFromMatchmaking(userId, { broadcast = true } = {}) {
   const index = matchmakingPool.findIndex(p => p.userId === userId);
   if (index !== -1) {
     matchmakingPool.splice(index, 1);
     matchmakingSockets.delete(userId);
     console.log(`[Matchmaking] Player ${userId} left queue. Pool size: ${matchmakingPool.length}`);
+    if (broadcast) broadcastMatchmakingPool();
   }
+}
+
+function formatMatchmakingTimeLabel(tc) {
+  if (!tc || typeof tc.initialTime !== "number") return "?";
+  const mins = Math.round(tc.initialTime / 60000);
+  const inc = Math.round((tc.increment || 0) / 1000);
+  if (inc > 0) return `${mins}+${inc}`;
+  if (mins >= 10) return `${mins} min`;
+  return `${mins}+0`;
+}
+
+/** Public lobby cards for Play → Online → Open Challenges. */
+function serializeMatchmakingPool() {
+  return matchmakingPool.map((p) => ({
+    userId: String(p.userId),
+    username: p.username || "Player",
+    avatar: p.avatar || null,
+    rating: typeof p.rating === "number" ? p.rating : 1500,
+    category: p.category,
+    matchType: p.matchType === "unrated" ? "unrated" : "rated",
+    timeControlLabel: formatMatchmakingTimeLabel(p.timeControl),
+    timeControl: p.timeControl
+      ? {
+          initialTime: p.timeControl.initialTime,
+          increment: p.timeControl.increment || 0,
+        }
+      : null,
+    joinedAt: p.joinedAt,
+  }));
+}
+
+function broadcastMatchmakingPool() {
+  try {
+    io.to("matchmaking:lobby").emit("MATCHMAKING_POOL", {
+      challenges: serializeMatchmakingPool(),
+    });
+  } catch (err) {
+    console.error("[Matchmaking] broadcast pool error:", err);
+  }
+}
+
+function emitMatchFoundToPlayer(player, payload) {
+  const sock = io.sockets.sockets.get(player.socketId);
+  if (sock) sock.emit("MATCH_FOUND", payload);
+  io.to(`user:${player.userId}`).emit("MATCH_FOUND", payload);
 }
 
 // ========== END MATCHMAKING SYSTEM ==========
@@ -1084,6 +1128,15 @@ io.on("connection", (socket) => {
       // Add to matchmaking pool with time control
       const normalizedMatchType =
         matchType === "unrated" || matchType === "casual" ? "unrated" : "rated";
+      let username = "Player";
+      let avatar = null;
+      try {
+        const userDoc = await User.findById(userId).select("username avatar").lean();
+        if (userDoc?.username) username = userDoc.username;
+        if (userDoc?.avatar) avatar = userDoc.avatar;
+      } catch {
+        // best-effort display fields
+      }
       const player = {
         userId: userId.toString(),
         socketId: socket.id,
@@ -1091,6 +1144,8 @@ io.on("connection", (socket) => {
         rating: rating,
         matchType: normalizedMatchType,
         preferredColor: normalizePreferredColor(preferredColor),
+        username,
+        avatar,
         timeControl: {
           initialTime: timeControl.initialTime, // in milliseconds
           increment: timeControl.increment, // in milliseconds
@@ -1117,6 +1172,7 @@ io.on("connection", (socket) => {
         queuePosition: matchmakingPool.length,
         timeControl: player.timeControl,
       });
+      broadcastMatchmakingPool();
     } catch (error) {
       console.error("[Matchmaking] JOIN_MATCHMAKING error:", error);
       socket.emit("MATCHMAKING_ERROR", {
@@ -1142,6 +1198,125 @@ io.on("connection", (socket) => {
       removeFromMatchmaking(userId.toString());
     } catch (error) {
       console.error("[Matchmaking] LEAVE_MATCHMAKING error:", error);
+    }
+  });
+
+  /** Play → Online lobby: watch live open searches. */
+  socket.on("MATCHMAKING_LOBBY_SUBSCRIBE", () => {
+    try {
+      socket.join("matchmaking:lobby");
+      socket.emit("MATCHMAKING_POOL", {
+        challenges: serializeMatchmakingPool(),
+      });
+    } catch (error) {
+      console.error("[Matchmaking] LOBBY_SUBSCRIBE error:", error);
+    }
+  });
+
+  socket.on("MATCHMAKING_LOBBY_UNSUBSCRIBE", () => {
+    try {
+      socket.leave("matchmaking:lobby");
+    } catch (error) {
+      console.error("[Matchmaking] LOBBY_UNSUBSCRIBE error:", error);
+    }
+  });
+
+  /**
+   * Join a specific open search from the lobby (bypasses rating-range auto-match).
+   * Uses the seeker's category / time / rated flag.
+   */
+  socket.on("JOIN_OPEN_CHALLENGE", async (payload) => {
+    try {
+      const joinerId = String(payload?.userId || socket.data.userId || "").trim();
+      const targetUserId = String(payload?.targetUserId || "").trim();
+
+      if (!joinerId || !targetUserId) {
+        socket.emit("MATCHMAKING_ERROR", {
+          message: "Missing userId or targetUserId",
+        });
+        return;
+      }
+      if (joinerId === targetUserId) {
+        socket.emit("MATCHMAKING_ERROR", {
+          message: "Cannot join your own challenge",
+        });
+        return;
+      }
+
+      const hasAcceptedPolicies = await ensurePoliciesAcceptedForUser(joinerId);
+      if (!hasAcceptedPolicies) {
+        socket.emit("MATCHMAKING_ERROR", {
+          code: "POLICY_ACCEPTANCE_REQUIRED",
+          message:
+            "Policy acknowledgment is required before entering matchmaking.",
+        });
+        return;
+      }
+
+      const target = matchmakingPool.find((p) => p.userId === targetUserId);
+      if (!target) {
+        socket.emit("MATCHMAKING_ERROR", {
+          message: "Challenge no longer available",
+        });
+        broadcastMatchmakingPool();
+        return;
+      }
+
+      // Drop joiner from queue if they were also searching.
+      removeFromMatchmaking(joinerId, { broadcast: false });
+      removeFromMatchmaking(targetUserId, { broadcast: false });
+
+      const joinerUser = await User.findById(joinerId)
+        .select("username avatar ratings")
+        .lean();
+      const cat = target.category;
+      const ratingRaw = joinerUser?.ratings?.[cat]?.rating;
+      const joiner = {
+        userId: joinerId,
+        socketId: socket.id,
+        category: cat,
+        rating: typeof ratingRaw === "number" ? ratingRaw : 1500,
+        matchType: target.matchType || "rated",
+        preferredColor: "random",
+        username: joinerUser?.username || "Player",
+        avatar: joinerUser?.avatar || null,
+        timeControl: target.timeControl,
+        joinedAt: Date.now(),
+        initialRating: typeof ratingRaw === "number" ? ratingRaw : 1500,
+        timeoutSent: false,
+      };
+
+      const game = await createMatchmakingGame(target, joiner, cat);
+
+      emitMatchFoundToPlayer(target, {
+        gameId: game.gameId,
+        opponent: {
+          userId: joiner.userId,
+          rating: joiner.rating,
+          category: cat,
+          username: joiner.username,
+        },
+      });
+      emitMatchFoundToPlayer(joiner, {
+        gameId: game.gameId,
+        opponent: {
+          userId: target.userId,
+          rating: target.rating,
+          category: cat,
+          username: target.username,
+        },
+      });
+
+      console.log(
+        `[Matchmaking] Open-challenge join: ${joinerId} → ${targetUserId} game ${game.gameId}`,
+      );
+      broadcastMatchmakingPool();
+    } catch (error) {
+      console.error("[Matchmaking] JOIN_OPEN_CHALLENGE error:", error);
+      socket.emit("MATCHMAKING_ERROR", {
+        message: error?.message || "Failed to join challenge",
+      });
+      broadcastMatchmakingPool();
     }
   });
   

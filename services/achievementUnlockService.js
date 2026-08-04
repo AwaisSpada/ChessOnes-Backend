@@ -80,6 +80,94 @@ function ruleSatisfied(rule, stats, user, extras = {}) {
   return false;
 }
 
+/**
+ * Whether an already-stored unlock should survive reconciliation.
+ *
+ * - Unknown catalog ids → drop
+ * - Wins / puzzles / anniversary → must still satisfy current rules
+ *   (rated human wins only, real puzzle solves, account age)
+ * - Ratings → drop if that TC was never confirmed (★). If confirmed, keep
+ *   even when rating later drops (permanent badges).
+ */
+function shouldRetainUnlock(def, stats, user, extras = {}) {
+  if (!def || !def.rule) return false;
+
+  if (def.rule.path && def.rule.path.startsWith("ratings.")) {
+    const tc = def.rule.path.split(".")[1];
+    return isRatingConfirmed(user, tc);
+  }
+
+  return ruleSatisfied(def.rule, stats, user, extras);
+}
+
+/**
+ * Prune invalid unlocks and silently grant any currently earned missing ones.
+ * Does not emit socket events (migration / repair only).
+ *
+ * @returns {{ removed: string[], added: string[], kept: string[] }}
+ */
+async function reconcileUserAchievements(userId, { persist = true } = {}) {
+  const user = await User.findById(userId);
+  if (!user) {
+    return { removed: [], added: [], kept: [], missing: true };
+  }
+
+  const stats = (await Stats.findOne({ user: userId })) || {
+    wins: {},
+    gamesPlayed: {},
+    bestStreak: 0,
+    currentStreak: 0,
+  };
+  const extras = await loadExtras(userId);
+
+  if (!Array.isArray(user.unlockedAchievements)) {
+    user.unlockedAchievements = [];
+  }
+
+  const byId = new Map(ACHIEVEMENTS.map((def) => [def.id, def]));
+  const removed = [];
+  const keptEntries = [];
+
+  for (const entry of user.unlockedAchievements) {
+    const id = String(entry?.id || "");
+    const def = byId.get(id);
+    if (!def || !shouldRetainUnlock(def, stats, user, extras)) {
+      if (id) removed.push(id);
+      continue;
+    }
+    keptEntries.push({
+      id,
+      unlockedAt: entry.unlockedAt || new Date(),
+    });
+  }
+
+  const keptIds = new Set(keptEntries.map((e) => e.id));
+  const added = [];
+  const now = new Date();
+
+  for (const def of ACHIEVEMENTS) {
+    if (keptIds.has(def.id)) continue;
+    if (!ruleSatisfied(def.rule, stats, user, extras)) continue;
+    keptEntries.push({ id: def.id, unlockedAt: now });
+    keptIds.add(def.id);
+    added.push(def.id);
+  }
+
+  const changed = removed.length > 0 || added.length > 0;
+  if (persist && changed) {
+    user.unlockedAchievements = keptEntries;
+    await user.save();
+  }
+
+  return {
+    removed,
+    added,
+    kept: keptEntries.map((e) => e.id),
+    changed,
+    missing: false,
+  };
+}
+
 function assetUrlFor(assetKey) {
   return `/badges/${assetKey}.png`;
 }
@@ -281,6 +369,8 @@ async function buildAchievementsPayload(userId) {
 module.exports = {
   checkAndUnlockAchievements,
   buildAchievementsPayload,
+  reconcileUserAchievements,
+  shouldRetainUnlock,
   resolveStatValue,
   ruleSatisfied,
   isRatingConfirmed,
