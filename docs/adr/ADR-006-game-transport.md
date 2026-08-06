@@ -1,9 +1,9 @@
 # ADR-006: GameTransport
 
-- **Status:** Accepted (design) — extract not yet implemented
+- **Status:** Accepted (implemented)
 - **Date:** 2026-08-06
-- **Phases:** Design pre–Phase 5; Redis / cluster plug-in Phase 6+
-- **Flag:** Future `LIVE_TRANSPORT` (e.g. `socket` | `redis`) — not on frozen roadmap until extract PR
+- **Phases:** Extracted; Redis / cluster plug-in Phase 6+
+- **Flag:** `LIVE_TRANSPORT` (`socket` | `testing`; redis falls back to socket)
 
 ## Context
 

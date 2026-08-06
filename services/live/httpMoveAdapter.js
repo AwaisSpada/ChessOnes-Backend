@@ -3,16 +3,18 @@
  * Live-human only. Bot / flag-off stay on legacy routes/games.js handler.
  *
  * Flow: Load LiveGame → applyMove → (ratings if terminal) → Emit → Return → Persist.
+ * Emit via GameTransport (ADR-006) or Domain Events (ADR-007).
  */
 
 const Game = require("../../models/Game");
 const ClockManager = require("./ClockManager");
 const LiveGameManager = require("./LiveGameManager");
-const PersistenceQueue = require("./PersistenceQueue");
 const {
   LIVE_HTTP_VIA_MANAGER,
   LIVE_MEMORY_SNAPSHOT,
 } = require("./flags");
+const { ORIGIN } = require("./events/DomainEvent");
+const liveSideEffects = require("./liveSideEffects");
 
 function playerMatches(seatId, userId) {
   if (!seatId || !userId) return false;
@@ -92,7 +94,6 @@ async function tryHandleHttpMove(req, res, hooks) {
       return true;
     }
     if (!ClockManager.isLiveHumanGame(mongo)) {
-      // Bot / non-live: legacy handler.
       return false;
     }
     if (mongo.status !== "active") {
@@ -154,45 +155,54 @@ async function tryHandleHttpMove(req, res, hooks) {
     );
     const socketPayload = attachRatingChanges(outcome, ratingChanges);
 
-    io.to(live.gameId).emit("move-made", socketPayload);
-    await hooks.emitGameEnded(live.gameId, live.result, io, ratingChanges);
+    const gameEndedPayload = {
+      gameId: live.gameId,
+      result: live.result,
+      ...(ratingChanges ? { ratingChanges } : {}),
+      ...(socketPayload?.serverEventId
+        ? { serverEventId: socketPayload.serverEventId }
+        : {}),
+    };
+
+    await liveSideEffects.afterMoveApplied({
+      live,
+      origin: ORIGIN.HTTP,
+      moveMade: socketPayload,
+      persist: false,
+      reschedule: true,
+    });
+    await liveSideEffects.afterGameEndedNotify({
+      live,
+      origin: ORIGIN.HTTP,
+      gameEnded: gameEndedPayload,
+      persist: false,
+    });
 
     res.status(outcome.httpStatus || 200).json(outcome.httpBody);
 
-    void PersistenceQueue.enqueueLiveGamePersist(live)
-      .catch((err) => {
-        console.error(
-          `[live] PersistenceQueue failed game=${live.gameId}:`,
-          err?.message || err
-        );
-      })
-      .then(() => {
-        hooks.scheduleGameCompletionSideEffects(live.gameId, live.result, io, {
-          skipRatings: true,
-        });
+    void liveSideEffects.persistLive(live).then(() => {
+      hooks.scheduleGameCompletionSideEffects(live.gameId, live.result, io, {
+        skipRatings: true,
       });
-
-    // Terminal — cancel timers (finalize paths also cancel; safe no-op)
-    live.rescheduleClocks();
+    });
 
     return true;
   }
 
-  // Active move — emit, ACK, then ordered persist (same latency intent as legacy early ACK).
   if (outcome.socketPayload) {
-    io.to(live.gameId).emit("move-made", outcome.socketPayload);
+    await liveSideEffects.afterMoveApplied({
+      live,
+      origin: ORIGIN.HTTP,
+      moveMade: outcome.socketPayload,
+      persist: true,
+      reschedule: true,
+    });
+  } else {
+    void liveSideEffects.persistLive(live);
+    live.rescheduleClocks();
   }
 
   res.status(outcome.httpStatus || 200).json(outcome.httpBody);
-
-  PersistenceQueue.enqueueLiveGamePersist(live).catch((err) => {
-    console.error(
-      `[live] PersistenceQueue failed game=${live.gameId}:`,
-      err?.message || err
-    );
-  });
-
-  live.rescheduleClocks();
 
   if (
     typeof hooks.scheduleAdvantageScoreAfterMove === "function" &&

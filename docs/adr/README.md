@@ -11,8 +11,8 @@ is; they do not authorize implementation by themselves.
 | [ADR-003](./ADR-003-server-authoritative-clocks.md) | Server Authoritative Clocks | Accepted |
 | [ADR-004](./ADR-004-persistence-queue.md) | PersistenceQueue | Accepted |
 | [ADR-005](./ADR-005-live-move-protocol.md) | Live Move Protocol | Accepted |
-| [ADR-006](./ADR-006-game-transport.md) | GameTransport | Accepted (design) |
-| [ADR-007](./ADR-007-domain-events.md) | Domain Events | Accepted (frozen design) |
+| [ADR-006](./ADR-006-game-transport.md) | GameTransport | Accepted (implemented) |
+| [ADR-007](./ADR-007-domain-events.md) | Domain Events | Accepted (implemented) |
 
 ## Scope
 

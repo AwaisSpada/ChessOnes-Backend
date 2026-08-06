@@ -1,9 +1,9 @@
 # ADR-007: Domain Events
 
-- **Status:** Accepted (frozen design) — implementation not yet started
+- **Status:** Accepted (implemented) — design remains frozen; runtime behind `LIVE_DOMAIN_EVENTS`
 - **Date:** 2026-08-06
-- **Phases:** Post–Phase 4 design; extract is a separate approved implementation phase
-- **Flag (suggested):** `LIVE_DOMAIN_EVENTS` default false — not on frozen roadmap until implementation is approved
+- **Phases:** M0–M5 landed behind flag (sole path when ON; GameTransport direct path when OFF)
+- **Flag:** `LIVE_DOMAIN_EVENTS` default false
 
 ## Context
 

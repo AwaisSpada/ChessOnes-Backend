@@ -1,11 +1,13 @@
 /**
  * Shared live-game terminal emit + ratings + persist (Phase 3).
  * Used by TimeoutManager (flag) and AbandonManager (first-move abandon).
+ * Delivery via GameTransport / Domain Events (ADR-006/007).
  */
 
 const ClockAuthority = require("./ClockAuthority");
-const PersistenceQueue = require("./PersistenceQueue");
 const ClockScheduler = require("./ClockScheduler");
+const { ORIGIN } = require("./events/DomainEvent");
+const liveSideEffects = require("./liveSideEffects");
 
 /** @type {import("socket.io").Server | null} */
 let ioRef = null;
@@ -43,6 +45,7 @@ async function finalizeServerEnd(live, result, options = {}) {
   ClockAuthority.bumpSyncVersion(live);
   live.updatedAtMs = Date.now();
 
+  // Cancel timers immediately under mutation (before async ratings/emit).
   ClockScheduler.cancel(live.gameId);
 
   const io = getIo();
@@ -71,35 +74,48 @@ async function finalizeServerEnd(live, result, options = {}) {
         : undefined,
   });
 
-  if (io) {
-    io.to(live.gameId).emit("move-made", socketPayload);
-    if (typeof endHooks.emitGameEnded === "function") {
-      await endHooks.emitGameEnded(
+  const gameEndedPayload = {
+    gameId: live.gameId,
+    result: live.result,
+    ...(ratingChanges ? { ratingChanges } : {}),
+    ...(socketPayload.serverEventId
+      ? { serverEventId: socketPayload.serverEventId }
+      : {}),
+  };
+
+  const kind =
+    result.reason === "first-move-abandon"
+      ? "abandon"
+      : options.timedOut || result.reason === "timeout"
+        ? "timeout"
+        : "ended";
+
+  const origin =
+    kind === "abandon"
+      ? ORIGIN.Abandon
+      : kind === "timeout"
+        ? ORIGIN.Timeout
+        : ORIGIN.System;
+
+  await liveSideEffects.afterServerTerminal({
+    live,
+    origin,
+    kind,
+    moveMade: socketPayload,
+    gameEnded: gameEndedPayload,
+    persist: false,
+  });
+
+  void liveSideEffects.persistLive(live).then(() => {
+    if (typeof endHooks.scheduleGameCompletionSideEffects === "function") {
+      endHooks.scheduleGameCompletionSideEffects(
         live.gameId,
         live.result,
         io,
-        ratingChanges
+        { skipRatings: true }
       );
     }
-  }
-
-  void PersistenceQueue.enqueueLiveGamePersist(live)
-    .catch((err) => {
-      console.error(
-        `[live-end] persist failed game=${live.gameId}:`,
-        err?.message || err
-      );
-    })
-    .then(() => {
-      if (typeof endHooks.scheduleGameCompletionSideEffects === "function") {
-        endHooks.scheduleGameCompletionSideEffects(
-          live.gameId,
-          live.result,
-          io,
-          { skipRatings: true }
-        );
-      }
-    });
+  });
 
   return true;
 }
@@ -121,19 +137,22 @@ async function notifyCompletedLiveGame(live, io) {
       gameDoc
     );
   }
-  if (socketIo) {
-    const serverEventId =
-      typeof live.nextServerEventId === "function"
-        ? live.nextServerEventId()
-        : undefined;
-    const payload = {
-      gameId: live.gameId,
-      result: live.result,
-      ...(ratingChanges ? { ratingChanges } : {}),
-      ...(serverEventId ? { serverEventId } : {}),
-    };
-    socketIo.to(live.gameId).emit("game-ended", payload);
-  }
+  const serverEventId =
+    typeof live.nextServerEventId === "function"
+      ? live.nextServerEventId()
+      : undefined;
+  const payload = {
+    gameId: live.gameId,
+    result: live.result,
+    ...(ratingChanges ? { ratingChanges } : {}),
+    ...(serverEventId ? { serverEventId } : {}),
+  };
+  await liveSideEffects.afterGameEndedNotify({
+    live,
+    origin: ORIGIN.WS,
+    gameEnded: payload,
+    persist: false,
+  });
   if (typeof endHooks.scheduleGameCompletionSideEffects === "function") {
     endHooks.scheduleGameCompletionSideEffects(
       live.gameId,

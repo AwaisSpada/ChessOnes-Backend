@@ -91,24 +91,45 @@ function cancelPendingDisconnectEndsForUser(userId) {
 /** Notify opponents that a player is back in the game room (mobile + web presence UI). */
 function emitPlayerReconnected(io, gameId, userId) {
   if (!gameId || !userId) return;
-  const socketIo = io || getIo();
-  const payload = { gameId: String(gameId), userId: String(userId), connected: true };
-  socketIo.to(String(gameId)).emit("player-reconnected", payload);
-  socketIo.to(String(gameId)).emit("connection-status", {
-    ...payload,
-    status: "online",
+  const liveSideEffects = require("./liveSideEffects");
+  const { ORIGIN } = require("./events/DomainEvent");
+  void liveSideEffects.afterPlayerConnection({
+    gameId: String(gameId),
+    userId: String(userId),
+    connected: true,
+    origin: ORIGIN.Reconnect,
   });
+  // Fallback if transport not booted yet (tests / early call)
+  const { tryGetGameTransport } = require("./transport");
+  if (!tryGetGameTransport() && io) {
+    const payload = { gameId: String(gameId), userId: String(userId), connected: true };
+    io.to(String(gameId)).emit("player-reconnected", payload);
+    io.to(String(gameId)).emit("connection-status", {
+      ...payload,
+      status: "online",
+    });
+  }
 }
 
 function emitPlayerDisconnected(io, gameId, userId) {
   if (!gameId || !userId) return;
-  const socketIo = io || getIo();
-  const payload = { gameId: String(gameId), userId: String(userId), connected: false };
-  socketIo.to(String(gameId)).emit("player-disconnected", payload);
-  socketIo.to(String(gameId)).emit("connection-status", {
-    ...payload,
-    status: "reconnecting",
+  const liveSideEffects = require("./liveSideEffects");
+  const { ORIGIN } = require("./events/DomainEvent");
+  void liveSideEffects.afterPlayerConnection({
+    gameId: String(gameId),
+    userId: String(userId),
+    connected: false,
+    origin: ORIGIN.Reconnect,
   });
+  const { tryGetGameTransport } = require("./transport");
+  if (!tryGetGameTransport() && io) {
+    const payload = { gameId: String(gameId), userId: String(userId), connected: false };
+    io.to(String(gameId)).emit("player-disconnected", payload);
+    io.to(String(gameId)).emit("connection-status", {
+      ...payload,
+      status: "reconnecting",
+    });
+  }
 }
 
 function heartbeatKey(gameId, userId) {

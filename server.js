@@ -229,6 +229,25 @@ const gameReadyState = new Map();
 const liveFlags = require("./services/live/flags");
 void liveFlags;
 
+// ADR-006 GameTransport + ADR-007 Domain Events boot (before reconnect emits)
+{
+  const {
+    createGameTransport,
+    setGameTransport,
+  } = require("./services/live/transport");
+  const {
+    LIVE_TRANSPORT,
+    LIVE_DOMAIN_EVENTS,
+  } = require("./services/live/flags");
+  const transport = createGameTransport({ io, mode: LIVE_TRANSPORT });
+  setGameTransport(transport);
+  const { initLiveDomainEvents } = require("./services/live/events");
+  initLiveDomainEvents();
+  console.log(
+    `[live] GameTransport=${transport.kind} LIVE_DOMAIN_EVENTS=${LIVE_DOMAIN_EVENTS}`
+  );
+}
+
 const {
   init: initReconnectManager,
   DISCONNECT_GAME_END_GRACE_MS,

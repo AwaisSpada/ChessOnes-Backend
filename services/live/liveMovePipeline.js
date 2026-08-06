@@ -4,6 +4,8 @@
  * Client ACK timeout (documentation — not a wire field):
  *   ackTimeoutMs = clamp(round(2.5 * ewmaRttMs), 1500, 8000)
  * Retry the SAME requestId after timeout; do not mint a new id for transport retries.
+ *
+ * Delivery: GameTransport (ADR-006) / Domain Events (ADR-007).
  */
 
 const {
@@ -11,9 +13,10 @@ const {
   LIVE_MEMORY_SNAPSHOT,
 } = require("./flags");
 const LiveGameManager = require("./LiveGameManager");
-const PersistenceQueue = require("./PersistenceQueue");
 const MoveProcessor = require("./MoveProcessor");
 const liveGameEnd = require("./liveGameEnd");
+const { ORIGIN } = require("./events/DomainEvent");
+const liveSideEffects = require("./liveSideEffects");
 
 const RECOVERABLE = {
   NOT_YOUR_TURN: false,
@@ -64,7 +67,7 @@ function buildServerSync(live, reason) {
   };
 }
 
-function emitReject(socket, live, fields) {
+async function emitReject(socket, live, fields) {
   const serverEventId =
     fields.serverEventId ||
     (live && typeof live.nextServerEventId === "function"
@@ -87,10 +90,17 @@ function emitReject(socket, live, fields) {
     serverNow: fields.serverNow ?? nowMs(),
     needSync: Boolean(fields.needSync),
   };
-  socket.emit("moveRejected", payload);
-  if (fields.needSync && live) {
-    socket.emit("serverSync", buildServerSync(live, "reject"));
-  }
+  const serverSync =
+    fields.needSync && live ? buildServerSync(live, "reject") : null;
+  await liveSideEffects.afterMoveRejected({
+    live,
+    gameId: fields.gameId,
+    origin: ORIGIN.WS,
+    moveRejected: payload,
+    serverSync,
+    userId: socket?.data?.userId,
+    socketRef: socket,
+  });
   return payload;
 }
 
@@ -205,7 +215,13 @@ async function handleLiveMove(socket, raw, io) {
           ...prior.payload,
           serverEventId: live.nextServerEventId(),
         };
-        socket.emit("moveAccepted", replay);
+        const { getGameTransport } = require("./transport");
+        getGameTransport().emitMoveAccepted({
+          gameId,
+          userId,
+          socketRef: socket,
+          payload: replay,
+        });
         return replay;
       }
       if (prior.kind === "rejected" && prior.payload) {
@@ -215,13 +231,20 @@ async function handleLiveMove(socket, raw, io) {
           recoverable: false,
           code: prior.payload.code || "DUPLICATE",
         };
-        socket.emit("moveRejected", replay);
+        await liveSideEffects.afterMoveRejected({
+          live,
+          gameId,
+          origin: ORIGIN.WS,
+          moveRejected: replay,
+          userId,
+          socketRef: socket,
+        });
         return replay;
       }
     }
 
     if (live.status !== "active") {
-      const rejected = emitReject(socket, live, {
+      const rejected = await emitReject(socket, live, {
         requestId,
         gameId,
         code: "GAME_NOT_ACTIVE",
@@ -240,7 +263,7 @@ async function handleLiveMove(socket, raw, io) {
 
     const lastSeq = live.getLastClientSequence(userId);
     if (lastSeq != null && payload.clientSequence <= lastSeq) {
-      const rejected = emitReject(socket, live, {
+      const rejected = await emitReject(socket, live, {
         requestId,
         gameId,
         code: "STALE_SEQUENCE",
@@ -260,7 +283,7 @@ async function handleLiveMove(socket, raw, io) {
 
     const serverPly = Array.isArray(live.moves) ? live.moves.length : 0;
     if (payload.clientPly !== serverPly) {
-      const rejected = emitReject(socket, live, {
+      const rejected = await emitReject(socket, live, {
         requestId,
         gameId,
         code: "STALE_PLY",
@@ -282,7 +305,7 @@ async function handleLiveMove(socket, raw, io) {
       typeof payload.baseSyncVersion === "number" &&
       payload.baseSyncVersion > live.syncVersion
     ) {
-      const rejected = emitReject(socket, live, {
+      const rejected = await emitReject(socket, live, {
         requestId,
         gameId,
         code: "STALE_SYNC",
@@ -314,7 +337,7 @@ async function handleLiveMove(socket, raw, io) {
 
     if (!outcome.ok) {
       const code = mapOutcomeToRejectCode(outcome);
-      const rejected = emitReject(socket, live, {
+      const rejected = await emitReject(socket, live, {
         requestId,
         gameId,
         code,
@@ -331,19 +354,26 @@ async function handleLiveMove(socket, raw, io) {
       });
       if (outcome.kind === "timeout" && outcome.socketPayload) {
         const serverEventId = live.nextServerEventId();
-        io.to(gameId).emit("move-made", {
+        const roomPayload = {
           ...outcome.socketPayload,
           serverEventId,
           requestId,
+        };
+        await liveSideEffects.afterMoveApplied({
+          live,
+          origin: ORIGIN.Timeout,
+          moveMade: roomPayload,
+          userId,
+          socketRef: socket,
+          requestId,
+          persist: true,
+          reschedule: true,
         });
-        live.rescheduleClocks();
-        PersistenceQueue.enqueueLiveGamePersist(live).catch(() => {});
         void liveGameEnd.notifyCompletedLiveGame(live, io);
       }
       return rejected;
     }
 
-    // Timeout-on-move returns ok:true with kind timeout in MoveProcessor
     if (outcome.kind === "timeout") {
       const serverEventId = live.nextServerEventId();
       const roomPayload = {
@@ -351,8 +381,7 @@ async function handleLiveMove(socket, raw, io) {
         serverEventId,
         requestId,
       };
-      io.to(gameId).emit("move-made", roomPayload);
-      const rejected = emitReject(socket, live, {
+      const rejected = await emitReject(socket, live, {
         requestId,
         gameId,
         code: "TIMEOUT",
@@ -369,8 +398,16 @@ async function handleLiveMove(socket, raw, io) {
         payload: rejected,
       });
       live.setLastClientSequence(userId, payload.clientSequence);
-      PersistenceQueue.enqueueLiveGamePersist(live).catch(() => {});
-      live.rescheduleClocks();
+      await liveSideEffects.afterMoveApplied({
+        live,
+        origin: ORIGIN.Timeout,
+        moveMade: roomPayload,
+        userId,
+        socketRef: socket,
+        requestId,
+        persist: true,
+        reschedule: true,
+      });
       void liveGameEnd.notifyCompletedLiveGame(live, io);
       return rejected;
     }
@@ -383,8 +420,6 @@ async function handleLiveMove(socket, raw, io) {
       serverEventId,
       requestId,
     };
-
-    io.to(gameId).emit("move-made", socketPayload);
 
     const accept = {
       requestId,
@@ -406,19 +441,22 @@ async function handleLiveMove(socket, raw, io) {
       board: live.board,
     };
 
-    socket.emit("moveAccepted", accept);
+    await liveSideEffects.afterMoveApplied({
+      live,
+      origin: ORIGIN.WS,
+      moveMade: socketPayload,
+      moveAccepted: accept,
+      userId,
+      socketRef: socket,
+      requestId,
+      persist: true,
+      reschedule: true,
+    });
+
     live.rememberRequestOutcome(requestId, {
       kind: "accepted",
       payload: accept,
     });
-
-    PersistenceQueue.enqueueLiveGamePersist(live).catch((err) => {
-      console.error(
-        `[live:move] persist failed game=${gameId}:`,
-        err?.message || err
-      );
-    });
-    live.rescheduleClocks();
 
     if (outcome.gameEnded && live.result) {
       void liveGameEnd.notifyCompletedLiveGame(live, io);
@@ -437,18 +475,31 @@ function handleServerSyncRequest(socket, raw) {
       live = await LiveGameManager.getOrHydrate(gameId);
     }
     if (!live) {
-      socket.emit("serverSync", {
+      await liveSideEffects.afterServerSync({
         gameId,
-        reason: "miss",
-        serverEventId: `miss:${nowMs()}`,
-        syncVersion: 0,
-        serverPly: 0,
-        needHydrate: true,
+        origin: ORIGIN.WS,
+        serverSync: {
+          gameId,
+          reason: "miss",
+          serverEventId: `miss:${nowMs()}`,
+          syncVersion: 0,
+          serverPly: 0,
+          needHydrate: true,
+        },
+        userId: socket?.data?.userId,
+        socketRef: socket,
       });
       return;
     }
-    socket.emit("serverSync", buildServerSync(live, raw?.reason || "explicit"));
-    live.rescheduleClocks();
+    await liveSideEffects.afterServerSync({
+      live,
+      gameId,
+      origin: ORIGIN.WS,
+      serverSync: buildServerSync(live, raw?.reason || "explicit"),
+      userId: socket?.data?.userId,
+      socketRef: socket,
+      reschedule: true,
+    });
   })();
 }
 

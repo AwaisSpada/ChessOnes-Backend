@@ -1,10 +1,7 @@
 /**
  * Live-migration feature flags.
- * Phase 0: defined, default OFF.
- * Phase 1: LIVE_MEMORY_SNAPSHOT gates in-memory snapshot reads + post-move RAM sync.
- * Phase 2: LIVE_HTTP_VIA_MANAGER gates HTTP /move via LiveGame + MoveProcessor.
- * Phase 3: LIVE_SERVER_TIMEOUTS arms ClockScheduler (requires LIVE_MEMORY_SNAPSHOT).
- * Phase 4: LIVE_WS_MOVES enables live:move / moveAccepted / moveRejected.
+ * Phase 0–4 as before.
+ * ADR-006/007: LIVE_DOMAIN_EVENTS, LIVE_TRANSPORT.
  */
 
 function parseEnvFlag(name, defaultValue = false) {
@@ -28,6 +25,32 @@ const LIVE_SERVER_TIMEOUTS = parseEnvFlag("LIVE_SERVER_TIMEOUTS", false);
 /** @type {boolean} Phase 4 — authenticated live:move WebSocket commands */
 const LIVE_WS_MOVES = parseEnvFlag("LIVE_WS_MOVES", false);
 
+/**
+ * ADR-007 — Domain Events bus sole path for live emit/persist/schedule.
+ * Default OFF: GameTransport + direct PersistenceQueue / ClockScheduler (ADR-006).
+ */
+const LIVE_DOMAIN_EVENTS = parseEnvFlag("LIVE_DOMAIN_EVENTS", false);
+
+/**
+ * ADR-006 — transport implementation: socket | testing
+ * redis deferred (Phase 6).
+ */
+function parseTransportMode() {
+  const raw = String(process.env.LIVE_TRANSPORT || "socket")
+    .trim()
+    .toLowerCase();
+  if (raw === "testing" || raw === "test") return "testing";
+  if (raw === "redis") {
+    console.warn(
+      "[live] LIVE_TRANSPORT=redis not implemented; falling back to socket"
+    );
+    return "socket";
+  }
+  return "socket";
+}
+
+const LIVE_TRANSPORT = parseTransportMode();
+
 function isLiveFlagEnabled(name) {
   switch (name) {
     case "LIVE_MEMORY_SNAPSHOT":
@@ -38,6 +61,8 @@ function isLiveFlagEnabled(name) {
       return LIVE_SERVER_TIMEOUTS;
     case "LIVE_WS_MOVES":
       return LIVE_WS_MOVES;
+    case "LIVE_DOMAIN_EVENTS":
+      return LIVE_DOMAIN_EVENTS;
     default:
       return false;
   }
@@ -48,6 +73,8 @@ module.exports = {
   LIVE_HTTP_VIA_MANAGER,
   LIVE_SERVER_TIMEOUTS,
   LIVE_WS_MOVES,
+  LIVE_DOMAIN_EVENTS,
+  LIVE_TRANSPORT,
   isLiveFlagEnabled,
   parseEnvFlag,
 };
