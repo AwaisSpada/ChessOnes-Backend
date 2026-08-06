@@ -22,6 +22,15 @@ const {
 } = require("../utils/chess-engine");
 const { applyFischerIncrementToMover } = require("../utils/clockIncrement");
 const { canUserSpectateArenaGame } = require("../utils/arenaSpectateAccess");
+const {
+  isLiveHumanGame,
+  ensureTimeRemaining,
+  getEffectiveTimeRemaining,
+  applyServerElapsedClock,
+  bumpSyncVersion,
+  withLiveSync,
+  buildLiveSyncFields,
+} = require("../utils/liveGameSync");
 
 const router = express.Router();
 
@@ -528,58 +537,21 @@ router.get("/:gameId", auth, async (req, res) => {
     }
 
     // Compute effective timeRemaining based on last update so timers stay correct on reload
-    // Only subtract elapsed time if the game has actually started (has moves)
-    let effectiveTimeRemaining = { ...game.timeRemaining?.toObject?.() } || {
-      white: game.timeRemaining?.white,
-      black: game.timeRemaining?.black,
-    };
-
-    // Only calculate elapsed time if game has started (has moves)
-    const gameHasStarted = game.moves && game.moves.length > 0;
-
-    if (game.status === "active" && effectiveTimeRemaining && gameHasStarted) {
-      const now = Date.now();
-
-      // Use the last move's timestamp if available, otherwise use updatedAt
-      // This ensures we calculate elapsed time from when the last move was made, not when the game was last saved
-      let lastMoveTime = now;
-      if (game.moves && game.moves.length > 0) {
-        const lastMove = game.moves[game.moves.length - 1];
-        if (lastMove.timestamp) {
-          lastMoveTime = new Date(lastMove.timestamp).getTime();
-        } else if (game.updatedAt) {
-          // Fallback to updatedAt if move doesn't have timestamp
-          lastMoveTime = game.updatedAt.getTime();
-        }
-      } else if (game.updatedAt) {
-        lastMoveTime = game.updatedAt.getTime();
-      }
-
-      const elapsed = Math.max(0, now - lastMoveTime);
-
-      if (
-        game.currentTurn === "white" &&
-        typeof effectiveTimeRemaining.white === "number"
-      ) {
-        effectiveTimeRemaining.white = Math.max(
-          0,
-          effectiveTimeRemaining.white - elapsed
-        );
-      } else if (
-        game.currentTurn === "black" &&
-        typeof effectiveTimeRemaining.black === "number"
-      ) {
-        effectiveTimeRemaining.black = Math.max(
-          0,
-          effectiveTimeRemaining.black - elapsed
-        );
-      }
-    }
+    const effectiveTimeRemaining = getEffectiveTimeRemaining(game);
+    const syncFields = buildLiveSyncFields(game, {
+      timeRemaining: effectiveTimeRemaining,
+    });
 
     res.json({
       success: true,
       data: {
-        game: { ...game.toObject(), timeRemaining: effectiveTimeRemaining },
+        game: {
+          ...game.toObject(),
+          timeRemaining: effectiveTimeRemaining,
+          syncVersion: syncFields.syncVersion,
+          ply: syncFields.ply,
+          serverNow: syncFields.serverNow,
+        },
       },
     });
   } catch (error) {
@@ -658,26 +630,7 @@ router.post(
       }
 
       // Harden clock object for older/edge game docs so pre-move payloads never crash this route.
-      if (
-        !game.timeRemaining ||
-        typeof game.timeRemaining.white !== "number" ||
-        typeof game.timeRemaining.black !== "number"
-      ) {
-        game.timeRemaining = {
-          white:
-            typeof game.timeRemaining?.white === "number"
-              ? game.timeRemaining.white
-              : typeof timeRemaining?.white === "number"
-                ? timeRemaining.white
-                : 600000,
-          black:
-            typeof game.timeRemaining?.black === "number"
-              ? game.timeRemaining.black
-              : typeof timeRemaining?.black === "number"
-                ? timeRemaining.black
-                : 600000,
-        };
-      }
+      ensureTimeRemaining(game);
 
       const lastMoveTimestamp =
         game.moves && game.moves.length > 0
@@ -686,8 +639,52 @@ router.post(
       const previousClockMs =
         playerColor === "white" ? game.timeRemaining?.white : game.timeRemaining?.black;
 
-      // Optionally sync clock from client (for reconnect resilience)
-      if (timeRemaining && typeof timeRemaining === "object") {
+      const liveHuman = isLiveHumanGame(game);
+
+      if (liveHuman) {
+        // Server-authoritative clocks — do not trust client timeRemaining.
+        if (!game.clockStartedAt && (!game.moves || game.moves.length === 0)) {
+          game.clockStartedAt = game.clockStartedAt || new Date();
+        }
+        const clockResult = applyServerElapsedClock(game);
+        if (clockResult.timedOut) {
+          game.status = "completed";
+          game.result = {
+            winner: playerColor === "white" ? "black" : "white",
+            reason: "timeout",
+          };
+          bumpSyncVersion(game);
+          await game.save();
+
+          const io = req.app.get("io");
+          const ratingChanges = await applyRatingsForGameEnd(
+            game.gameId,
+            io,
+            game
+          );
+          const timeoutPayload = withLiveSync(game, {
+            gameId: req.params.gameId,
+            board: game.board,
+            gameEnded: true,
+            result: game.result,
+            ratingChanges,
+            timedOut: true,
+          });
+          io.to(req.params.gameId).emit("move-made", timeoutPayload);
+          await emitGameEnded(game.gameId, game.result, io, ratingChanges);
+          scheduleGameCompletionSideEffects(game.gameId, game.result, io, {
+            skipRatings: true,
+          });
+
+          return res.status(400).json({
+            success: false,
+            code: "TIMEOUT",
+            message: "Out of time",
+            data: timeoutPayload,
+          });
+        }
+      } else if (timeRemaining && typeof timeRemaining === "object") {
+        // Bot / legacy: optional client clock sync (unchanged behavior).
         if (typeof timeRemaining.white === "number") {
           game.timeRemaining.white = timeRemaining.white;
         }
@@ -836,6 +833,7 @@ router.post(
             winner: isWhiteMoving ? "white" : "black",
             reason: "checkmate",
           };
+          bumpSyncVersion(game);
           await game.save();
 
           const io = req.app.get("io");
@@ -844,17 +842,15 @@ router.post(
             io,
             game
           );
-          const terminalPayload = {
+          const terminalPayload = withLiveSync(game, {
             gameId: req.params.gameId,
             move,
             board: newBoard,
-            currentTurn: game.currentTurn,
-            timeRemaining: game.timeRemaining,
             gameEnded: true,
             isCheckmate: true,
             result: game.result,
             ratingChanges,
-          };
+          });
 
           io.to(req.params.gameId).emit("move-made", terminalPayload);
           await emitGameEnded(game.gameId, game.result, io, ratingChanges);
@@ -870,6 +866,9 @@ router.post(
               board: newBoard,
               currentTurn: game.currentTurn,
               timeRemaining: game.timeRemaining,
+              syncVersion: terminalPayload.syncVersion,
+              ply: terminalPayload.ply,
+              serverNow: terminalPayload.serverNow,
               gameEnded: true,
               result: game.result,
               ratingChanges,
@@ -1038,7 +1037,8 @@ router.post(
             reason: "stalemate",
           };
         }
-        
+
+        bumpSyncVersion(game);
         await game.save();
 
         const io = req.app.get("io");
@@ -1047,12 +1047,10 @@ router.post(
           io,
           game
         );
-        const terminalMoveData = {
+        const terminalMoveData = withLiveSync(game, {
           gameId: req.params.gameId,
           move,
           board: newBoard,
-          currentTurn: game.currentTurn,
-          timeRemaining: game.timeRemaining,
           isInCheck,
           isCheckmate: isCheckmateState,
           isStalemate: isStalemateState,
@@ -1061,7 +1059,7 @@ router.post(
           gameEnded: true,
           result: game.result,
           ratingChanges,
-        };
+        });
 
         io.to(req.params.gameId).emit("move-made", terminalMoveData);
         await emitGameEnded(game.gameId, game.result, io, ratingChanges);
@@ -1077,6 +1075,9 @@ router.post(
             board: newBoard,
             currentTurn: game.currentTurn,
             timeRemaining: game.timeRemaining,
+            syncVersion: terminalMoveData.syncVersion,
+            ply: terminalMoveData.ply,
+            serverNow: terminalMoveData.serverNow,
             gameStatus: game.status,
             gameEnded: true,
             isCheckmate: isCheckmateState,
@@ -1089,21 +1090,20 @@ router.post(
         });
       }
 
+      bumpSyncVersion(game);
       await game.save();
 
       // Emit move to other players via Socket.IO
-      const moveData = {
+      const moveData = withLiveSync(game, {
         gameId: req.params.gameId,
         move,
         board: newBoard,
-        currentTurn: game.currentTurn,
-        timeRemaining: game.timeRemaining,
         isInCheck,
         isCheckmate: isCheckmateState,
         isStalemate: isStalemateState,
         isThreefoldRepetition: isThreefoldRepetition,
         isInsufficientMaterial: isInsufficientMaterialState,
-      };
+      });
 
       if (game.status === "completed") {
         const ratingChanges = await notifyGameEndedFast(
@@ -1223,6 +1223,9 @@ router.post(
           board: newBoard,
           currentTurn: game.currentTurn,
           timeRemaining: game.timeRemaining,
+          syncVersion: moveData.syncVersion,
+          ply: moveData.ply,
+          serverNow: moveData.serverNow,
           isInCheck,
           isCheckmate: isCheckmateState,
           isStalemate: isStalemateState,

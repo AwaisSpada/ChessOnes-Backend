@@ -178,6 +178,19 @@ const gameSchema = new mongoose.Schema(
         default: 600000,
       },
     },
+    /**
+     * Monotonic sync counter for live human games (move / end / force sync).
+     * Clients use this to detect gaps and resync.
+     */
+    syncVersion: {
+      type: Number,
+      default: 0,
+    },
+    /** When live clocks should start draining (optional; else first move anchors). */
+    clockStartedAt: {
+      type: Date,
+      default: null,
+    },
     botDifficulty: {
       type: String,
       enum: ["easy", "medium", "hard"],

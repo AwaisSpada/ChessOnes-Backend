@@ -1064,6 +1064,93 @@ io.on("connection", (socket) => {
 
     // Don't reset ready state on join-game - only reset on actual disconnect/reconnect
     // This prevents the ready state from being reset when the frontend effect runs multiple times
+
+    // Live sync: push authoritative snapshot to the joining socket (Plan B).
+    void (async () => {
+      try {
+        const {
+          isLiveHumanGame,
+          getEffectiveTimeRemaining,
+          withLiveSync,
+        } = require("./utils/liveGameSync");
+        const Game = require("./models/Game");
+        let game = await Game.findOne({ gameId }).lean();
+        if (!game || !isLiveHumanGame(game)) return;
+
+        // Matchmaking: both seats filled → clocks should drain even before first move.
+        if (
+          game.type === "multiplayer" &&
+          game.status === "active" &&
+          game.players?.white &&
+          game.players?.black &&
+          !game.clockStartedAt
+        ) {
+          await Game.updateOne(
+            {
+              gameId,
+              status: "active",
+              $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
+            },
+            { $set: { clockStartedAt: new Date() } }
+          );
+          game = { ...game, clockStartedAt: new Date() };
+        }
+
+        const timeRemaining = getEffectiveTimeRemaining(game);
+        const snapshot = withLiveSync(
+          game,
+          {
+            gameId,
+            board: game.board,
+            moves: game.moves || [],
+            players: game.players,
+            result: game.result,
+            timeControl: game.timeControl,
+            type: game.type,
+            category: game.category,
+            isRated: game.isRated,
+          },
+          { timeRemaining }
+        );
+        socket.emit("game:snapshot", snapshot);
+      } catch (err) {
+        console.error("[live-sync] join-game snapshot failed:", gameId, err?.message || err);
+      }
+    })();
+  });
+
+  socket.on("game:sync", async (payload) => {
+    try {
+      const gameId = payload?.gameId;
+      if (!gameId) return;
+      const {
+        isLiveHumanGame,
+        getEffectiveTimeRemaining,
+        withLiveSync,
+      } = require("./utils/liveGameSync");
+      const Game = require("./models/Game");
+      const game = await Game.findOne({ gameId }).lean();
+      if (!game || !isLiveHumanGame(game)) return;
+      const timeRemaining = getEffectiveTimeRemaining(game);
+      const snapshot = withLiveSync(
+        game,
+        {
+          gameId,
+          board: game.board,
+          moves: game.moves || [],
+          players: game.players,
+          result: game.result,
+          timeControl: game.timeControl,
+          type: game.type,
+          category: game.category,
+          isRated: game.isRated,
+        },
+        { timeRemaining }
+      );
+      socket.emit("game:snapshot", snapshot);
+    } catch (err) {
+      console.error("[live-sync] game:sync failed:", err?.message || err);
+    }
   });
 
   socket.on("game:heartbeat", (payload) => {
@@ -1408,6 +1495,23 @@ io.on("connection", (socket) => {
       }
 
       gameReadyState.set(gameId, state);
+
+      // Plan B: start server clocks when both players are ready (friend + multiplayer).
+      if (allReady) {
+        try {
+          await Game.updateOne(
+            {
+              gameId,
+              status: "active",
+              type: { $in: ["multiplayer", "friend"] },
+              $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
+            },
+            { $set: { clockStartedAt: new Date() } }
+          );
+        } catch (clockErr) {
+          console.error("[live-sync] clockStartedAt on ready failed:", clockErr?.message || clockErr);
+        }
+      }
 
       const readyPayload = {
         gameId,
