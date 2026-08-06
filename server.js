@@ -1497,8 +1497,15 @@ io.on("connection", (socket) => {
       gameReadyState.set(gameId, state);
 
       // Plan B: start server clocks when both players are ready (friend + multiplayer).
+      // Broadcast the shared epoch + effective clocks so both clients start/abandon in sync.
+      let clockStartedAt = null;
+      let effectiveTimeRemaining = null;
+      let serverNow = Date.now();
       if (allReady) {
         try {
+          const {
+            getEffectiveTimeRemaining,
+          } = require("./utils/liveGameSync");
           await Game.updateOne(
             {
               gameId,
@@ -1508,6 +1515,16 @@ io.on("connection", (socket) => {
             },
             { $set: { clockStartedAt: new Date() } }
           );
+          const live = await Game.findOne({ gameId })
+            .select(
+              "clockStartedAt timeRemaining timeControl currentTurn moves status type"
+            )
+            .lean();
+          if (live) {
+            clockStartedAt = live.clockStartedAt || null;
+            serverNow = Date.now();
+            effectiveTimeRemaining = getEffectiveTimeRemaining(live, serverNow);
+          }
         } catch (clockErr) {
           console.error("[live-sync] clockStartedAt on ready failed:", clockErr?.message || clockErr);
         }
@@ -1519,6 +1536,15 @@ io.on("connection", (socket) => {
         ready: !!ready,
         state,
         allReady,
+        ...(allReady
+          ? {
+              clockStartedAt,
+              serverNow,
+              ...(effectiveTimeRemaining
+                ? { timeRemaining: effectiveTimeRemaining }
+                : {}),
+            }
+          : {}),
       };
 
       io.to(gameId).emit("ready:update", readyPayload);
