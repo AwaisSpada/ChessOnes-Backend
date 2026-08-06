@@ -1077,24 +1077,9 @@ io.on("connection", (socket) => {
         let game = await Game.findOne({ gameId }).lean();
         if (!game || !isLiveHumanGame(game)) return;
 
-        // Matchmaking: both seats filled → clocks should drain even before first move.
-        if (
-          game.type === "multiplayer" &&
-          game.status === "active" &&
-          game.players?.white &&
-          game.players?.black &&
-          !game.clockStartedAt
-        ) {
-          await Game.updateOne(
-            {
-              gameId,
-              status: "active",
-              $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
-            },
-            { $set: { clockStartedAt: new Date() } }
-          );
-          game = { ...game, clockStartedAt: new Date() };
-        }
+        // Clocks must NOT start on seat fill — that burns white during page render.
+        // clockStartedAt is set only when both clients emit player-ready (allReady)
+        // after their boards have painted (see frontend auto-ready on !loading).
 
         const timeRemaining = getEffectiveTimeRemaining(game);
         const snapshot = withLiveSync(
