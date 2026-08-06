@@ -1091,9 +1091,9 @@ router.post(
       }
 
       bumpSyncVersion(game);
-      await game.save();
 
-      // Emit move to other players via Socket.IO
+      // Chess.com/Lichess-style: fan out the move to opponents BEFORE Mongo write
+      // so the other board paints without waiting on DB latency.
       const moveData = withLiveSync(game, {
         gameId: req.params.gameId,
         move,
@@ -1105,18 +1105,24 @@ router.post(
         isInsufficientMaterial: isInsufficientMaterialState,
       });
 
+      const io = req.app.get("io");
+      if (game.status !== "completed") {
+        io.to(req.params.gameId).emit("move-made", moveData);
+      }
+
+      await game.save();
+
       if (game.status === "completed") {
         const ratingChanges = await notifyGameEndedFast(
           game.gameId,
           game.result,
-          req.app.get("io")
+          io
         );
         moveData.gameEnded = true;
         moveData.result = game.result;
         moveData.ratingChanges = ratingChanges;
+        io.to(req.params.gameId).emit("move-made", moveData);
       }
-
-      req.app.get("io").to(req.params.gameId).emit("move-made", moveData);
 
       // Calculate advantage score for advantage bar (async, non-blocking)
       let advantageScore = 0;
