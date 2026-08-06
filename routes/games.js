@@ -20,7 +20,6 @@ const {
   isInsufficientMaterial,
   getAllLegalMoves,
 } = require("../utils/chess-engine");
-const { applyFischerIncrementToMover } = require("../utils/clockIncrement");
 const { canUserSpectateArenaGame } = require("../utils/arenaSpectateAccess");
 const {
   isLiveHumanGame,
@@ -30,10 +29,30 @@ const {
   bumpSyncVersion,
   withLiveSync,
   buildLiveSyncFields,
-} = require("../utils/liveGameSync");
+  applyFischerIncrementToMover,
+} = require("../services/live/ClockManager");
+const { calculateMoveTime } = require("../services/live/MoveProcessor");
 
 const router = express.Router();
 
+/**
+ * Phase 1 only: keep LiveGame RAM in sync after HTTP remains authoritative.
+ * Does not change move validation, emit payload, or Mongo write path.
+ */
+function maybeSyncLiveMemoryFromGame(game) {
+  try {
+    const { LIVE_MEMORY_SNAPSHOT } = require("../services/live/flags");
+    if (!LIVE_MEMORY_SNAPSHOT) return;
+    if (!game || !isLiveHumanGame(game)) return;
+    require("../services/live/LiveGameManager").syncFromAuthoritativeDoc(game);
+  } catch (err) {
+    console.warn(
+      "[live-memory] sync after move failed:",
+      game?.gameId,
+      err?.message || err
+    );
+  }
+}
 // Evaluation history storage per game (for smoothing and momentum tracking)
 const gameEvaluationHistory = new Map(); // gameId -> { previousEval, previousSign, confirmCount, wasInCheck, checkEscapeConfirmCount, pendingEvaluation, kingUnderAttackCounter, unchangedEvalCount }
 
@@ -246,6 +265,13 @@ function scheduleGameCompletionSideEffects(gameId, result, io, options = {}) {
   });
 }
 
+// Phase 3: TimeoutManager / AbandonManager reuse the same end hooks as HTTP.
+require("../services/live/liveGameEnd").init(null, {
+  applyRatingsForGameEnd,
+  emitGameEnded,
+  scheduleGameCompletionSideEffects,
+});
+
 // Material calculation removed - using pure Stockfish evaluation only
 
 /**
@@ -381,43 +407,6 @@ function processEvaluationForAdvantageBar(rawEval, gameId, gameStatus = 'active'
   };
 }
 
-function calculateMoveTime({
-  previousClockMs,
-  updatedClockMs,
-  previousMoveTimestamp,
-  gameCreatedAt,
-}) {
-  let moveTimeMs = null;
-  if (
-    typeof previousClockMs === "number" &&
-    typeof updatedClockMs === "number" &&
-    Number.isFinite(previousClockMs) &&
-    Number.isFinite(updatedClockMs)
-  ) {
-    moveTimeMs = Math.max(0, previousClockMs - updatedClockMs);
-  }
-
-  if (moveTimeMs === null || moveTimeMs === 0) {
-    const referenceTs = previousMoveTimestamp || gameCreatedAt;
-    if (referenceTs) {
-      const delta = Date.now() - new Date(referenceTs).getTime();
-      if (Number.isFinite(delta) && delta > 0) {
-        moveTimeMs = delta;
-      }
-    }
-  }
-
-  if (moveTimeMs === null || !Number.isFinite(moveTimeMs)) {
-    return { moveTimeMs: null, moveTimeSeconds: null };
-  }
-
-  const clamped = Math.max(0, Math.round(moveTimeMs));
-  return {
-    moveTimeMs: clamped,
-    moveTimeSeconds: Number((clamped / 1000).toFixed(2)),
-  };
-}
-
 // @route   POST /api/games/create
 // @desc    Create a new game
 // @access  Private
@@ -537,21 +526,42 @@ router.get("/:gameId", auth, async (req, res) => {
     }
 
     // Compute effective timeRemaining based on last update so timers stay correct on reload
-    const effectiveTimeRemaining = getEffectiveTimeRemaining(game);
-    const syncFields = buildLiveSyncFields(game, {
+    // Phase 1: when LIVE_MEMORY_SNAPSHOT is on, active live-human state comes from LiveGame
+    // (hydration policy §4.3). Players/enrichment still from this Mongo populate.
+    let effectiveTimeRemaining = getEffectiveTimeRemaining(game);
+    let syncFields = buildLiveSyncFields(game, {
       timeRemaining: effectiveTimeRemaining,
     });
+    let gamePayload = {
+      ...game.toObject(),
+      timeRemaining: effectiveTimeRemaining,
+      syncVersion: syncFields.syncVersion,
+      ply: syncFields.ply,
+      serverNow: syncFields.serverNow,
+    };
+
+    const { LIVE_MEMORY_SNAPSHOT } = require("../services/live/flags");
+    if (LIVE_MEMORY_SNAPSHOT && isLiveHumanGame(game)) {
+      const LiveGameManager = require("../services/live/LiveGameManager");
+      let live = LiveGameManager.get(game.gameId);
+      if (!live && game.status === "active") {
+        live = LiveGameManager.createFromDoc(game);
+      }
+      if (live) {
+        const apiState = live.toAPIStateFields();
+        gamePayload = {
+          ...gamePayload,
+          ...apiState,
+          // Keep populated player documents from Mongo for API consumers.
+          players: gamePayload.players,
+        };
+      }
+    }
 
     res.json({
       success: true,
       data: {
-        game: {
-          ...game.toObject(),
-          timeRemaining: effectiveTimeRemaining,
-          syncVersion: syncFields.syncVersion,
-          ply: syncFields.ply,
-          serverNow: syncFields.serverNow,
-        },
+        game: gamePayload,
       },
     });
   } catch (error) {
@@ -562,6 +572,146 @@ router.get("/:gameId", auth, async (req, res) => {
     });
   }
 });
+
+/**
+ * Friend/bot advantage-bar eval after a successful active move (non-blocking).
+ * Shared by legacy HTTP move path and Phase 2 LiveGame adapter.
+ */
+function scheduleAdvantageScoreAfterMove({
+  req,
+  gameId,
+  gameType,
+  gameStatus,
+  newBoard,
+  nextTurn,
+  moves,
+  wasInCheckBeforeMove,
+  isInCheck,
+}) {
+  if (!((gameType === "bot" || gameType === "friend") && gameStatus === "active")) {
+    return;
+  }
+
+  const { getPositionEvaluation, boardToFEN } = require("../utils/stockfish");
+  const fen = boardToFEN(newBoard, nextTurn, moves || []);
+  const currentGameStatus = gameStatus;
+  const playerWhoJustMoved = nextTurn === "white" ? "black" : "white";
+  console.log(
+    `[AdvantageBar] 🎯 Player move made - Game: ${gameId}, Type: ${gameType}`
+  );
+  console.log(`[AdvantageBar]    Move details:`);
+  console.log(
+    `[AdvantageBar]      - Player who just moved: ${playerWhoJustMoved.toUpperCase()}`
+  );
+  console.log(
+    `[AdvantageBar]      - Current turn (after move): ${nextTurn}`
+  );
+  console.log(
+    `[AdvantageBar]      - Next turn (who will move): ${nextTurn.toUpperCase()}`
+  );
+  console.log(`[AdvantageBar]      - Move number: ${moves?.length || 0}`);
+  console.log(`[AdvantageBar]    FEN: ${fen} (${nextTurn} to move)`);
+  console.log(
+    `[AdvantageBar]    ⚠️  Evaluating from ${nextTurn}'s perspective (who will move next), then converting to White's perspective`
+  );
+  console.log(`[AdvantageBar]    Requesting evaluation...`);
+
+  const wasInCheckBefore = wasInCheckBeforeMove;
+  const isNowInCheck = isInCheck;
+  const evaluationDelay = wasInCheckBefore && !isNowInCheck ? 300 : 0;
+
+  setTimeout(() => {
+    Game.findOne({ gameId })
+      .then((currentGame) => {
+        const status = currentGame ? currentGame.status : currentGameStatus;
+        if (status !== "active") {
+          console.log(
+            `[AdvantageBar] 🛑 Game ended (status: ${status}), ignoring late evaluation result`
+          );
+          return;
+        }
+
+        return getPositionEvaluation(fen)
+          .then((rawEval) => {
+            return Game.findOne({ gameId }).then((finalGameCheck) => {
+              const finalGameStatus = finalGameCheck
+                ? finalGameCheck.status
+                : status;
+              if (finalGameStatus !== "active") {
+                console.log(
+                  `[AdvantageBar] 🛑 Game ended during evaluation (status: ${finalGameStatus}), ignoring result`
+                );
+                return;
+              }
+
+              console.log(
+                `[AdvantageBar] 📊 Raw Stockfish evaluation (after player move):`
+              );
+              console.log(
+                `[AdvantageBar]    Raw centipawns: ${rawEval.centipawns}cp`
+              );
+              console.log(`[AdvantageBar]    Is mate: ${rawEval.isMate}`);
+              console.log(`[AdvantageBar]    Mate moves: ${rawEval.mateMoves}`);
+              console.log(`[AdvantageBar]    Side to move: ${nextTurn}`);
+              console.log(
+                `[AdvantageBar]    ⚠️  Stockfish evaluated from ${nextTurn}'s perspective`
+              );
+              console.log(
+                `[AdvantageBar]    📝 Interpretation: ${
+                  rawEval.centipawns > 0
+                    ? `Positive eval = ${nextTurn} has advantage`
+                    : rawEval.centipawns < 0
+                      ? `Negative eval = ${
+                          nextTurn === "white" ? "Black" : "White"
+                        } has advantage`
+                      : "Equal position"
+                }`
+              );
+
+              const processedEval = processEvaluationForAdvantageBar(
+                rawEval,
+                gameId,
+                finalGameStatus,
+                nextTurn
+              );
+
+              const evalDisplay =
+                processedEval.mate !== null
+                  ? `Mate ${
+                      processedEval.mate > 0 ? "White" : "Black"
+                    } in ${Math.abs(processedEval.mate)}`
+                  : `${processedEval.score}cp (${(
+                      processedEval.score / 100
+                    ).toFixed(1)} pawns)`;
+              console.log(
+                `[AdvantageBar] 📡 Emitting advantage-score event to game ${gameId}: ${evalDisplay}`
+              );
+              console.log(`[AdvantageBar]    Processed eval details:`, {
+                score: processedEval.score,
+                mate: processedEval.mate,
+              });
+              req.app.get("io").to(gameId).emit("advantage-score", {
+                gameId,
+                score: processedEval.score,
+                mate: processedEval.mate,
+              });
+            });
+          })
+          .catch((err) => {
+            console.error(
+              `[AdvantageBar] ❌ Evaluation failed for game ${gameId}:`,
+              err.message
+            );
+          });
+      })
+      .catch((err) => {
+        console.error(
+          `[AdvantageBar] ❌ Failed to check game status for ${gameId}:`,
+          err.message
+        );
+      });
+  }, evaluationDelay);
+}
 
 // @route   POST /api/games/:gameId/move
 // @desc    Make a move in the game
@@ -587,6 +737,27 @@ router.post(
           message: "Invalid move data",
           errors: errors.array(),
         });
+      }
+
+      // Phase 2: when LIVE_HTTP_VIA_MANAGER is on, live-human moves go through
+      // LiveGame + MoveProcessor + PersistenceQueue. Flag off → exact legacy path.
+      {
+        const { LIVE_HTTP_VIA_MANAGER } = require("../services/live/flags");
+        if (LIVE_HTTP_VIA_MANAGER) {
+          const {
+            tryHandleHttpMove,
+          } = require("../services/live/httpMoveAdapter");
+          const handled = await tryHandleHttpMove(req, res, {
+            applyRatingsForGameEnd,
+            emitGameEnded,
+            scheduleGameCompletionSideEffects,
+            clearEvaluationHistory: (id) => {
+              gameEvaluationHistory.delete(id);
+            },
+            scheduleAdvantageScoreAfterMove,
+          });
+          if (handled) return;
+        }
       }
 
       const { from, to, piece, captured, notation, timeRemaining, inCheck } =
@@ -671,6 +842,7 @@ router.post(
             timedOut: true,
           });
           io.to(req.params.gameId).emit("move-made", timeoutPayload);
+          maybeSyncLiveMemoryFromGame(game);
           await emitGameEnded(game.gameId, game.result, io, ratingChanges);
           scheduleGameCompletionSideEffects(game.gameId, game.result, io, {
             skipRatings: true,
@@ -853,6 +1025,7 @@ router.post(
           });
 
           io.to(req.params.gameId).emit("move-made", terminalPayload);
+          maybeSyncLiveMemoryFromGame(game);
           await emitGameEnded(game.gameId, game.result, io, ratingChanges);
           scheduleGameCompletionSideEffects(game.gameId, game.result, io, {
             skipRatings: true,
@@ -1062,6 +1235,7 @@ router.post(
         });
 
         io.to(req.params.gameId).emit("move-made", terminalMoveData);
+        maybeSyncLiveMemoryFromGame(game);
         await emitGameEnded(game.gameId, game.result, io, ratingChanges);
         scheduleGameCompletionSideEffects(game.gameId, game.result, io, {
           skipRatings: true,
@@ -1103,145 +1277,108 @@ router.post(
         isStalemate: isStalemateState,
         isThreefoldRepetition: isThreefoldRepetition,
         isInsufficientMaterial: isInsufficientMaterialState,
+        // Black's first-move abandon window starts when White's ply lands.
+        turnStartedAt:
+          move?.timestamp instanceof Date
+            ? move.timestamp.toISOString()
+            : move?.timestamp || null,
       });
 
       const io = req.app.get("io");
       if (game.status !== "completed") {
         io.to(req.params.gameId).emit("move-made", moveData);
       }
+      maybeSyncLiveMemoryFromGame(game);
 
-      await game.save();
+      // Live human: ACK mover immediately — don't block HTTP on Mongo write.
+      // Opponent already received socket fan-out above.
+      let liveMoveAckedEarly = false;
+      if (liveHuman && game.status !== "completed") {
+        liveMoveAckedEarly = true;
+        res.json({
+          success: true,
+          message: "Move made successfully",
+          data: {
+            move,
+            board: newBoard,
+            currentTurn: game.currentTurn,
+            timeRemaining: game.timeRemaining,
+            syncVersion: moveData.syncVersion,
+            ply: moveData.ply,
+            serverNow: moveData.serverNow,
+            turnStartedAt:
+              move?.timestamp instanceof Date
+                ? move.timestamp.toISOString()
+                : move?.timestamp || null,
+            isInCheck,
+            isCheckmate: isCheckmateState,
+            isStalemate: isStalemateState,
+            isThreefoldRepetition: isThreefoldRepetition,
+            isInsufficientMaterial: isInsufficientMaterialState,
+            gameEnded: false,
+            result: null,
+            advantageScore: 0,
+          },
+        });
+        game.save().catch((saveErr) => {
+          console.error(
+            `[live-move] persist failed after emit game=${req.params.gameId}:`,
+            saveErr?.message || saveErr
+          );
+        });
+      } else {
+        await game.save();
 
-      if (game.status === "completed") {
-        const ratingChanges = await notifyGameEndedFast(
-          game.gameId,
-          game.result,
-          io
-        );
-        moveData.gameEnded = true;
-        moveData.result = game.result;
-        moveData.ratingChanges = ratingChanges;
-        io.to(req.params.gameId).emit("move-made", moveData);
+        if (game.status === "completed") {
+          const ratingChanges = await notifyGameEndedFast(
+            game.gameId,
+            game.result,
+            io
+          );
+          moveData.gameEnded = true;
+          moveData.result = game.result;
+          moveData.ratingChanges = ratingChanges;
+          io.to(req.params.gameId).emit("move-made", moveData);
+        }
       }
 
       // Calculate advantage score for advantage bar (async, non-blocking)
       let advantageScore = 0;
-      if ((game.type === "bot" || game.type === "friend") && game.status === "active") {
-        // Get evaluation asynchronously - don't block response
-        const { getPositionEvaluation, boardToFEN } = require("../utils/stockfish");
-        const fen = boardToFEN(newBoard, nextTurn, game.moves);
-        
-        // CRITICAL: Capture game status before async operations
-        const currentGameStatus = game.status;
-        
-        const playerWhoJustMoved = game.currentTurn === "white" ? "black" : "white"; // The player who just made the move
-        console.log(`[AdvantageBar] 🎯 Player move made - Game: ${req.params.gameId}, Type: ${game.type}`);
-        console.log(`[AdvantageBar]    Move details:`);
-        console.log(`[AdvantageBar]      - Player who just moved: ${playerWhoJustMoved.toUpperCase()}`);
-        console.log(`[AdvantageBar]      - Current turn (after move): ${game.currentTurn}`);
-        console.log(`[AdvantageBar]      - Next turn (who will move): ${nextTurn.toUpperCase()}`);
-        console.log(`[AdvantageBar]      - Move number: ${game.moves?.length || 0}`);
-        console.log(`[AdvantageBar]    FEN: ${fen} (${nextTurn} to move)`);
-        console.log(`[AdvantageBar]    ⚠️  Evaluating from ${nextTurn}'s perspective (who will move next), then converting to White's perspective`);
-        console.log(`[AdvantageBar]    Requesting evaluation...`);
-        
-        // Track check state for evaluation filtering
-        const wasInCheckBefore = wasInCheckBeforeMove;
-        const isNowInCheck = isInCheck;
-        
-        // Optional stabilization: Delay evaluation by ~300ms after check resolution
-        const evaluationDelay = wasInCheckBefore && !isNowInCheck ? 300 : 0;
-        
-        setTimeout(() => {
-          // Check game status again inside setTimeout (game may have ended)
-          Game.findOne({ gameId: req.params.gameId })
-            .then((currentGame) => {
-              const gameStatus = currentGame ? currentGame.status : currentGameStatus;
-              
-              // CRITICAL: Check game status before evaluation - ignore late async results
-              if (gameStatus !== 'active') {
-                console.log(`[AdvantageBar] 🛑 Game ended (status: ${gameStatus}), ignoring late evaluation result`);
-                return;
-              }
-              
-              return getPositionEvaluation(fen)
-                .then((rawEval) => {
-                  // Double-check game status after async evaluation completes
-                  return Game.findOne({ gameId: req.params.gameId })
-                    .then((finalGameCheck) => {
-                      const finalGameStatus = finalGameCheck ? finalGameCheck.status : gameStatus;
-                      
-                      // Ignore late async eval results if game has ended
-                      if (finalGameStatus !== 'active') {
-                        console.log(`[AdvantageBar] 🛑 Game ended during evaluation (status: ${finalGameStatus}), ignoring result`);
-                        return;
-                      }
-                      
-                      // DEBUG: Log raw evaluation from Stockfish
-                      console.log(`[AdvantageBar] 📊 Raw Stockfish evaluation (after player move):`);
-                      console.log(`[AdvantageBar]    Raw centipawns: ${rawEval.centipawns}cp`);
-                      console.log(`[AdvantageBar]    Is mate: ${rawEval.isMate}`);
-                      console.log(`[AdvantageBar]    Mate moves: ${rawEval.mateMoves}`);
-                      console.log(`[AdvantageBar]    Side to move: ${nextTurn}`);
-                      console.log(`[AdvantageBar]    ⚠️  Stockfish evaluated from ${nextTurn}'s perspective`);
-                      console.log(`[AdvantageBar]    📝 Interpretation: ${rawEval.centipawns > 0 ? `Positive eval = ${nextTurn} has advantage` : rawEval.centipawns < 0 ? `Negative eval = ${nextTurn === 'white' ? 'Black' : 'White'} has advantage` : 'Equal position'}`);
-                      
-                      // Post-process evaluation - pure engine evaluation only
-                      // CRITICAL: Pass sideToMove to ensure evaluation is always from White's perspective
-                      const processedEval = processEvaluationForAdvantageBar(
-                        rawEval, 
-                        req.params.gameId, 
-                        finalGameStatus,
-                        nextTurn // sideToMove - the side to move in the position
-                      );
-                  
-                      // Emit evaluation via WebSocket for real-time update
-                      const evalDisplay = processedEval.mate !== null
-                        ? `Mate ${processedEval.mate > 0 ? 'White' : 'Black'} in ${Math.abs(processedEval.mate)}` 
-                        : `${processedEval.score}cp (${(processedEval.score / 100).toFixed(1)} pawns)`;
-                      console.log(`[AdvantageBar] 📡 Emitting advantage-score event to game ${req.params.gameId}: ${evalDisplay}`);
-                      console.log(`[AdvantageBar]    Processed eval details:`, {
-                        score: processedEval.score,
-                        mate: processedEval.mate
-                      });
-                      req.app.get("io").to(req.params.gameId).emit("advantage-score", {
-                        gameId: req.params.gameId,
-                        score: processedEval.score,
-                        mate: processedEval.mate,
-                      });
-                    });
-                })
-                .catch((err) => {
-                  console.error(`[AdvantageBar] ❌ Evaluation failed for game ${req.params.gameId}:`, err.message);
-                });
-            })
-            .catch((err) => {
-              console.error(`[AdvantageBar] ❌ Failed to check game status for ${req.params.gameId}:`, err.message);
-            });
-        }, evaluationDelay);
-      }
-
-      res.json({
-        success: true,
-        message: "Move made successfully",
-        data: {
-          move,
-          board: newBoard,
-          currentTurn: game.currentTurn,
-          timeRemaining: game.timeRemaining,
-          syncVersion: moveData.syncVersion,
-          ply: moveData.ply,
-          serverNow: moveData.serverNow,
-          isInCheck,
-          isCheckmate: isCheckmateState,
-          isStalemate: isStalemateState,
-          isThreefoldRepetition: isThreefoldRepetition,
-          isInsufficientMaterial: isInsufficientMaterialState,
-          gameEnded: game.status === "completed",
-          result: game.status === "completed" ? game.result : null,
-          advantageScore, // Will be 0 initially, updated via WebSocket
-        },
+      scheduleAdvantageScoreAfterMove({
+        req,
+        gameId: req.params.gameId,
+        gameType: game.type,
+        gameStatus: game.status,
+        newBoard,
+        nextTurn,
+        moves: game.moves,
+        wasInCheckBeforeMove,
+        isInCheck,
       });
+
+      if (!liveMoveAckedEarly) {
+        res.json({
+          success: true,
+          message: "Move made successfully",
+          data: {
+            move,
+            board: newBoard,
+            currentTurn: game.currentTurn,
+            timeRemaining: game.timeRemaining,
+            syncVersion: moveData.syncVersion,
+            ply: moveData.ply,
+            serverNow: moveData.serverNow,
+            isInCheck,
+            isCheckmate: isCheckmateState,
+            isStalemate: isStalemateState,
+            isThreefoldRepetition: isThreefoldRepetition,
+            isInsufficientMaterial: isInsufficientMaterialState,
+            gameEnded: game.status === "completed",
+            result: game.status === "completed" ? game.result : null,
+            advantageScore, // Will be 0 initially, updated via WebSocket
+          },
+        });
+      }
 
       // If this is a bot game and it's now the bot's turn, trigger bot move
       if (
@@ -2078,6 +2215,39 @@ router.post(
         });
       }
 
+      // Phase 3: when server timeouts armed, already-ended is idempotent success.
+      {
+        const { LIVE_SERVER_TIMEOUTS } = require("../services/live/flags");
+        if (LIVE_SERVER_TIMEOUTS) {
+          const LiveGameManager = require("../services/live/LiveGameManager");
+          const live = LiveGameManager.get(req.params.gameId);
+          if (live && live.status !== "active") {
+            return res.json({
+              success: true,
+              message: "Game already ended",
+              alreadyEnded: true,
+              data: {
+                result: live.result,
+                status: live.status,
+                syncVersion: live.syncVersion,
+              },
+            });
+          }
+          if (game.status !== "active") {
+            return res.json({
+              success: true,
+              message: "Game already ended",
+              alreadyEnded: true,
+              data: {
+                result: game.result,
+                status: game.status,
+                syncVersion: game.syncVersion,
+              },
+            });
+          }
+        }
+      }
+
       // If category is missing, set it based on timeControl (for older games or migration)
       if (!game.category && game.timeControl) {
         const { setGameCategory } = require("../services/ratingEngine");
@@ -2091,6 +2261,29 @@ router.post(
           success: false,
           message: "Game is already ended",
         });
+      }
+
+      // Per-side first-move abandon (White ply0, Black ply1). After both moved → reject.
+      if (result.reason === "first-move-abandon") {
+        const ply = Array.isArray(game.moves) ? game.moves.length : 0;
+        if (ply >= 2) {
+          return res.status(409).json({
+            success: false,
+            message: "Cannot abandon: both players have moved",
+          });
+        }
+        if (ply === 0 && game.currentTurn !== "white") {
+          return res.status(409).json({
+            success: false,
+            message: "Cannot abandon: not White's opening turn",
+          });
+        }
+        if (ply === 1 && game.currentTurn !== "black") {
+          return res.status(409).json({
+            success: false,
+            message: "Cannot abandon: not Black's first-move turn",
+          });
+        }
       }
 
       // Check if user is part of this game
@@ -2133,6 +2326,29 @@ router.post(
       game.status = nextStatus;
       game.result = result;
       gameEvaluationHistory.delete(req.params.gameId);
+
+      // Keep LiveGame + timers coherent when HTTP /end wins.
+      try {
+        const { LIVE_MEMORY_SNAPSHOT } = require("../services/live/flags");
+        if (LIVE_MEMORY_SNAPSHOT) {
+          const LiveGameManager = require("../services/live/LiveGameManager");
+          const live = LiveGameManager.get(game.gameId);
+          if (live) {
+            live.status = nextStatus;
+            live.result = result;
+            if (typeof live.syncVersion === "number") {
+              require("../services/live/ClockAuthority").bumpSyncVersion(live);
+            }
+            require("../services/live/ClockScheduler").cancel(game.gameId);
+          }
+        }
+      } catch (syncErr) {
+        console.warn(
+          "[live] /end LiveGame sync failed:",
+          game.gameId,
+          syncErr?.message || syncErr
+        );
+      }
 
       const io = req.app.get("io");
 

@@ -225,6 +225,28 @@ const gameRoomUsers = new Map(); // gameId -> Set of userIds
 // Track per-game ready state in memory: Map<gameId, { [userId]: boolean }>
 const gameReadyState = new Map();
 
+// Phase 0: flags loaded (all default false; unused for branching until later phases).
+const liveFlags = require("./services/live/flags");
+void liveFlags;
+
+const {
+  init: initReconnectManager,
+  DISCONNECT_GAME_END_GRACE_MS,
+  DISCONNECT_ARENA_GAME_END_GRACE_MS,
+  cancelPendingDisconnectGameEnd,
+  cancelPendingDisconnectEndsForUser,
+  emitPlayerReconnected,
+  emitPlayerDisconnected,
+  clearGameHeartbeat,
+  touchGameHeartbeat,
+  scheduleDisconnectGameEnd,
+} = require("./services/live/ReconnectManager");
+
+initReconnectManager(io);
+
+// Phase 3: wire Socket.IO into server-authoritative end helpers (flag/abandon).
+require("./services/live/liveGameEnd").init(io);
+
 function readyFlagForPlayer(state, playerId) {
   if (!playerId) return false;
   const pid = String(playerId);
@@ -242,108 +264,6 @@ function buildCanonicalReadyState(rawState, whiteId, blackId) {
     [w]: readyFlagForPlayer(rawState, w),
     [b]: readyFlagForPlayer(rawState, b),
   };
-}
-
-/** Brief disconnect (refresh / tab switch) must not instantly forfeit active games. */
-const DISCONNECT_GAME_END_GRACE_MS = 45_000;
-const DISCONNECT_ARENA_GAME_END_GRACE_MS = 60_000;
-/** `${userId}:${gameId}` -> timeout handle */
-const pendingDisconnectGameEnds = new Map();
-
-/** @returns {boolean} true if a pending auto-forfeit was cancelled (player is reconnecting). */
-function cancelPendingDisconnectGameEnd(userId, gameId) {
-  if (!userId || !gameId) return false;
-  const key = `${String(userId)}:${String(gameId)}`;
-  const handle = pendingDisconnectGameEnds.get(key);
-  if (handle) {
-    clearTimeout(handle);
-    pendingDisconnectGameEnds.delete(key);
-    return true;
-  }
-  return false;
-}
-
-/** @returns {string[]} gameIds that had a pending disconnect end cancelled. */
-function cancelPendingDisconnectEndsForUser(userId) {
-  if (!userId) return [];
-  const prefix = `${String(userId)}:`;
-  const resumedGameIds = [];
-  for (const [key, handle] of pendingDisconnectGameEnds.entries()) {
-    if (key.startsWith(prefix)) {
-      clearTimeout(handle);
-      pendingDisconnectGameEnds.delete(key);
-      resumedGameIds.push(key.slice(prefix.length));
-    }
-  }
-  return resumedGameIds;
-}
-
-/** Notify opponents that a player is back in the game room (mobile + web presence UI). */
-function emitPlayerReconnected(io, gameId, userId) {
-  if (!gameId || !userId) return;
-  const payload = { gameId: String(gameId), userId: String(userId), connected: true };
-  io.to(String(gameId)).emit("player-reconnected", payload);
-  io.to(String(gameId)).emit("connection-status", {
-    ...payload,
-    status: "online",
-  });
-}
-
-function emitPlayerDisconnected(io, gameId, userId) {
-  if (!gameId || !userId) return;
-  const payload = { gameId: String(gameId), userId: String(userId), connected: false };
-  io.to(String(gameId)).emit("player-disconnected", payload);
-  io.to(String(gameId)).emit("connection-status", {
-    ...payload,
-    status: "reconnecting",
-  });
-}
-
-/** Live-game heartbeats (opt-in): clients that emit game:heartbeat get ~2s drop detection. */
-const GAME_HEARTBEAT_STALE_MS = 2500;
-/** `${gameId}:${userId}` -> { lastMs, staleNotified } */
-const gameHeartbeats = new Map();
-
-function heartbeatKey(gameId, userId) {
-  return `${String(gameId)}:${String(userId)}`;
-}
-
-function clearGameHeartbeat(gameId, userId) {
-  if (!gameId || !userId) return;
-  gameHeartbeats.delete(heartbeatKey(gameId, userId));
-}
-
-function touchGameHeartbeat(gameId, userId) {
-  if (!gameId || !userId) return;
-  const key = heartbeatKey(gameId, userId);
-  const prev = gameHeartbeats.get(key);
-  gameHeartbeats.set(key, { lastMs: Date.now(), staleNotified: false });
-  // First beat after a stale window → reconnect signal
-  if (prev?.staleNotified) {
-    emitPlayerReconnected(io, gameId, userId);
-  }
-}
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of gameHeartbeats.entries()) {
-    if (!entry || entry.staleNotified) continue;
-    if (now - entry.lastMs < GAME_HEARTBEAT_STALE_MS) continue;
-    const sep = key.lastIndexOf(":");
-    if (sep <= 0) continue;
-    const gameId = key.slice(0, sep);
-    const userId = key.slice(sep + 1);
-    entry.staleNotified = true;
-    gameHeartbeats.set(key, entry);
-    emitPlayerDisconnected(io, gameId, userId);
-    console.log(
-      `📡 Game heartbeat stale → player-disconnected game=${gameId} user=${userId}`
-    );
-  }
-}, 500);
-
-function isUserFullyOffline(userId) {
-  return !isUserOnline(userId);
 }
 
 /** Full presence list of a user's friends, computed from live sockets + privacy. */
@@ -381,153 +301,6 @@ async function broadcastPresence(userId, status) {
   } catch (err) {
     console.error("Presence broadcast error:", err.message);
   }
-}
-
-async function completeGameOnUserDisconnect(game, userId, io) {
-  let winnerColor = null;
-  if (
-    game.players.white &&
-    game.players.white._id.toString() === userId.toString()
-  ) {
-    if (game.players.black) winnerColor = "black";
-  } else if (
-    game.players.black &&
-    game.players.black._id.toString() === userId.toString()
-  ) {
-    if (game.players.white) winnerColor = "white";
-  }
-
-  if (!winnerColor) {
-    game.status = "completed";
-    game.result = {
-      winner: null,
-      reason: "disconnect",
-    };
-  } else {
-    game.status = "completed";
-    game.result = {
-      winner: winnerColor,
-      reason: "disconnect",
-    };
-  }
-
-  await game.save();
-
-  // Elo first, then notify — dialog shows ±delta immediately.
-  let ratingChanges = null;
-  try {
-    if (game.result?.reason !== "first-move-abandon") {
-      const gameForRating = await Game.findOne({ gameId: game.gameId }).populate(
-        "players.white players.black"
-      );
-      if (gameForRating) {
-        if (!gameForRating.category && gameForRating.timeControl) {
-          const { setGameCategory } = require("./services/ratingEngine");
-          setGameCategory(gameForRating);
-          await gameForRating.save();
-        }
-        const { updateGameRatings } = require("./services/updateGameRatings");
-        ratingChanges = (await updateGameRatings(gameForRating, io)) || null;
-      }
-    }
-  } catch (err) {
-    console.error("[Disconnect] rating update failed:", game.gameId, err);
-  }
-
-  io.to(game.gameId).emit("game-ended", {
-    gameId: game.gameId,
-    result: game.result,
-    ...(ratingChanges ? { ratingChanges } : {}),
-  });
-
-  setImmediate(() => {
-    void (async () => {
-      try {
-        const { triggerReviewGeneration } = require("./utils/game-review/game-completion-hook");
-        triggerReviewGeneration(game.gameId);
-      } catch (error) {
-        console.error(`[GameReview] Error triggering review generation hook:`, error);
-      }
-
-      try {
-        const gameTime = Date.now() - game.createdAt.getTime();
-
-        if (game.players.white) {
-          const whiteStats = await Stats.findOne({
-            user: game.players.white._id,
-          });
-          if (whiteStats) {
-            const whiteResult =
-              game.result.winner === "white"
-                ? "win"
-                : game.result.winner === "black"
-                  ? "loss"
-                  : "draw";
-            await whiteStats.updateAfterGame(game.type, whiteResult, gameTime);
-          }
-        }
-
-        if (game.players.black && game.type !== "bot") {
-          const blackStats = await Stats.findOne({
-            user: game.players.black._id,
-          });
-          if (blackStats) {
-            const blackResult =
-              game.result.winner === "black"
-                ? "win"
-                : game.result.winner === "white"
-                  ? "loss"
-                  : "draw";
-            await blackStats.updateAfterGame(game.type, blackResult, gameTime);
-          }
-        }
-
-        if (game.players.white) {
-          const { syncStoredPresenceStatus } = require("./utils/presence");
-          await syncStoredPresenceStatus(game.players.white._id);
-        }
-        if (game.players.black && game.type !== "bot") {
-          const { syncStoredPresenceStatus } = require("./utils/presence");
-          await syncStoredPresenceStatus(game.players.black._id);
-        }
-
-        try {
-          const { syncArenaGameCompletion } = require("./utils/arenaGameCompletionHook");
-          await syncArenaGameCompletion(game.gameId, game.result, io);
-        } catch (err) {
-          console.error("[Arena] disconnect completion sync failed:", game.gameId, err);
-        }
-      } catch (err) {
-        console.error("[Disconnect] post game-ended side effects failed:", game.gameId, err);
-      }
-    })();
-  });
-}
-
-function scheduleDisconnectGameEnd(userId, gameId, graceMs) {
-  cancelPendingDisconnectGameEnd(userId, gameId);
-  const key = `${String(userId)}:${String(gameId)}`;
-  const handle = setTimeout(async () => {
-    pendingDisconnectGameEnds.delete(key);
-    try {
-      if (!isUserFullyOffline(userId)) return;
-      const game = await Game.findOne({
-        gameId: String(gameId),
-        status: "active",
-      }).populate("players.white players.black");
-      if (!game) return;
-      const gameHasMoves =
-        Array.isArray(game.moves) && game.moves.length > 0;
-      if (!gameHasMoves) return;
-      console.log(
-        `⏱️ Ending game ${gameId} after disconnect grace (${graceMs}ms) for user ${userId}`
-      );
-      await completeGameOnUserDisconnect(game, userId, io);
-    } catch (err) {
-      console.error("disconnect grace game end failed:", gameId, err);
-    }
-  }, graceMs);
-  pendingDisconnectGameEnds.set(key, handle);
 }
 
 // ========== MATCHMAKING SYSTEM ==========
@@ -1066,13 +839,26 @@ io.on("connection", (socket) => {
     // This prevents the ready state from being reset when the frontend effect runs multiple times
 
     // Live sync: push authoritative snapshot to the joining socket (Plan B).
+    // Reconnect uses the same join-game path (hydration policy §4.1 / §4.4).
     void (async () => {
       try {
+        const { LIVE_MEMORY_SNAPSHOT } = require("./services/live/flags");
+        if (LIVE_MEMORY_SNAPSHOT) {
+          const LiveGameManager = require("./services/live/LiveGameManager");
+          const memSnapshot = await LiveGameManager.trySnapshot(gameId);
+          if (memSnapshot) {
+            socket.emit("game:snapshot", memSnapshot);
+            const live = LiveGameManager.get(gameId);
+            if (live) live.rescheduleClocks();
+            return;
+          }
+        }
+
         const {
           isLiveHumanGame,
           getEffectiveTimeRemaining,
           withLiveSync,
-        } = require("./utils/liveGameSync");
+        } = require("./services/live/ClockManager");
         const Game = require("./models/Game");
         let game = await Game.findOne({ gameId }).lean();
         if (!game || !isLiveHumanGame(game)) return;
@@ -1108,11 +894,24 @@ io.on("connection", (socket) => {
     try {
       const gameId = payload?.gameId;
       if (!gameId) return;
+
+      const { LIVE_MEMORY_SNAPSHOT } = require("./services/live/flags");
+      if (LIVE_MEMORY_SNAPSHOT) {
+        const LiveGameManager = require("./services/live/LiveGameManager");
+        const memSnapshot = await LiveGameManager.trySnapshot(gameId);
+        if (memSnapshot) {
+          socket.emit("game:snapshot", memSnapshot);
+          const live = LiveGameManager.get(gameId);
+          if (live) live.rescheduleClocks();
+          return;
+        }
+      }
+
       const {
         isLiveHumanGame,
         getEffectiveTimeRemaining,
         withLiveSync,
-      } = require("./utils/liveGameSync");
+      } = require("./services/live/ClockManager");
       const Game = require("./models/Game");
       const game = await Game.findOne({ gameId }).lean();
       if (!game || !isLiveHumanGame(game)) return;
@@ -1488,9 +1287,8 @@ io.on("connection", (socket) => {
       let serverNow = Date.now();
       if (allReady) {
         try {
-          const {
-            getEffectiveTimeRemaining,
-          } = require("./utils/liveGameSync");
+          const ClockAuthority = require("./services/live/ClockAuthority");
+          const startedAt = new Date();
           await Game.updateOne(
             {
               gameId,
@@ -1498,17 +1296,41 @@ io.on("connection", (socket) => {
               type: { $in: ["multiplayer", "friend"] },
               $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
             },
-            { $set: { clockStartedAt: new Date() } }
+            { $set: { clockStartedAt: startedAt } }
           );
-          const live = await Game.findOne({ gameId })
+          const liveDoc = await Game.findOne({ gameId })
             .select(
-              "clockStartedAt timeRemaining timeControl currentTurn moves status type"
+              "clockStartedAt timeRemaining timeControl currentTurn moves status type category isRated players board syncVersion positionHistory createdAt"
             )
             .lean();
-          if (live) {
-            clockStartedAt = live.clockStartedAt || null;
+          if (liveDoc) {
+            clockStartedAt = liveDoc.clockStartedAt || startedAt;
             serverNow = Date.now();
-            effectiveTimeRemaining = getEffectiveTimeRemaining(live, serverNow);
+            effectiveTimeRemaining = ClockAuthority.effectiveRemaining(
+              liveDoc,
+              serverNow
+            );
+
+            const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require(
+              "./services/live/flags"
+            );
+            if (LIVE_MEMORY_SNAPSHOT) {
+              const LiveGameManager = require("./services/live/LiveGameManager");
+              let mem = LiveGameManager.get(gameId);
+              if (!mem) {
+                mem = LiveGameManager.createFromDoc(liveDoc);
+              }
+              if (mem) {
+                mem.startClocks(clockStartedAt);
+                if (LIVE_SERVER_TIMEOUTS) {
+                  mem.rescheduleClocks();
+                }
+                effectiveTimeRemaining = ClockAuthority.effectiveRemaining(
+                  mem,
+                  serverNow
+                );
+              }
+            }
           }
         } catch (clockErr) {
           console.error("[live-sync] clockStartedAt on ready failed:", clockErr?.message || clockErr);
@@ -1545,8 +1367,40 @@ io.on("connection", (socket) => {
   });
 
   socket.on("make-move", (data) => {
+    // Phase 4: when LIVE_WS_MOVES is on, kill unvalidated relay.
+    const { LIVE_WS_MOVES } = require("./services/live/flags");
+    if (LIVE_WS_MOVES) return;
     if (!data?.gameId) return;
     socket.to(data.gameId).emit("move-made", data);
+  });
+
+  // Phase 4: authenticated live:move command pipeline
+  socket.on("live:move", (data) => {
+    void require("./services/live/liveMovePipeline")
+      .handleLiveMove(socket, data, io)
+      .catch((err) => {
+        console.error("[live:move] handler error:", err?.message || err);
+        socket.emit("moveRejected", {
+          requestId: data?.requestId,
+          gameId: data?.gameId,
+          ok: false,
+          code: "SERVER_ERROR",
+          message: "Internal error",
+          recoverable: true,
+          serverEventId: `err:${Date.now()}`,
+          syncVersion: 0,
+          serverPly: 0,
+          serverNow: Date.now(),
+          needSync: true,
+        });
+      });
+  });
+
+  socket.on("live:sync", (data) => {
+    require("./services/live/liveMovePipeline").handleServerSyncRequest(
+      socket,
+      data
+    );
   });
 
   // Chat handlers
