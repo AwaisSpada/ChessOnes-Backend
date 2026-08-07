@@ -26,6 +26,7 @@ const {
   ensureTimeRemaining,
   getEffectiveTimeRemaining,
   applyServerElapsedClock,
+  commitElapsedClock,
   bumpSyncVersion,
   withLiveSync,
   buildLiveSyncFields,
@@ -811,14 +812,17 @@ router.post(
         playerColor === "white" ? game.timeRemaining?.white : game.timeRemaining?.black;
 
       const liveHuman = isLiveHumanGame(game);
+      let pendingClockCommit = null;
 
       if (liveHuman) {
         // Server-authoritative clocks — do not trust client timeRemaining.
         if (!game.clockStartedAt && (!game.moves || game.moves.length === 0)) {
           game.clockStartedAt = game.clockStartedAt || new Date();
         }
+        // Compute-only — rejected moves must not mutate storedRemaining.
         const clockResult = applyServerElapsedClock(game);
         if (clockResult.timedOut) {
+          commitElapsedClock(game, clockResult);
           game.status = "completed";
           game.result = {
             winner: playerColor === "white" ? "black" : "white",
@@ -855,6 +859,7 @@ router.post(
             data: timeoutPayload,
           });
         }
+        pendingClockCommit = clockResult;
       } else if (timeRemaining && typeof timeRemaining === "object") {
         // Bot / legacy: optional client clock sync (unchanged behavior).
         if (typeof timeRemaining.white === "number") {
@@ -965,6 +970,10 @@ router.post(
 
         // Check if we're capturing the opponent's king
         if ((isWhiteKing && isBlackMoving) || (isBlackKing && isWhiteMoving)) {
+          if (pendingClockCommit) {
+            commitElapsedClock(game, pendingClockCommit);
+            pendingClockCommit = null;
+          }
           const updatedClockMs =
             playerColor === "white" ? game.timeRemaining?.white : game.timeRemaining?.black;
           const moveTiming = calculateMoveTime({
@@ -1120,6 +1129,11 @@ router.post(
       // This must be checked before board is updated
       const wasMovingSideWhite = game.currentTurn === "white";
       const wasInCheckBeforeMove = isKingInCheck(game.board, wasMovingSideWhite);
+
+      if (pendingClockCommit) {
+        commitElapsedClock(game, pendingClockCommit);
+        pendingClockCommit = null;
+      }
       
       const updatedClockMs =
         playerColor === "white" ? game.timeRemaining?.white : game.timeRemaining?.black;
@@ -2303,9 +2317,79 @@ router.post(
         });
       }
 
+      // Live human timeout: never trust client flag. Revalidate server clocks.
+      // Rejects the false-timeout race that ends games while ~40s remain.
+      if (result.reason === "timeout" && isLiveHumanGame(game)) {
+        const now = Date.now();
+        const { LIVE_SERVER_TIMEOUTS, LIVE_MEMORY_SNAPSHOT } = require(
+          "../services/live/flags"
+        );
+        const LiveGameManager = require("../services/live/LiveGameManager");
+        const live =
+          LIVE_MEMORY_SNAPSHOT ? LiveGameManager.get(game.gameId) : null;
+        const clockSource = live || game;
+        const effective = getEffectiveTimeRemaining(clockSource, now);
+        const sideToMove =
+          clockSource.currentTurn === "black" ? "black" : "white";
+        const remainingMs = effective?.[sideToMove];
+        const stillHasTime =
+          typeof remainingMs === "number" &&
+          Number.isFinite(remainingMs) &&
+          remainingMs > 0;
+
+        if (LIVE_SERVER_TIMEOUTS) {
+          // Server flag timer owns timeout ends; client claim is sync-only.
+          return res.status(409).json({
+            success: false,
+            code: "TIMEOUT_SERVER_OWNED",
+            message:
+              "Server-authoritative timeouts are enabled; client timeout claims are ignored",
+            needSync: true,
+            data: {
+              currentTurn: sideToMove,
+              timeRemaining: effective,
+              serverNow: now,
+              syncVersion:
+                typeof clockSource.syncVersion === "number"
+                  ? clockSource.syncVersion
+                  : game.syncVersion,
+              ply: Array.isArray(clockSource.moves)
+                ? clockSource.moves.length
+                : Array.isArray(game.moves)
+                  ? game.moves.length
+                  : 0,
+            },
+          });
+        }
+
+        if (stillHasTime) {
+          return res.status(409).json({
+            success: false,
+            code: "TIMEOUT_NOT_REACHED",
+            message: "Server clock still has time remaining",
+            needSync: true,
+            data: {
+              currentTurn: sideToMove,
+              timeRemaining: effective,
+              serverNow: now,
+              syncVersion:
+                typeof clockSource.syncVersion === "number"
+                  ? clockSource.syncVersion
+                  : game.syncVersion,
+              ply: Array.isArray(clockSource.moves)
+                ? clockSource.moves.length
+                : Array.isArray(game.moves)
+                  ? game.moves.length
+                  : 0,
+            },
+          });
+        }
+      }
+
       // Atomic claim — prevents double-end and avoids slow full-document save before notify.
       const nextStatus =
         result.reason === "first-move-abandon" ? "abandoned" : "completed";
+
       const claimed = await Game.updateOne(
         { gameId: game.gameId, status: "active" },
         { $set: { status: nextStatus, result } }

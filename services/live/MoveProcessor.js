@@ -91,12 +91,18 @@ function applyPlayerMove(game, cmd) {
 
   const liveHuman = ClockAuthority.isLiveHumanGame(game);
 
+  /** @type {null | { timedOut: boolean, elapsedMs: number, side: string, remainingMs?: number }} */
+  let pendingClockCommit = null;
+
   if (liveHuman) {
     if (!game.clockStartedAt && (!game.moves || game.moves.length === 0)) {
       game.clockStartedAt = game.clockStartedAt || new Date();
     }
+    // Compute-only — rejected moves must not mutate storedRemaining.
     const clockResult = ClockAuthority.applyServerElapsedClock(game);
     if (clockResult.timedOut) {
+      // Terminal flag: commit in the same transition as status end.
+      ClockAuthority.commitElapsedClock(game, clockResult);
       game.status = "completed";
       game.result = {
         winner: playerColor === "white" ? "black" : "white",
@@ -125,6 +131,7 @@ function applyPlayerMove(game, cmd) {
         gameEnded: true,
       };
     }
+    pendingClockCommit = clockResult;
   }
 
   const movingPiece = game.board[from];
@@ -214,6 +221,11 @@ function applyPlayerMove(game, cmd) {
     const isWhiteMoving = movingPiece === movingPiece.toUpperCase();
     const isBlackMoving = movingPiece === movingPiece.toLowerCase();
     if ((isWhiteKing && isBlackMoving) || (isBlackKing && isWhiteMoving)) {
+      // Commit drain + new move timestamp in the same transition.
+      if (pendingClockCommit) {
+        ClockAuthority.commitElapsedClock(game, pendingClockCommit);
+        pendingClockCommit = null;
+      }
       const updatedClockMs =
         playerColor === "white"
           ? game.timeRemaining?.white
@@ -336,6 +348,12 @@ function applyPlayerMove(game, cmd) {
       }
       newBoard[from] = null;
     }
+  }
+
+  // Commit drain + new move timestamp in the same transition.
+  if (pendingClockCommit) {
+    ClockAuthority.commitElapsedClock(game, pendingClockCommit);
+    pendingClockCommit = null;
   }
 
   const updatedClockMs =

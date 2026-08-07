@@ -12,6 +12,7 @@ module.exports = {
   ensureTimeRemaining: liveGameSync.ensureTimeRemaining,
   getEffectiveTimeRemaining: liveGameSync.getEffectiveTimeRemaining,
   applyServerElapsedClock: liveGameSync.applyServerElapsedClock,
+  commitElapsedClock: liveGameSync.commitElapsedClock,
   bumpSyncVersion: liveGameSync.bumpSyncVersion,
   getPly: liveGameSync.getPly,
   buildLiveSyncFields: liveGameSync.buildLiveSyncFields,

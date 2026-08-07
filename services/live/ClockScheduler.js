@@ -59,10 +59,10 @@ function arm(gameId, kind, deadlineMs, onFire) {
   const delay = Math.max(0, deadlineMs - now);
   const handle = setTimeout(() => {
     const current = timers.get(id);
-    if (current?.[kind]?.handle === handle) {
-      clearKind(current, kind);
-      if (!current.flag && !current.abandon) timers.delete(id);
-    }
+    // Only the latest armed handle may execute — ignore stale callbacks.
+    if (current?.[kind]?.handle !== handle) return;
+    clearKind(current, kind);
+    if (!current.flag && !current.abandon) timers.delete(id);
     try {
       onFire(id, deadlineMs);
     } catch (err) {

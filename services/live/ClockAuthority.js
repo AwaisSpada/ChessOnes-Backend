@@ -27,11 +27,19 @@ function effectiveRemaining(game, now = Date.now()) {
 }
 
 /**
- * Mutate stored clocks by draining the side to move.
+ * Compute drain for the side to move — does NOT mutate storedRemaining.
  * @returns {{ timedOut: boolean, elapsedMs: number, side: string, remainingMs?: number }}
  */
 function drainSideToMove(game, now = Date.now()) {
   return ClockManager.applyServerElapsedClock(game, now);
+}
+
+/**
+ * Commit a prior drain into storedRemaining. Pair only with a new move
+ * timestamp or terminal flag in the same authoritative transition.
+ */
+function commitElapsedClock(game, clockResult) {
+  return ClockManager.commitElapsedClock(game, clockResult);
 }
 
 function applyIncrement(game, moverColor) {
@@ -82,6 +90,7 @@ module.exports = {
   isUntimed,
   effectiveRemaining,
   drainSideToMove,
+  commitElapsedClock,
   applyIncrement,
   bumpSyncVersion,
   withLiveSync,

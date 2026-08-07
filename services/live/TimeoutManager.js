@@ -22,13 +22,17 @@ async function onFlag(gameId) {
     if (live.status !== "active") return;
 
     const now = Date.now();
+    // Compute-only — must not mutate storedRemaining unless we terminal-flag.
     const clockResult = ClockAuthority.drainSideToMove(live, now);
 
     if (!clockResult.timedOut) {
-      // Move or clock change won the race — recompute absolute deadlines.
+      // Spurious / race — re-arm from unchanged stored base + anchor.
       ClockScheduler.rescheduleAll(live);
       return;
     }
+
+    // Terminal flag: commit remaining (0) in the same transition as status end.
+    ClockAuthority.commitElapsedClock(live, clockResult);
 
     const loser = clockResult.side || ClockAuthority.activeSide(live);
     const winner = loser === "white" ? "black" : "white";

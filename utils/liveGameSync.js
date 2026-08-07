@@ -71,8 +71,11 @@ function getEffectiveTimeRemaining(game, now = Date.now()) {
 }
 
 /**
- * Mutate game.timeRemaining by deducting elapsed for the side to move.
- * Call BEFORE applying a live human move. Returns timeout info.
+ * Compute elapsed drain for the side to move WITHOUT mutating storedRemaining.
+ * Callers must commit via commitElapsedClock only in the same transition as a
+ * new clock anchor (new move timestamp) or a terminal flag (status leaves active).
+ *
+ * @returns {{ timedOut: boolean, elapsedMs: number, side: string, remainingMs?: number }}
  */
 function applyServerElapsedClock(game, now = Date.now()) {
   ensureTimeRemaining(game);
@@ -97,14 +100,28 @@ function applyServerElapsedClock(game, now = Date.now()) {
   const side = game.currentTurn;
   const elapsedMs = Math.max(0, now - anchor);
   const before = game.timeRemaining[side];
-  game.timeRemaining[side] = Math.max(0, before - elapsedMs);
+  const remainingMs = Math.max(0, before - elapsedMs);
 
   return {
-    timedOut: game.timeRemaining[side] <= 0,
+    timedOut: remainingMs <= 0,
     elapsedMs,
     side,
-    remainingMs: game.timeRemaining[side],
+    remainingMs,
   };
+}
+
+/**
+ * Write a prior applyServerElapsedClock result into storedRemaining.
+ * ONLY call when establishing a new move timestamp or ending the game on flag
+ * in the same authoritative transition.
+ */
+function commitElapsedClock(game, clockResult) {
+  if (!game || !clockResult) return;
+  const side = clockResult.side;
+  if (side !== "white" && side !== "black") return;
+  if (typeof clockResult.remainingMs !== "number") return;
+  ensureTimeRemaining(game);
+  game.timeRemaining[side] = Math.max(0, clockResult.remainingMs);
 }
 
 function bumpSyncVersion(game) {
@@ -157,6 +174,7 @@ module.exports = {
   ensureTimeRemaining,
   getEffectiveTimeRemaining,
   applyServerElapsedClock,
+  commitElapsedClock,
   bumpSyncVersion,
   getPly,
   buildLiveSyncFields,
