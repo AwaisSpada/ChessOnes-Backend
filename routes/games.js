@@ -2319,8 +2319,9 @@ router.post(
 
       // Live human timeout: never trust client flag. Revalidate server clocks.
       // Rejects the false-timeout race that ends games while ~40s remain.
-      // On accept, persist loser clock as 0 so history matches the live end UI.
-      let timeoutClockSnapshot = null;
+      // Any accepted /end for live human also freezes both clocks into DB so
+      // history shows the real time-left at the moment the game ended.
+      let endClockSnapshot = null;
       if (result.reason === "timeout" && isLiveHumanGame(game)) {
         const now = Date.now();
         const { LIVE_SERVER_TIMEOUTS, LIVE_MEMORY_SNAPSHOT } = require(
@@ -2387,9 +2388,25 @@ router.post(
           });
         }
 
-        timeoutClockSnapshot = {
-          white: sideToMove === "white" ? 0 : effective.white,
-          black: sideToMove === "black" ? 0 : effective.black,
+        endClockSnapshot = {
+          white: sideToMove === "white" ? 0 : Math.max(0, effective.white),
+          black: sideToMove === "black" ? 0 : Math.max(0, effective.black),
+        };
+      } else if (
+        isLiveHumanGame(game) &&
+        result.reason !== "first-move-abandon"
+      ) {
+        // Resign / draw / etc. — freeze both sides' effective remaining at end.
+        const now = Date.now();
+        const { LIVE_MEMORY_SNAPSHOT } = require("../services/live/flags");
+        const LiveGameManager = require("../services/live/LiveGameManager");
+        const live =
+          LIVE_MEMORY_SNAPSHOT ? LiveGameManager.get(game.gameId) : null;
+        const clockSource = live || game;
+        const effective = getEffectiveTimeRemaining(clockSource, now);
+        endClockSnapshot = {
+          white: Math.max(0, Number(effective.white) || 0),
+          black: Math.max(0, Number(effective.black) || 0),
         };
       }
 
@@ -2398,8 +2415,8 @@ router.post(
         result.reason === "first-move-abandon" ? "abandoned" : "completed";
 
       const endSet = { status: nextStatus, result };
-      if (timeoutClockSnapshot) {
-        endSet.timeRemaining = timeoutClockSnapshot;
+      if (endClockSnapshot) {
+        endSet.timeRemaining = endClockSnapshot;
       }
 
       const claimed = await Game.updateOne(
@@ -2421,8 +2438,8 @@ router.post(
 
       game.status = nextStatus;
       game.result = result;
-      if (timeoutClockSnapshot) {
-        game.timeRemaining = timeoutClockSnapshot;
+      if (endClockSnapshot) {
+        game.timeRemaining = endClockSnapshot;
       }
       gameEvaluationHistory.delete(req.params.gameId);
 
@@ -2435,10 +2452,10 @@ router.post(
           if (live) {
             live.status = nextStatus;
             live.result = result;
-            if (timeoutClockSnapshot) {
+            if (endClockSnapshot) {
               live.timeRemaining = {
-                white: timeoutClockSnapshot.white,
-                black: timeoutClockSnapshot.black,
+                white: endClockSnapshot.white,
+                black: endClockSnapshot.black,
               };
             }
             if (typeof live.syncVersion === "number") {
