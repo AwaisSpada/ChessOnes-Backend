@@ -2319,6 +2319,8 @@ router.post(
 
       // Live human timeout: never trust client flag. Revalidate server clocks.
       // Rejects the false-timeout race that ends games while ~40s remain.
+      // On accept, persist loser clock as 0 so history matches the live end UI.
+      let timeoutClockSnapshot = null;
       if (result.reason === "timeout" && isLiveHumanGame(game)) {
         const now = Date.now();
         const { LIVE_SERVER_TIMEOUTS, LIVE_MEMORY_SNAPSHOT } = require(
@@ -2384,15 +2386,25 @@ router.post(
             },
           });
         }
+
+        timeoutClockSnapshot = {
+          white: sideToMove === "white" ? 0 : effective.white,
+          black: sideToMove === "black" ? 0 : effective.black,
+        };
       }
 
       // Atomic claim — prevents double-end and avoids slow full-document save before notify.
       const nextStatus =
         result.reason === "first-move-abandon" ? "abandoned" : "completed";
 
+      const endSet = { status: nextStatus, result };
+      if (timeoutClockSnapshot) {
+        endSet.timeRemaining = timeoutClockSnapshot;
+      }
+
       const claimed = await Game.updateOne(
         { gameId: game.gameId, status: "active" },
-        { $set: { status: nextStatus, result } }
+        { $set: endSet }
       );
       if (claimed.matchedCount === 0) {
         return res.status(404).json({
@@ -2409,6 +2421,9 @@ router.post(
 
       game.status = nextStatus;
       game.result = result;
+      if (timeoutClockSnapshot) {
+        game.timeRemaining = timeoutClockSnapshot;
+      }
       gameEvaluationHistory.delete(req.params.gameId);
 
       // Keep LiveGame + timers coherent when HTTP /end wins.
@@ -2420,6 +2435,12 @@ router.post(
           if (live) {
             live.status = nextStatus;
             live.result = result;
+            if (timeoutClockSnapshot) {
+              live.timeRemaining = {
+                white: timeoutClockSnapshot.white,
+                black: timeoutClockSnapshot.black,
+              };
+            }
             if (typeof live.syncVersion === "number") {
               require("../services/live/ClockAuthority").bumpSyncVersion(live);
             }
