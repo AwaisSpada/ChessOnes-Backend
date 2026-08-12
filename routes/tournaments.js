@@ -33,9 +33,6 @@ const {
   notifyArenaEndedIfNeeded,
 } = require("../services/arenaNotificationService");
 
-// Lowered for flow testing (host + 1 other is enough)
-const MIN_ARENA_PLAYERS = 2;
-
 const router = express.Router();
 
 const ACTIVE_USER_STATUSES = ["online", "in-game"];
@@ -1180,9 +1177,6 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
       req.user._id
     );
     const hostWillPlay = true;
-    const rosterSize = hostWillPlay
-      ? resolvedInvites.length + 1
-      : resolvedInvites.length;
 
     const isDraft = intent === "draft";
     const scheduledAt = parseScheduledAt(startMode, startDate, startTime);
@@ -1198,13 +1192,6 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Scheduled start must be in the future",
-      });
-    }
-
-    if (!isDraft && rosterSize < MIN_ARENA_PLAYERS) {
-      return res.status(400).json({
-        success: false,
-        message: `At least ${MIN_ARENA_PLAYERS} players required in the arena roster`,
       });
     }
 
@@ -1337,9 +1324,6 @@ router.post("/custom-arenas", auth, async (req, res) => {
       req.user._id
     );
     const hostWillPlay = true;
-    const rosterSize = hostWillPlay
-      ? resolvedInvites.length + 1
-      : resolvedInvites.length;
 
     const isDraft = intent === "draft";
     const scheduledAt = parseScheduledAt(startMode, startDate, startTime);
@@ -1355,13 +1339,6 @@ router.post("/custom-arenas", auth, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Scheduled start must be in the future",
-      });
-    }
-
-    if (!isDraft && rosterSize < MIN_ARENA_PLAYERS) {
-      return res.status(400).json({
-        success: false,
-        message: `At least ${MIN_ARENA_PLAYERS} players required in the arena roster`,
       });
     }
 
