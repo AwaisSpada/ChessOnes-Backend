@@ -22,8 +22,10 @@ const {
   enterArenaLobby,
   addInvitesToLiveArena,
   leaveArenaTournament,
+  endArenaByHost,
 } = require("../services/customArenaEngine");
 const { getArenaChatMessages } = require("../utils/arenaChat");
+const { buildArenaJoinUrls } = require("../utils/frontendUrl");
 const {
   notifyArenaParticipants,
   notifyArenaInvitees,
@@ -31,9 +33,6 @@ const {
   listArenaNotificationsForUser,
   notifyArenaEndedIfNeeded,
 } = require("../services/arenaNotificationService");
-
-// Lowered for flow testing (host + 1 other is enough)
-const MIN_ARENA_PLAYERS = 2;
 
 const router = express.Router();
 
@@ -74,6 +73,28 @@ function formatCountdown(targetDate) {
   if (hrs > 0) return `${hrs}h ${mins}m`;
   const secs = Math.floor((diffMs % 60000) / 1000);
   return `${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+/** Chess.com-style: "2 days 5 hours 12 minutes 08 seconds" */
+function formatScheduledCountdown(targetDate) {
+  const diffMs = new Date(targetDate).getTime() - Date.now();
+  if (diffMs <= 0) return "Starting now";
+
+  const totalSecs = Math.floor(diffMs / 1000);
+  const days = Math.floor(totalSecs / 86400);
+  const hours = Math.floor((totalSecs % 86400) / 3600);
+  const minutes = Math.floor((totalSecs % 3600) / 60);
+  const seconds = totalSecs % 60;
+
+  const unit = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const parts = [];
+  if (days > 0) parts.push(unit(days, "day", "days"));
+  if (days > 0 || hours > 0) parts.push(unit(hours, "hour", "hours"));
+  parts.push(unit(minutes, "minute", "minutes"));
+  parts.push(
+    `${String(seconds).padStart(2, "0")} ${seconds === 1 ? "second" : "seconds"}`
+  );
+  return parts.join(" ");
 }
 
 function formatDetailedCountdown(targetDate) {
@@ -211,7 +232,7 @@ function serializeCustomArena(arena, viewer) {
       timeLeft = "Live";
     }
   } else if (arena.status === "scheduled" && arena.scheduledAt) {
-    startsIn = formatCountdown(arena.scheduledAt);
+    startsIn = formatScheduledCountdown(arena.scheduledAt);
   } else if (arena.status === "ended") {
     endedAgo = arena.endedAt
       ? formatRelativeAgo(arena.endedAt)
@@ -253,6 +274,7 @@ function serializeCustomArena(arena, viewer) {
     format: arena.format,
     formatLabel,
     joinCode: arena.joinCode,
+    ...(arena.joinCode ? buildArenaJoinUrls(arena.joinCode) : {}),
     scheduledAt: arena.scheduledAt || null,
     startedAt: arena.startedAt || null,
     endedAt: arena.endedAt || null,
@@ -282,9 +304,40 @@ function serializeCustomArena(arena, viewer) {
   };
 }
 
-function parseScheduledAt(startMode, startDate, startTime) {
-  if (startMode !== "schedule" || !startDate || !startTime) return null;
-  const scheduled = new Date(`${startDate}T${startTime}`);
+function parseScheduledAt(startMode, startDate, startTime, opts = {}) {
+  if (startMode !== "schedule") return null;
+
+  // Prefer absolute ISO from the client (local wall clock → toISOString).
+  if (opts.scheduledAt) {
+    const fromIso = new Date(opts.scheduledAt);
+    if (!Number.isNaN(fromIso.getTime())) return fromIso;
+  }
+
+  if (!startDate || !startTime) return null;
+
+  const dateParts = String(startDate).split("-").map(Number);
+  const timeParts = String(startTime).split(":").map(Number);
+  const y = dateParts[0];
+  const m = dateParts[1];
+  const d = dateParts[2];
+  const hh = timeParts[0];
+  const mm = timeParts[1] || 0;
+  if (![y, m, d, hh, mm].every((n) => Number.isFinite(n))) return null;
+
+  // Client timezoneOffsetMinutes matches Date#getTimezoneOffset()
+  // (e.g. UTC+5 → -300). Without it, Node treats bare ISO as UTC and
+  // shifts PK / similar zones by several hours.
+  const offsetMin = opts.timezoneOffsetMinutes;
+  if (typeof offsetMin === "number" && Number.isFinite(offsetMin)) {
+    const utcMs = Date.UTC(y, m - 1, d, hh, mm, 0, 0) + offsetMin * 60_000;
+    const scheduled = new Date(utcMs);
+    return Number.isNaN(scheduled.getTime()) ? null : scheduled;
+  }
+
+  // Legacy fallback — treat as UTC to stay deterministic on the server.
+  const scheduled = new Date(
+    `${String(startDate).trim()}T${String(startTime).trim()}:00.000Z`
+  );
   return Number.isNaN(scheduled.getTime()) ? null : scheduled;
 }
 
@@ -487,6 +540,185 @@ router.get("/custom-arenas/winners", optionalAuth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to load tournament winners",
+    });
+  }
+});
+
+function normalizeArenaJoinCode(raw) {
+  return String(raw || "").trim().toLowerCase();
+}
+
+async function findArenaByJoinCode(joinCode) {
+  const code = normalizeArenaJoinCode(joinCode);
+  if (!code) return null;
+  return CustomArena.findOne({
+    joinCode: { $regex: new RegExp(`^${escapeRegex(code)}$`, "i") },
+  })
+    .populate("createdBy", "username fullName name email avatar country")
+    .lean();
+}
+
+function joinerFromUser(user) {
+  return {
+    userId: user._id,
+    username: user.username || "player",
+    displayName: user.fullName || user.username || "Player",
+    avatar: user.avatar || "",
+    country: user.country || "",
+  };
+}
+
+function isAlreadyInArena(arena, userId) {
+  const uid = String(userId);
+  const creatorId = String(arena.createdBy?._id || arena.createdBy || "");
+  if (uid && uid === creatorId) return true;
+  const ids = new Set();
+  for (const id of arena.participantUserIds || []) {
+    if (id) ids.add(String(id));
+  }
+  for (const id of arena.invitedUserIds || []) {
+    if (id) ids.add(String(id));
+  }
+  for (const player of arena.invitedPlayers || []) {
+    if (player?.userId) ids.add(String(player.userId));
+  }
+  return ids.has(uid);
+}
+
+// @route   GET /api/tournaments/custom-arenas/open/:joinCode
+// @desc    Public preview for shareable arena links (no auth)
+router.get("/custom-arenas/open/:joinCode", async (req, res) => {
+  try {
+    const arena = await findArenaByJoinCode(req.params.joinCode);
+    if (!arena) {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+    if (arena.status === "draft") {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+
+    const host =
+      arena.createdBy?.username ||
+      arena.createdBy?.fullName ||
+      "Host";
+    const urls = buildArenaJoinUrls(arena.joinCode);
+
+    return res.json({
+      success: true,
+      data: {
+        joinCode: arena.joinCode,
+        name: arena.name,
+        status: arena.status,
+        category: arena.gameType,
+        tc: arena.timeControl?.label || "—",
+        ratingMode: arena.ratingMode,
+        format: arena.format,
+        host,
+        participantCount:
+          Array.isArray(arena.participantUserIds) && arena.participantUserIds.length > 0
+            ? arena.participantUserIds.length
+            : countInvitedPlayers(arena) + (arena.hostPlays !== false ? 1 : 0),
+        ...urls,
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas open preview error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load arena link",
+    });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/join/:joinCode
+// @desc    Join a live/scheduled arena via shareable link
+router.post("/custom-arenas/join/:joinCode", auth, async (req, res) => {
+  try {
+    const code = normalizeArenaJoinCode(req.params.joinCode);
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: "Join code required",
+      });
+    }
+
+    const arenaLean = await findArenaByJoinCode(code);
+    if (!arenaLean) {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+    if (arenaLean.status === "draft") {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+    if (arenaLean.status === "ended") {
+      return res.status(400).json({
+        success: false,
+        message: "This arena has ended",
+      });
+    }
+
+    const alreadyIn = isAlreadyInArena(arenaLean, req.user._id);
+    if (alreadyIn) {
+      const populated = await CustomArena.findById(arenaLean._id)
+        .populate("createdBy", "username fullName name email")
+        .lean();
+      return res.json({
+        success: true,
+        data: {
+          alreadyJoined: true,
+          arena: serializeCustomArena(populated, req.user),
+        },
+      });
+    }
+
+    const result = await addInvitesToLiveArena(arenaLean._id, [
+      joinerFromUser(req.user),
+    ]);
+    if (!result.ok) {
+      return res.status(400).json({
+        success: false,
+        message: result.message || "Could not join this arena",
+      });
+    }
+
+    const populated = await CustomArena.findById(arenaLean._id)
+      .populate("createdBy", "username fullName name email")
+      .lean();
+
+    const io = req.app.get("io");
+    if (io) {
+      await markArenaJoined(io, arenaLean._id, req.user._id);
+      await notifyArenaInvitees(io, populated, [req.user._id], "created");
+    }
+
+    const runtime = await getArenaRuntimeState(String(arenaLean._id), {
+      autoTick: false,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        alreadyJoined: false,
+        arena: serializeCustomArena(populated, req.user),
+        runtime,
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas join-by-code error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to join arena",
     });
   }
 });
@@ -698,6 +930,65 @@ router.post("/custom-arenas/:id/leave", auth, async (req, res) => {
   } catch (error) {
     console.error("[Tournaments] custom-arenas leave error:", error);
     res.status(500).json({ success: false, message: "Failed to leave arena" });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/:id/end
+// @desc    Host ends the arena for everyone (blocked while games are live)
+// @access  Private (host only)
+router.post("/custom-arenas/:id/end", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid arena id" });
+    }
+
+    const arenaLean = await CustomArena.findById(req.params.id).lean();
+    if (!arenaLean) {
+      return res.status(404).json({ success: false, message: "Arena not found" });
+    }
+    if (!isArenaVisibleToUser(arenaLean, req.user)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const { arena, runtime, error, code, activeGameCount } = await endArenaByHost(
+      req.params.id,
+      req.user._id
+    );
+
+    if (error) {
+      const status =
+        code === "FORBIDDEN" ? 403 : code === "GAMES_IN_PROGRESS" ? 409 : 400;
+      return res.status(status).json({
+        success: false,
+        message: error,
+        code: code || undefined,
+        data: {
+          runtime: runtime || undefined,
+          activeGameCount: activeGameCount || undefined,
+        },
+      });
+    }
+
+    const io = req.app.get("io");
+    if (arena?.status === "ended" && io) {
+      await notifyArenaEndedIfNeeded(io, String(arena._id));
+    }
+
+    const populated = await CustomArena.findById(arena._id)
+      .populate("createdBy", "username fullName name email avatar country");
+
+    res.json({
+      success: true,
+      data: {
+        runtime: runtime || (await getArenaRuntimeState(arena._id, { autoTick: false })),
+        arena: serializeCustomArena(populated || arena, req.user),
+        arenaEnded: true,
+      },
+      message: "Tournament ended",
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas end error:", error);
+    res.status(500).json({ success: false, message: "Failed to end arena" });
   }
 });
 
@@ -969,6 +1260,8 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
       startMode,
       startDate,
       startTime,
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
       intent,
     } = req.body;
 
@@ -999,12 +1292,12 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
       req.user._id
     );
     const hostWillPlay = true;
-    const rosterSize = hostWillPlay
-      ? resolvedInvites.length + 1
-      : resolvedInvites.length;
 
     const isDraft = intent === "draft";
-    const scheduledAt = parseScheduledAt(startMode, startDate, startTime);
+    const scheduledAt = parseScheduledAt(startMode, startDate, startTime, {
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
+    });
 
     if (!isDraft && startMode === "schedule" && !scheduledAt) {
       return res.status(400).json({
@@ -1017,13 +1310,6 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Scheduled start must be in the future",
-      });
-    }
-
-    if (!isDraft && rosterSize < MIN_ARENA_PLAYERS) {
-      return res.status(400).json({
-        success: false,
-        message: `At least ${MIN_ARENA_PLAYERS} players required in the arena roster`,
       });
     }
 
@@ -1055,6 +1341,7 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
     arena.invitedUserIds = resolvedInvites.map((p) => p.userId);
     arena.invitedPlayers = resolvedInvites;
     arena.hostPlays = hostWillPlay;
+    arena.visibility = "link_access";
     arena.startMode = startMode === "schedule" ? "schedule" : "now";
 
     if (!isDraft) {
@@ -1123,6 +1410,8 @@ router.post("/custom-arenas", auth, async (req, res) => {
       startMode,
       startDate,
       startTime,
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
       joinCode,
       intent,
       hostPlays,
@@ -1155,12 +1444,12 @@ router.post("/custom-arenas", auth, async (req, res) => {
       req.user._id
     );
     const hostWillPlay = true;
-    const rosterSize = hostWillPlay
-      ? resolvedInvites.length + 1
-      : resolvedInvites.length;
 
     const isDraft = intent === "draft";
-    const scheduledAt = parseScheduledAt(startMode, startDate, startTime);
+    const scheduledAt = parseScheduledAt(startMode, startDate, startTime, {
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
+    });
 
     if (!isDraft && startMode === "schedule" && !scheduledAt) {
       return res.status(400).json({
@@ -1173,13 +1462,6 @@ router.post("/custom-arenas", auth, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Scheduled start must be in the future",
-      });
-    }
-
-    if (!isDraft && rosterSize < MIN_ARENA_PLAYERS) {
-      return res.status(400).json({
-        success: false,
-        message: `At least ${MIN_ARENA_PLAYERS} players required in the arena roster`,
       });
     }
 
@@ -1222,11 +1504,11 @@ router.post("/custom-arenas", auth, async (req, res) => {
       invitedUserIds: resolvedInvites.map((p) => p.userId),
       invitedPlayers: resolvedInvites,
       hostPlays: hostWillPlay,
-      visibility: "invite_only",
+      visibility: "link_access",
       startMode: startMode === "schedule" ? "schedule" : "now",
       scheduledAt: !isDraft && startMode === "schedule" ? scheduledAt : null,
       startedAt: !isDraft && startMode === "now" ? startedAt : null,
-      joinCode: joinCode || undefined,
+      joinCode: joinCode ? String(joinCode).trim().toLowerCase() : undefined,
       status,
     });
 

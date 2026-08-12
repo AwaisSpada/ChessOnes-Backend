@@ -191,9 +191,19 @@ async function initializeArenaRuntime(arenaId, hostUser) {
 
 function setPlayerStatus(playerStates, userId, patch) {
   const id = String(userId);
-  return (playerStates || []).map((state) =>
-    String(state.userId) === id ? { ...state, ...patch } : state
-  );
+  return (playerStates || []).map((state) => {
+    if (String(state.userId) !== id) return state;
+    const plain =
+      typeof state.toObject === "function" ? state.toObject() : { ...state };
+    return {
+      userId: plain.userId,
+      status: plain.status || "idle",
+      matchmakingReady: !!plain.matchmakingReady,
+      currentGameId: plain.currentGameId || null,
+      lastOpponentUserId: plain.lastOpponentUserId || null,
+      ...patch,
+    };
+  });
 }
 
 function arenaTimeControlToGame(timeControl) {
@@ -255,6 +265,7 @@ async function tickArenaPairings(arenaId) {
         black: resolvedTimeControl.initial,
       },
       status: "active",
+      // Clocks start only after both clients emit player-ready (allReady).
     });
     setGameCategory(game);
     await game.save();
@@ -927,6 +938,7 @@ async function startArenaPairingGame(arenaId, pairingId, userId) {
       black: resolvedTimeControl.initial,
     },
     status: "active",
+    // Clocks start only after both clients emit player-ready (allReady).
   });
   setGameCategory(game);
   await game.save();
@@ -987,13 +999,14 @@ async function setArenaMatchmakingReady(arenaId, userId, ready) {
   }
 
   playerStates[index] = {
-    ...state,
+    userId: state.userId,
     status: "idle",
     matchmakingReady: !!ready,
     currentGameId: null,
+    lastOpponentUserId: state.lastOpponentUserId || null,
   };
   arena.playerStates = playerStates;
-  await arena.save();
+  await saveArenaDoc(arena);
 
   if (ready) {
     await tickArenaPairings(arenaId);
@@ -1304,6 +1317,124 @@ async function leaveArenaTournament(arenaId, userId) {
   return { arena, runtime, error: null };
 }
 
+/**
+ * Host ends a live/scheduled arena for everyone.
+ * Blocks while any real games are still active so mid-match play is not cut off.
+ */
+async function endArenaByHost(arenaId, hostUserId) {
+  let arena = await syncStaleArenaPairings(arenaId);
+  if (!arena) {
+    arena = await CustomArena.findById(arenaId);
+  }
+  if (!arena) {
+    return { arena: null, runtime: null, error: "Arena not found", code: null };
+  }
+
+  const hostId = String(arena.createdBy?._id || arena.createdBy || "");
+  if (!hostId || hostId !== String(hostUserId)) {
+    return {
+      arena,
+      runtime: null,
+      error: "Only the arena host can end this tournament",
+      code: "FORBIDDEN",
+    };
+  }
+
+  if (arena.status === "ended") {
+    const runtime = serializeArenaRuntime(arena);
+    return { arena, runtime, error: null, code: null, alreadyEnded: true };
+  }
+
+  if (arena.status !== "live" && arena.status !== "scheduled") {
+    return {
+      arena,
+      runtime: null,
+      error: "This arena cannot be ended",
+      code: "INVALID_STATUS",
+    };
+  }
+
+  const openPairings = (arena.activePairings || []).filter(
+    (p) => p.status === "pending" || p.status === "active"
+  );
+
+  const activeGameIds = new Set();
+  for (const pairing of openPairings) {
+    if (pairing.gameId && (await isGameStillActive(pairing.gameId))) {
+      activeGameIds.add(String(pairing.gameId));
+    }
+  }
+  for (const state of arena.playerStates || []) {
+    if (
+      state.status === "in_game" &&
+      state.currentGameId &&
+      (await isGameStillActive(state.currentGameId))
+    ) {
+      activeGameIds.add(String(state.currentGameId));
+    }
+  }
+
+  if (activeGameIds.size > 0) {
+    const n = activeGameIds.size;
+    return {
+      arena,
+      runtime: serializeArenaRuntime(arena),
+      error:
+        n === 1
+          ? "A few players are still in a game in this tournament. Once they finish, you can end it."
+          : `${n} games are still in progress in this tournament. Once they finish, you can end it.`,
+      code: "GAMES_IN_PROGRESS",
+      activeGameCount: n,
+    };
+  }
+
+  // Keep completed history; close leftover non-live active rows; drop unmatched pending.
+  const closedPairings = [];
+  for (const pairing of arena.activePairings || []) {
+    if (pairing.status === "completed") {
+      closedPairings.push(pairing);
+      continue;
+    }
+    if (pairing.status === "active" && pairing.gameId) {
+      const plain =
+        typeof pairing.toObject === "function" ? pairing.toObject() : { ...pairing };
+      closedPairings.push({
+        ...plain,
+        status: "completed",
+        completedAt: plain.completedAt || new Date(),
+      });
+    }
+  }
+  arena.activePairings = closedPairings;
+
+  let playerStates = [...(arena.playerStates || [])];
+  for (const state of playerStates) {
+    if (state.status === "left_tournament") continue;
+    playerStates = setPlayerStatus(playerStates, String(state.userId), {
+      status: "idle",
+      matchmakingReady: false,
+      currentGameId: null,
+    });
+  }
+  arena.playerStates = playerStates;
+
+  arena.status = "ended";
+  arena.endedAt = new Date();
+  markArenaDirty(arena);
+  await saveArenaDoc(arena);
+
+  const runtime = serializeArenaRuntime(arena);
+  return { arena, runtime, error: null, code: null };
+}
+
+/**
+ * Legacy helper — Arena clocks now start only via player-ready → allReady
+ * (same as Buddy / Online). Do not stamp clockStartedAt on GET.
+ */
+async function ensureArenaClocksStarted(game) {
+  return game;
+}
+
 module.exports = {
   ensureRuntimeInitialized,
   initializeArenaRuntime,
@@ -1319,4 +1450,6 @@ module.exports = {
   acceptArenaPairing,
   addInvitesToLiveArena,
   leaveArenaTournament,
+  endArenaByHost,
+  ensureArenaClocksStarted,
 };

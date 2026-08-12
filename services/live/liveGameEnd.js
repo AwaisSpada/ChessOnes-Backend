@@ -50,7 +50,13 @@ async function finalizeServerEnd(live, result, options = {}) {
 
   const io = getIo();
   let ratingChanges = null;
-  const skipRatings = result.reason === "first-move-abandon";
+  const isArenaRatedAbandon =
+    result.reason === "first-move-abandon" &&
+    Boolean(live.arenaId) &&
+    live.isRated !== false;
+  // Buddy/online abandon skips ratings; rated arena abandon applies Glicko.
+  const skipRatings =
+    result.reason === "first-move-abandon" && !isArenaRatedAbandon;
 
   if (!skipRatings && typeof endHooks.applyRatingsForGameEnd === "function") {
     const gameDoc = live.toPlainGame ? live.toPlainGame() : live;
@@ -128,7 +134,9 @@ async function notifyCompletedLiveGame(live, io) {
   if (!live?.gameId || !live.result) return null;
   const socketIo = io || getIo();
   let ratingChanges = null;
-  const skipRatings = live.result.reason === "first-move-abandon";
+  const skipRatings =
+    live.result.reason === "first-move-abandon" &&
+    !(Boolean(live.arenaId) && live.isRated !== false);
   if (!skipRatings && typeof endHooks.applyRatingsForGameEnd === "function") {
     const gameDoc = live.toPlainGame ? live.toPlainGame() : live;
     ratingChanges = await endHooks.applyRatingsForGameEnd(

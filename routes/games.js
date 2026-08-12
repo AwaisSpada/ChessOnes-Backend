@@ -89,6 +89,18 @@ async function applyRatingsForGameEnd(gameId, io, gameDoc = null) {
     }
     if (!gameForRating) return null;
 
+    // Server abandon may rate before Mongo persist — keep terminal fields from memory.
+    if (gameDoc?.result) {
+      gameForRating.result = gameDoc.result;
+      if (gameDoc.status) gameForRating.status = gameDoc.status;
+    }
+    if (gameDoc?.arenaId && !gameForRating.arenaId) {
+      gameForRating.arenaId = gameDoc.arenaId;
+    }
+    if (typeof gameDoc?.isRated === "boolean") {
+      gameForRating.isRated = gameDoc.isRated;
+    }
+
     if (!gameForRating.category && gameForRating.timeControl) {
       const { setGameCategory } = require("../services/ratingEngine");
       setGameCategory(gameForRating);
@@ -525,6 +537,8 @@ router.get("/:gameId", auth, async (req, res) => {
         });
       }
     }
+
+    // Arena clocks start via player-ready → allReady (do not stamp on GET).
 
     // Compute effective timeRemaining based on last update so timers stay correct on reload
     // Phase 1: when LIVE_MEMORY_SNAPSHOT is on, active live-human state comes from LiveGame
@@ -2217,7 +2231,6 @@ router.post(
       }
 
       const { result } = req.body;
-      const skipStats = result.reason === "first-move-abandon";
       const game = await Game.findOne({ gameId: req.params.gameId }).populate(
         "players.white players.black"
       );
@@ -2228,6 +2241,16 @@ router.post(
           message: "Game not found",
         });
       }
+
+      // Rated arena first-move abandon: apply ratings + standings.
+      // Buddy/online abandon: unchanged (skip stats/ratings).
+      const isArenaGame = Boolean(game.arenaId);
+      const arenaRatedAbandon =
+        result.reason === "first-move-abandon" &&
+        isArenaGame &&
+        game.isRated !== false;
+      const skipStats =
+        result.reason === "first-move-abandon" && !arenaRatedAbandon;
 
       // Phase 3: when server timeouts armed, already-ended is idempotent success.
       {
@@ -2488,6 +2511,15 @@ router.post(
         });
       } else {
         await emitGameEnded(game.gameId, result, io, null);
+        // Unrated (or skip-stats) arena abandon still updates standings/loser.
+        if (isArenaGame && result.reason === "first-move-abandon") {
+          try {
+            const { syncArenaGameCompletion } = require("../utils/arenaGameCompletionHook");
+            await syncArenaGameCompletion(game.gameId, result, io);
+          } catch (arenaErr) {
+            console.error("[Arena] abandon sync failed:", arenaErr);
+          }
+        }
         setImmediate(() => {
           void (async () => {
             try {

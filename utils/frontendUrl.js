@@ -44,6 +44,18 @@ function buildChallengeJoinUrls(token) {
   };
 }
 
+function buildArenaJoinUrls(joinCode) {
+  const code = String(joinCode || "").trim();
+  const frontend = getPublicFrontendUrl();
+  const api = getPublicApiUrl();
+  return {
+    joinUrl: `${frontend}/join/arena/${encodeURIComponent(code)}`,
+    apiJoinUrl: `${api}/join/arena/${encodeURIComponent(code)}`,
+    webJoinUrl: `${frontend}/home?arena=${encodeURIComponent(code)}`,
+    appDeepLink: `chessones://arena/${code}`,
+  };
+}
+
 /**
  * Base URL for static files referenced in HTML emails (e.g. logo image URLs).
  * Recipients' mail apps fetch these URLs; they must be publicly reachable.
@@ -71,5 +83,6 @@ module.exports = {
   getPublicApiUrl,
   getEmailAssetBaseUrl,
   buildChallengeJoinUrls,
+  buildArenaJoinUrls,
   PRODUCTION_FRONTEND_ORIGIN,
 };
