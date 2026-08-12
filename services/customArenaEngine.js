@@ -191,9 +191,19 @@ async function initializeArenaRuntime(arenaId, hostUser) {
 
 function setPlayerStatus(playerStates, userId, patch) {
   const id = String(userId);
-  return (playerStates || []).map((state) =>
-    String(state.userId) === id ? { ...state, ...patch } : state
-  );
+  return (playerStates || []).map((state) => {
+    if (String(state.userId) !== id) return state;
+    const plain =
+      typeof state.toObject === "function" ? state.toObject() : { ...state };
+    return {
+      userId: plain.userId,
+      status: plain.status || "idle",
+      matchmakingReady: !!plain.matchmakingReady,
+      currentGameId: plain.currentGameId || null,
+      lastOpponentUserId: plain.lastOpponentUserId || null,
+      ...patch,
+    };
+  });
 }
 
 function arenaTimeControlToGame(timeControl) {
@@ -255,8 +265,7 @@ async function tickArenaPairings(arenaId) {
         black: resolvedTimeControl.initial,
       },
       status: "active",
-      // Arena skips the buddy/online ready handshake — clocks + abandon start now.
-      clockStartedAt: new Date(),
+      // Clocks start only after both clients emit player-ready (allReady).
     });
     setGameCategory(game);
     await game.save();
@@ -929,8 +938,7 @@ async function startArenaPairingGame(arenaId, pairingId, userId) {
       black: resolvedTimeControl.initial,
     },
     status: "active",
-    // Arena skips the buddy/online ready handshake — clocks + abandon start now.
-    clockStartedAt: new Date(),
+    // Clocks start only after both clients emit player-ready (allReady).
   });
   setGameCategory(game);
   await game.save();
@@ -991,13 +999,14 @@ async function setArenaMatchmakingReady(arenaId, userId, ready) {
   }
 
   playerStates[index] = {
-    ...state,
+    userId: state.userId,
     status: "idle",
     matchmakingReady: !!ready,
     currentGameId: null,
+    lastOpponentUserId: state.lastOpponentUserId || null,
   };
   arena.playerStates = playerStates;
-  await arena.save();
+  await saveArenaDoc(arena);
 
   if (ready) {
     await tickArenaPairings(arenaId);
@@ -1419,47 +1428,10 @@ async function endArenaByHost(arenaId, hostUserId) {
 }
 
 /**
- * Arena games never wait for player-ready. If an older live pairing is missing
- * clockStartedAt, stamp it once so first-move abandon can run.
+ * Legacy helper — Arena clocks now start only via player-ready → allReady
+ * (same as Buddy / Online). Do not stamp clockStartedAt on GET.
  */
 async function ensureArenaClocksStarted(game) {
-  if (!game?.arenaId || game.status !== "active" || game.clockStartedAt) {
-    return game;
-  }
-  const startedAt = game.createdAt
-    ? new Date(game.createdAt)
-    : new Date();
-  const claimed = await Game.updateOne(
-    {
-      gameId: game.gameId,
-      status: "active",
-      arenaId: { $ne: null },
-      $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
-    },
-    { $set: { clockStartedAt: startedAt } }
-  );
-  if (claimed.modifiedCount > 0 || claimed.matchedCount > 0) {
-    const fresh = await Game.findOne({ gameId: game.gameId }).select("clockStartedAt");
-    game.clockStartedAt = fresh?.clockStartedAt || startedAt;
-  } else {
-    game.clockStartedAt = startedAt;
-  }
-
-  try {
-    const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require("./live/flags");
-    if (LIVE_MEMORY_SNAPSHOT) {
-      const LiveGameManager = require("./live/LiveGameManager");
-      let mem = LiveGameManager.get(game.gameId);
-      if (!mem) mem = LiveGameManager.createFromDoc(game);
-      if (mem) {
-        mem.startClocks(game.clockStartedAt);
-        if (LIVE_SERVER_TIMEOUTS) mem.rescheduleClocks();
-      }
-    }
-  } catch (_) {
-    /* ignore — GET still returns stamped clockStartedAt */
-  }
-
   return game;
 }
 

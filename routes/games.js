@@ -538,10 +538,7 @@ router.get("/:gameId", auth, async (req, res) => {
       }
     }
 
-    if (game.arenaId && game.status === "active" && !game.clockStartedAt) {
-      const { ensureArenaClocksStarted } = require("../services/customArenaEngine");
-      await ensureArenaClocksStarted(game);
-    }
+    // Arena clocks start via player-ready → allReady (do not stamp on GET).
 
     // Compute effective timeRemaining based on last update so timers stay correct on reload
     // Phase 1: when LIVE_MEMORY_SNAPSHOT is on, active live-human state comes from LiveGame
