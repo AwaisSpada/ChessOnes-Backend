@@ -199,9 +199,22 @@ app.use("/api/public", require("./routes/public")); // Contact + newsletter (pub
 
 // Legacy API /join/:token → brand-domain landing (OG + masked share URL).
 const { getPublicFrontendUrl } = require("./utils/frontendUrl");
+app.get("/join/arena/:code", (req, res) => {
+  const code = String(req.params.code || "").trim();
+  if (!code) {
+    return res.redirect(302, `${getPublicFrontendUrl()}/home`);
+  }
+  return res.redirect(
+    302,
+    `${getPublicFrontendUrl()}/join/arena/${encodeURIComponent(code)}`
+  );
+});
 app.get("/join/:token", (req, res) => {
   const token = String(req.params.token || "").trim();
   if (!token) {
+    return res.redirect(302, `${getPublicFrontendUrl()}/home`);
+  }
+  if (token.toLowerCase() === "arena") {
     return res.redirect(302, `${getPublicFrontendUrl()}/home`);
   }
   return res.redirect(

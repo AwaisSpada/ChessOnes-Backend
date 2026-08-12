@@ -24,6 +24,7 @@ const {
   leaveArenaTournament,
 } = require("../services/customArenaEngine");
 const { getArenaChatMessages } = require("../utils/arenaChat");
+const { buildArenaJoinUrls } = require("../utils/frontendUrl");
 const {
   notifyArenaParticipants,
   notifyArenaInvitees,
@@ -253,6 +254,7 @@ function serializeCustomArena(arena, viewer) {
     format: arena.format,
     formatLabel,
     joinCode: arena.joinCode,
+    ...(arena.joinCode ? buildArenaJoinUrls(arena.joinCode) : {}),
     scheduledAt: arena.scheduledAt || null,
     startedAt: arena.startedAt || null,
     endedAt: arena.endedAt || null,
@@ -487,6 +489,185 @@ router.get("/custom-arenas/winners", optionalAuth, async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Failed to load tournament winners",
+    });
+  }
+});
+
+function normalizeArenaJoinCode(raw) {
+  return String(raw || "").trim().toLowerCase();
+}
+
+async function findArenaByJoinCode(joinCode) {
+  const code = normalizeArenaJoinCode(joinCode);
+  if (!code) return null;
+  return CustomArena.findOne({
+    joinCode: { $regex: new RegExp(`^${escapeRegex(code)}$`, "i") },
+  })
+    .populate("createdBy", "username fullName name email avatar country")
+    .lean();
+}
+
+function joinerFromUser(user) {
+  return {
+    userId: user._id,
+    username: user.username || "player",
+    displayName: user.fullName || user.username || "Player",
+    avatar: user.avatar || "",
+    country: user.country || "",
+  };
+}
+
+function isAlreadyInArena(arena, userId) {
+  const uid = String(userId);
+  const creatorId = String(arena.createdBy?._id || arena.createdBy || "");
+  if (uid && uid === creatorId) return true;
+  const ids = new Set();
+  for (const id of arena.participantUserIds || []) {
+    if (id) ids.add(String(id));
+  }
+  for (const id of arena.invitedUserIds || []) {
+    if (id) ids.add(String(id));
+  }
+  for (const player of arena.invitedPlayers || []) {
+    if (player?.userId) ids.add(String(player.userId));
+  }
+  return ids.has(uid);
+}
+
+// @route   GET /api/tournaments/custom-arenas/open/:joinCode
+// @desc    Public preview for shareable arena links (no auth)
+router.get("/custom-arenas/open/:joinCode", async (req, res) => {
+  try {
+    const arena = await findArenaByJoinCode(req.params.joinCode);
+    if (!arena) {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+    if (arena.status === "draft") {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+
+    const host =
+      arena.createdBy?.username ||
+      arena.createdBy?.fullName ||
+      "Host";
+    const urls = buildArenaJoinUrls(arena.joinCode);
+
+    return res.json({
+      success: true,
+      data: {
+        joinCode: arena.joinCode,
+        name: arena.name,
+        status: arena.status,
+        category: arena.gameType,
+        tc: arena.timeControl?.label || "—",
+        ratingMode: arena.ratingMode,
+        format: arena.format,
+        host,
+        participantCount:
+          Array.isArray(arena.participantUserIds) && arena.participantUserIds.length > 0
+            ? arena.participantUserIds.length
+            : countInvitedPlayers(arena) + (arena.hostPlays !== false ? 1 : 0),
+        ...urls,
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas open preview error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load arena link",
+    });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/join/:joinCode
+// @desc    Join a live/scheduled arena via shareable link
+router.post("/custom-arenas/join/:joinCode", auth, async (req, res) => {
+  try {
+    const code = normalizeArenaJoinCode(req.params.joinCode);
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: "Join code required",
+      });
+    }
+
+    const arenaLean = await findArenaByJoinCode(code);
+    if (!arenaLean) {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+    if (arenaLean.status === "draft") {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+    if (arenaLean.status === "ended") {
+      return res.status(400).json({
+        success: false,
+        message: "This arena has ended",
+      });
+    }
+
+    const alreadyIn = isAlreadyInArena(arenaLean, req.user._id);
+    if (alreadyIn) {
+      const populated = await CustomArena.findById(arenaLean._id)
+        .populate("createdBy", "username fullName name email")
+        .lean();
+      return res.json({
+        success: true,
+        data: {
+          alreadyJoined: true,
+          arena: serializeCustomArena(populated, req.user),
+        },
+      });
+    }
+
+    const result = await addInvitesToLiveArena(arenaLean._id, [
+      joinerFromUser(req.user),
+    ]);
+    if (!result.ok) {
+      return res.status(400).json({
+        success: false,
+        message: result.message || "Could not join this arena",
+      });
+    }
+
+    const populated = await CustomArena.findById(arenaLean._id)
+      .populate("createdBy", "username fullName name email")
+      .lean();
+
+    const io = req.app.get("io");
+    if (io) {
+      await markArenaJoined(io, arenaLean._id, req.user._id);
+      await notifyArenaInvitees(io, populated, [req.user._id], "created");
+    }
+
+    const runtime = await getArenaRuntimeState(String(arenaLean._id), {
+      autoTick: false,
+    });
+
+    return res.json({
+      success: true,
+      data: {
+        alreadyJoined: false,
+        arena: serializeCustomArena(populated, req.user),
+        runtime,
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas join-by-code error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to join arena",
     });
   }
 });
@@ -1055,6 +1236,7 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
     arena.invitedUserIds = resolvedInvites.map((p) => p.userId);
     arena.invitedPlayers = resolvedInvites;
     arena.hostPlays = hostWillPlay;
+    arena.visibility = "link_access";
     arena.startMode = startMode === "schedule" ? "schedule" : "now";
 
     if (!isDraft) {
@@ -1222,11 +1404,11 @@ router.post("/custom-arenas", auth, async (req, res) => {
       invitedUserIds: resolvedInvites.map((p) => p.userId),
       invitedPlayers: resolvedInvites,
       hostPlays: hostWillPlay,
-      visibility: "invite_only",
+      visibility: "link_access",
       startMode: startMode === "schedule" ? "schedule" : "now",
       scheduledAt: !isDraft && startMode === "schedule" ? scheduledAt : null,
       startedAt: !isDraft && startMode === "now" ? startedAt : null,
-      joinCode: joinCode || undefined,
+      joinCode: joinCode ? String(joinCode).trim().toLowerCase() : undefined,
       status,
     });
 

@@ -1316,7 +1316,9 @@ async function ensureArenaClocksStarted(game) {
   if (!game?.arenaId || game.status !== "active" || game.clockStartedAt) {
     return game;
   }
-  const startedAt = new Date();
+  const startedAt = game.createdAt
+    ? new Date(game.createdAt)
+    : new Date();
   const claimed = await Game.updateOne(
     {
       gameId: game.gameId,
