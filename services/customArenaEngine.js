@@ -255,6 +255,8 @@ async function tickArenaPairings(arenaId) {
         black: resolvedTimeControl.initial,
       },
       status: "active",
+      // Arena skips the buddy/online ready handshake — clocks + abandon start now.
+      clockStartedAt: new Date(),
     });
     setGameCategory(game);
     await game.save();
@@ -927,6 +929,8 @@ async function startArenaPairingGame(arenaId, pairingId, userId) {
       black: resolvedTimeControl.initial,
     },
     status: "active",
+    // Arena skips the buddy/online ready handshake — clocks + abandon start now.
+    clockStartedAt: new Date(),
   });
   setGameCategory(game);
   await game.save();
@@ -1304,6 +1308,49 @@ async function leaveArenaTournament(arenaId, userId) {
   return { arena, runtime, error: null };
 }
 
+/**
+ * Arena games never wait for player-ready. If an older live pairing is missing
+ * clockStartedAt, stamp it once so first-move abandon can run.
+ */
+async function ensureArenaClocksStarted(game) {
+  if (!game?.arenaId || game.status !== "active" || game.clockStartedAt) {
+    return game;
+  }
+  const startedAt = new Date();
+  const claimed = await Game.updateOne(
+    {
+      gameId: game.gameId,
+      status: "active",
+      arenaId: { $ne: null },
+      $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
+    },
+    { $set: { clockStartedAt: startedAt } }
+  );
+  if (claimed.modifiedCount > 0 || claimed.matchedCount > 0) {
+    const fresh = await Game.findOne({ gameId: game.gameId }).select("clockStartedAt");
+    game.clockStartedAt = fresh?.clockStartedAt || startedAt;
+  } else {
+    game.clockStartedAt = startedAt;
+  }
+
+  try {
+    const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require("./live/flags");
+    if (LIVE_MEMORY_SNAPSHOT) {
+      const LiveGameManager = require("./live/LiveGameManager");
+      let mem = LiveGameManager.get(game.gameId);
+      if (!mem) mem = LiveGameManager.createFromDoc(game);
+      if (mem) {
+        mem.startClocks(game.clockStartedAt);
+        if (LIVE_SERVER_TIMEOUTS) mem.rescheduleClocks();
+      }
+    }
+  } catch (_) {
+    /* ignore — GET still returns stamped clockStartedAt */
+  }
+
+  return game;
+}
+
 module.exports = {
   ensureRuntimeInitialized,
   initializeArenaRuntime,
@@ -1319,4 +1366,5 @@ module.exports = {
   acceptArenaPairing,
   addInvitesToLiveArena,
   leaveArenaTournament,
+  ensureArenaClocksStarted,
 };
