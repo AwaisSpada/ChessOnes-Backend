@@ -66,7 +66,12 @@ async function afterMoveApplied({
   }
 
   const t = getGameTransport();
-  if (moveMade) t.emitMoveMade({ gameId: live.gameId, payload: moveMade });
+  if (moveMade) {
+    const userIds = [];
+    if (live?.players?.white != null) userIds.push(String(live.players.white));
+    if (live?.players?.black != null) userIds.push(String(live.players.black));
+    t.emitMoveMade({ gameId: live.gameId, payload: moveMade, userIds });
+  }
   if (moveAccepted) {
     t.emitMoveAccepted({
       gameId: live.gameId,
@@ -147,7 +152,12 @@ async function afterServerTerminal({
   }
 
   const t = getGameTransport();
-  if (moveMade) t.emitMoveMade({ gameId: live.gameId, payload: moveMade });
+  if (moveMade) {
+    const userIds = [];
+    if (live?.players?.white != null) userIds.push(String(live.players.white));
+    if (live?.players?.black != null) userIds.push(String(live.players.black));
+    t.emitMoveMade({ gameId: live.gameId, payload: moveMade, userIds });
+  }
   if (gameEnded) t.emitGameEnded({ gameId: live.gameId, payload: gameEnded });
   if (persist) void persistLive(live);
 }

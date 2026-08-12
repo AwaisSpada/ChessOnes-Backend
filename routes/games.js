@@ -1315,6 +1315,11 @@ router.post(
       const io = req.app.get("io");
       if (game.status !== "completed") {
         io.to(req.params.gameId).emit("move-made", moveData);
+        // Mirror live transport: also hit user rooms if game-room membership was lost.
+        const whiteId = game.players?.white?._id || game.players?.white;
+        const blackId = game.players?.black?._id || game.players?.black;
+        if (whiteId) io.to(`user:${String(whiteId)}`).emit("move-made", moveData);
+        if (blackId) io.to(`user:${String(blackId)}`).emit("move-made", moveData);
       }
       maybeSyncLiveMemoryFromGame(game);
 
