@@ -2230,7 +2230,8 @@ router.post(
         });
       }
 
-      const { result } = req.body;
+      const { result: rawResult } = req.body;
+      let result = rawResult;
       const game = await Game.findOne({ gameId: req.params.gameId }).populate(
         "players.white players.black"
       );
@@ -2251,6 +2252,15 @@ router.post(
         game.isRated !== false;
       const skipStats =
         result.reason === "first-move-abandon" && !arenaRatedAbandon;
+
+      // Buddy / Online / unrated: always draw on abandon (clients may still send a winner).
+      if (
+        result.reason === "first-move-abandon" &&
+        !arenaRatedAbandon &&
+        result.winner !== "draw"
+      ) {
+        result = { ...result, winner: "draw" };
+      }
 
       // Phase 3: when server timeouts armed, already-ended is idempotent success.
       {
@@ -2319,6 +2329,22 @@ router.post(
           return res.status(409).json({
             success: false,
             message: "Cannot abandon: not Black's first-move turn",
+          });
+        }
+
+        // Only the side to move may declare abandon — prevents opponent ending the
+        // game while White's first move is still in flight on the other client.
+        const turnColor = ply === 0 ? "white" : "black";
+        const turnPlayer = game.players?.[turnColor];
+        const turnId = turnPlayer?._id || turnPlayer;
+        if (
+          turnId &&
+          typeof turnId.equals === "function" &&
+          !turnId.equals(req.user._id)
+        ) {
+          return res.status(409).json({
+            success: false,
+            message: "Only the side to move can declare first-move abandon",
           });
         }
       }
