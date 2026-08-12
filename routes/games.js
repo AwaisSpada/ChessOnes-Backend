@@ -538,7 +538,10 @@ router.get("/:gameId", auth, async (req, res) => {
       }
     }
 
-    // Arena clocks start via player-ready → allReady (do not stamp on GET).
+    if (game.arenaId && game.status === "active" && !game.clockStartedAt) {
+      const { ensureArenaClocksStarted } = require("../services/customArenaEngine");
+      await ensureArenaClocksStarted(game);
+    }
 
     // Compute effective timeRemaining based on last update so timers stay correct on reload
     // Phase 1: when LIVE_MEMORY_SNAPSHOT is on, active live-human state comes from LiveGame
@@ -1315,11 +1318,6 @@ router.post(
       const io = req.app.get("io");
       if (game.status !== "completed") {
         io.to(req.params.gameId).emit("move-made", moveData);
-        // Mirror live transport: also hit user rooms if game-room membership was lost.
-        const whiteId = game.players?.white?._id || game.players?.white;
-        const blackId = game.players?.black?._id || game.players?.black;
-        if (whiteId) io.to(`user:${String(whiteId)}`).emit("move-made", moveData);
-        if (blackId) io.to(`user:${String(blackId)}`).emit("move-made", moveData);
       }
       maybeSyncLiveMemoryFromGame(game);
 
@@ -2235,8 +2233,7 @@ router.post(
         });
       }
 
-      const { result: rawResult } = req.body;
-      let result = rawResult;
+      const { result } = req.body;
       const game = await Game.findOne({ gameId: req.params.gameId }).populate(
         "players.white players.black"
       );
@@ -2257,15 +2254,6 @@ router.post(
         game.isRated !== false;
       const skipStats =
         result.reason === "first-move-abandon" && !arenaRatedAbandon;
-
-      // Buddy / Online / unrated: always draw on abandon (clients may still send a winner).
-      if (
-        result.reason === "first-move-abandon" &&
-        !arenaRatedAbandon &&
-        result.winner !== "draw"
-      ) {
-        result = { ...result, winner: "draw" };
-      }
 
       // Phase 3: when server timeouts armed, already-ended is idempotent success.
       {
@@ -2334,22 +2322,6 @@ router.post(
           return res.status(409).json({
             success: false,
             message: "Cannot abandon: not Black's first-move turn",
-          });
-        }
-
-        // Only the side to move may declare abandon — prevents opponent ending the
-        // game while White's first move is still in flight on the other client.
-        const turnColor = ply === 0 ? "white" : "black";
-        const turnPlayer = game.players?.[turnColor];
-        const turnId = turnPlayer?._id || turnPlayer;
-        if (
-          turnId &&
-          typeof turnId.equals === "function" &&
-          !turnId.equals(req.user._id)
-        ) {
-          return res.status(409).json({
-            success: false,
-            message: "Only the side to move can declare first-move abandon",
           });
         }
       }

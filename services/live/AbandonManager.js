@@ -93,16 +93,8 @@ async function onFirstMoveAbandonFire(gameId) {
       return;
     }
 
-    // Rated arena: win/loss for the side that didn't move.
-    // Buddy / Online / friend: draw (no rating impact) — matches mobile/web clients.
-    const isArenaRated =
-      Boolean(live.arenaId) && live.isRated !== false;
     const loser = live.currentTurn === "black" ? "black" : "white";
-    const winner = isArenaRated
-      ? loser === "white"
-        ? "black"
-        : "white"
-      : "draw";
+    const winner = loser === "white" ? "black" : "white";
 
     await liveGameEnd.finalizeServerEnd(
       live,

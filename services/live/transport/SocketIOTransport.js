@@ -13,17 +13,9 @@ class SocketIOTransport {
     this.kind = "socket";
   }
 
-  emitMoveMade({ gameId, payload, userIds }) {
+  emitMoveMade({ gameId, payload }) {
     if (!gameId || !payload) return;
     this.io.to(String(gameId)).emit("move-made", payload);
-    // Also fan-out to per-user rooms — clients that briefly left the game room
-    // (React effect churn) still receive the opponent's move without a refresh.
-    if (Array.isArray(userIds)) {
-      for (const id of userIds) {
-        if (id == null || id === "") continue;
-        this.io.to(`user:${String(id)}`).emit("move-made", payload);
-      }
-    }
   }
 
   emitMoveAccepted({ gameId, userId, socketRef, payload }) {

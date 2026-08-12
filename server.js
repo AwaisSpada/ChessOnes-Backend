@@ -1317,8 +1317,6 @@ io.on("connection", (socket) => {
       let clockStartedAt = null;
       let effectiveTimeRemaining = null;
       let serverNow = Date.now();
-      let readySyncVersion = null;
-      let readyPly = null;
       if (allReady) {
         try {
           const ClockAuthority = require("./services/live/ClockAuthority");
@@ -1363,28 +1361,7 @@ io.on("connection", (socket) => {
                   mem,
                   serverNow
                 );
-                // startClocks bumps syncVersion in memory — clients must learn it
-                // or the first move-made looks like a version gap and gets dropped.
-                if (typeof mem.syncVersion === "number") {
-                  readySyncVersion = mem.syncVersion;
-                  // Keep Mongo in sync with memory so HTTP/GET (web) matches WS (mobile).
-                  try {
-                    await Game.updateOne(
-                      { gameId },
-                      { $set: { syncVersion: mem.syncVersion } }
-                    );
-                  } catch (svErr) {
-                    console.warn(
-                      "[live-sync] persist syncVersion after startClocks failed:",
-                      svErr?.message || svErr
-                    );
-                  }
-                }
-                readyPly = Array.isArray(mem.moves) ? mem.moves.length : 0;
               }
-            } else if (typeof liveDoc.syncVersion === "number") {
-              readySyncVersion = liveDoc.syncVersion;
-              readyPly = Array.isArray(liveDoc.moves) ? liveDoc.moves.length : 0;
             }
           }
         } catch (clockErr) {
@@ -1405,10 +1382,6 @@ io.on("connection", (socket) => {
               ...(effectiveTimeRemaining
                 ? { timeRemaining: effectiveTimeRemaining }
                 : {}),
-              ...(typeof readySyncVersion === "number"
-                ? { syncVersion: readySyncVersion }
-                : {}),
-              ...(typeof readyPly === "number" ? { ply: readyPly } : {}),
             }
           : {}),
       };

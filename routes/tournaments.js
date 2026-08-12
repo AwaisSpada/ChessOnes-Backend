@@ -23,6 +23,7 @@ const {
   addInvitesToLiveArena,
   leaveArenaTournament,
   endArenaByHost,
+  ensureArenaClocksStarted,
 } = require("../services/customArenaEngine");
 const { getArenaChatMessages } = require("../utils/arenaChat");
 const { buildArenaJoinUrls } = require("../utils/frontendUrl");
