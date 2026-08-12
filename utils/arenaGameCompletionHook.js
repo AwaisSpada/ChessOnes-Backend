@@ -3,7 +3,8 @@ const { notifyArenaEndedIfNeeded } = require("../services/arenaNotificationServi
 
 async function syncArenaGameCompletion(gameId, result, io = null) {
   if (!gameId || !result) return;
-  if (result.reason === "first-move-abandon") return;
+  // Arena first-move abandon must still score the pairing (loser = abandoner).
+  // Non-arena buddy/online abandon never reaches this hook.
   try {
     const { arena, error } = await recordArenaResultForGame(gameId, result);
     if (error) {

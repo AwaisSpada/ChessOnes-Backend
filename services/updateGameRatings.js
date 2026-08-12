@@ -36,7 +36,13 @@ function alreadyHasRatingChanges(game) {
  * @returns {Promise<{white:number,black:number}|null>}
  */
 async function updateGameRatings(game, io) {
-  if (game.result?.reason === "first-move-abandon") {
+  const isArenaRatedAbandon =
+    game.result?.reason === "first-move-abandon" &&
+    Boolean(game.arenaId) &&
+    game.isRated !== false;
+
+  // Buddy / online first-move abandon: no rating. Arena rated abandon: apply.
+  if (game.result?.reason === "first-move-abandon" && !isArenaRatedAbandon) {
     return null;
   }
 
@@ -52,7 +58,7 @@ async function updateGameRatings(game, io) {
     game.isRated === false ||
     !game.players.white ||
     !game.players.black ||
-    isAborted ||
+    (isAborted && !isArenaRatedAbandon) ||
     !game.category
   ) {
     return null;
