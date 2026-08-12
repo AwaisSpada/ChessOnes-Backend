@@ -23,9 +23,10 @@ app.set("trust proxy", 1);
 
 const server = createServer(app);
 const io = new Server(server, {
-  // Fast dead-connection detection (defaults are ~25s+20s → feels broken in live games).
-  pingInterval: 1500,
-  pingTimeout: 2000,
+  // Live Wi‑Fi/cellular: 1.5s/2s was too aggressive → drop → miss move-made (false "premoves").
+  // Defaults (~25s/20s) are too slow for dead sockets; 10s/20s is a practical middle.
+  pingInterval: 10000,
+  pingTimeout: 20000,
   cors: {
     origin: [
       process.env.FRONTEND_URL || "https://www.chessones.com",
