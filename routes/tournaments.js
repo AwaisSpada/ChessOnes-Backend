@@ -22,6 +22,8 @@ const {
   enterArenaLobby,
   addInvitesToLiveArena,
   leaveArenaTournament,
+  endArenaByHost,
+  ensureArenaClocksStarted,
 } = require("../services/customArenaEngine");
 const { getArenaChatMessages } = require("../utils/arenaChat");
 const { buildArenaJoinUrls } = require("../utils/frontendUrl");
@@ -876,6 +878,65 @@ router.post("/custom-arenas/:id/leave", auth, async (req, res) => {
   } catch (error) {
     console.error("[Tournaments] custom-arenas leave error:", error);
     res.status(500).json({ success: false, message: "Failed to leave arena" });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/:id/end
+// @desc    Host ends the arena for everyone (blocked while games are live)
+// @access  Private (host only)
+router.post("/custom-arenas/:id/end", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid arena id" });
+    }
+
+    const arenaLean = await CustomArena.findById(req.params.id).lean();
+    if (!arenaLean) {
+      return res.status(404).json({ success: false, message: "Arena not found" });
+    }
+    if (!isArenaVisibleToUser(arenaLean, req.user)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const { arena, runtime, error, code, activeGameCount } = await endArenaByHost(
+      req.params.id,
+      req.user._id
+    );
+
+    if (error) {
+      const status =
+        code === "FORBIDDEN" ? 403 : code === "GAMES_IN_PROGRESS" ? 409 : 400;
+      return res.status(status).json({
+        success: false,
+        message: error,
+        code: code || undefined,
+        data: {
+          runtime: runtime || undefined,
+          activeGameCount: activeGameCount || undefined,
+        },
+      });
+    }
+
+    const io = req.app.get("io");
+    if (arena?.status === "ended" && io) {
+      await notifyArenaEndedIfNeeded(io, String(arena._id));
+    }
+
+    const populated = await CustomArena.findById(arena._id)
+      .populate("createdBy", "username fullName name email avatar country");
+
+    res.json({
+      success: true,
+      data: {
+        runtime: runtime || (await getArenaRuntimeState(arena._id, { autoTick: false })),
+        arena: serializeCustomArena(populated || arena, req.user),
+        arenaEnded: true,
+      },
+      message: "Tournament ended",
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas end error:", error);
+    res.status(500).json({ success: false, message: "Failed to end arena" });
   }
 });
 
