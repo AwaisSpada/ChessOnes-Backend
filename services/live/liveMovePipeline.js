@@ -301,6 +301,41 @@ async function handleLiveMove(socket, raw, io) {
       return rejected;
     }
 
+    // Opening race: do not accept ply0/ply1 until BOTH players are in the game
+    // room (can receive move-made). Prevents White moving while Black's UI is
+    // still loading / not subscribed — clocks may already be running via allReady.
+    {
+      const {
+        bothPlayersInGameRoom,
+        shouldGateOpeningMove,
+      } = require("./gameRoomPresence");
+      if (
+        shouldGateOpeningMove(serverPly) &&
+        !bothPlayersInGameRoom(
+          gameId,
+          live.players?.white,
+          live.players?.black
+        )
+      ) {
+        const rejected = await emitReject(socket, live, {
+          requestId,
+          gameId,
+          code: "OPPONENT_NOT_LIVE",
+          message: "Wait for opponent's board to connect before moving",
+          syncVersion: live.syncVersion,
+          serverPly,
+          serverNow,
+          needSync: true,
+          recoverable: true,
+        });
+        live.rememberRequestOutcome(requestId, {
+          kind: "rejected",
+          payload: rejected,
+        });
+        return rejected;
+      }
+    }
+
     if (
       typeof payload.baseSyncVersion === "number" &&
       payload.baseSyncVersion > live.syncVersion

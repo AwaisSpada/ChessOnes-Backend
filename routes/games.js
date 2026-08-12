@@ -754,6 +754,38 @@ router.post(
         });
       }
 
+      // Opening live-receive gate before any move adapter (HTTP manager / legacy).
+      {
+        const Game = require("../models/Game");
+        const peek = await Game.findOne({ gameId: req.params.gameId })
+          .select("gameId type moves players status")
+          .lean();
+        if (
+          peek &&
+          peek.status === "active" &&
+          (peek.type === "multiplayer" || peek.type === "friend")
+        ) {
+          const {
+            bothPlayersInGameRoom,
+            shouldGateOpeningMove,
+          } = require("../services/live/gameRoomPresence");
+          const ply = Array.isArray(peek.moves) ? peek.moves.length : 0;
+          const whiteId = peek.players?.white?._id || peek.players?.white;
+          const blackId = peek.players?.black?._id || peek.players?.black;
+          if (
+            shouldGateOpeningMove(ply) &&
+            !bothPlayersInGameRoom(peek.gameId || req.params.gameId, whiteId, blackId)
+          ) {
+            return res.status(409).json({
+              success: false,
+              code: "OPPONENT_NOT_LIVE",
+              message: "Wait for opponent's board to connect before moving",
+              needSync: true,
+            });
+          }
+        }
+      }
+
       // Phase 2: when LIVE_HTTP_VIA_MANAGER is on, live-human moves go through
       // LiveGame + MoveProcessor + PersistenceQueue. Flag off → exact legacy path.
       {
@@ -814,6 +846,8 @@ router.post(
           message: "Not your turn",
         });
       }
+
+      // Live human opening gate also checked at route entry (before HTTP manager).
 
       // Harden clock object for older/edge game docs so pre-move payloads never crash this route.
       ensureTimeRemaining(game);

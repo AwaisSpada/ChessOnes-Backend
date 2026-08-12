@@ -235,6 +235,11 @@ const {
 const gameRoomSockets = new Map(); // gameId -> Set of socket IDs
 // Track which users (by userId) are in each game room for presence sync
 const gameRoomUsers = new Map(); // gameId -> Set of userIds
+
+// Opening-move gate: both players must be in the Socket.IO game room.
+require("./services/live/gameRoomPresence").bindGameRoomUserSetAccessor(
+  (gameId) => gameRoomUsers.get(String(gameId))
+);
 // Track per-game ready state in memory: Map<gameId, { [userId]: boolean }>
 const gameReadyState = new Map();
 
