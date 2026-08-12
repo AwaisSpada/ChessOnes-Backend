@@ -76,6 +76,28 @@ function formatCountdown(targetDate) {
   return `${mins}:${String(secs).padStart(2, "0")}`;
 }
 
+/** Chess.com-style: "2 days 5 hours 12 minutes 08 seconds" */
+function formatScheduledCountdown(targetDate) {
+  const diffMs = new Date(targetDate).getTime() - Date.now();
+  if (diffMs <= 0) return "Starting now";
+
+  const totalSecs = Math.floor(diffMs / 1000);
+  const days = Math.floor(totalSecs / 86400);
+  const hours = Math.floor((totalSecs % 86400) / 3600);
+  const minutes = Math.floor((totalSecs % 3600) / 60);
+  const seconds = totalSecs % 60;
+
+  const unit = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const parts = [];
+  if (days > 0) parts.push(unit(days, "day", "days"));
+  if (days > 0 || hours > 0) parts.push(unit(hours, "hour", "hours"));
+  parts.push(unit(minutes, "minute", "minutes"));
+  parts.push(
+    `${String(seconds).padStart(2, "0")} ${seconds === 1 ? "second" : "seconds"}`
+  );
+  return parts.join(" ");
+}
+
 function formatDetailedCountdown(targetDate) {
   const diffMs = new Date(targetDate).getTime() - Date.now();
   if (diffMs <= 0) return "0d 0h 0m 00s";
@@ -211,7 +233,7 @@ function serializeCustomArena(arena, viewer) {
       timeLeft = "Live";
     }
   } else if (arena.status === "scheduled" && arena.scheduledAt) {
-    startsIn = formatCountdown(arena.scheduledAt);
+    startsIn = formatScheduledCountdown(arena.scheduledAt);
   } else if (arena.status === "ended") {
     endedAgo = arena.endedAt
       ? formatRelativeAgo(arena.endedAt)
@@ -283,9 +305,40 @@ function serializeCustomArena(arena, viewer) {
   };
 }
 
-function parseScheduledAt(startMode, startDate, startTime) {
-  if (startMode !== "schedule" || !startDate || !startTime) return null;
-  const scheduled = new Date(`${startDate}T${startTime}`);
+function parseScheduledAt(startMode, startDate, startTime, opts = {}) {
+  if (startMode !== "schedule") return null;
+
+  // Prefer absolute ISO from the client (local wall clock → toISOString).
+  if (opts.scheduledAt) {
+    const fromIso = new Date(opts.scheduledAt);
+    if (!Number.isNaN(fromIso.getTime())) return fromIso;
+  }
+
+  if (!startDate || !startTime) return null;
+
+  const dateParts = String(startDate).split("-").map(Number);
+  const timeParts = String(startTime).split(":").map(Number);
+  const y = dateParts[0];
+  const m = dateParts[1];
+  const d = dateParts[2];
+  const hh = timeParts[0];
+  const mm = timeParts[1] || 0;
+  if (![y, m, d, hh, mm].every((n) => Number.isFinite(n))) return null;
+
+  // Client timezoneOffsetMinutes matches Date#getTimezoneOffset()
+  // (e.g. UTC+5 → -300). Without it, Node treats bare ISO as UTC and
+  // shifts PK / similar zones by several hours.
+  const offsetMin = opts.timezoneOffsetMinutes;
+  if (typeof offsetMin === "number" && Number.isFinite(offsetMin)) {
+    const utcMs = Date.UTC(y, m - 1, d, hh, mm, 0, 0) + offsetMin * 60_000;
+    const scheduled = new Date(utcMs);
+    return Number.isNaN(scheduled.getTime()) ? null : scheduled;
+  }
+
+  // Legacy fallback — treat as UTC to stay deterministic on the server.
+  const scheduled = new Date(
+    `${String(startDate).trim()}T${String(startTime).trim()}:00.000Z`
+  );
   return Number.isNaN(scheduled.getTime()) ? null : scheduled;
 }
 
@@ -1208,6 +1261,8 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
       startMode,
       startDate,
       startTime,
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
       intent,
     } = req.body;
 
@@ -1240,7 +1295,10 @@ router.patch("/custom-arenas/:id", auth, async (req, res) => {
     const hostWillPlay = true;
 
     const isDraft = intent === "draft";
-    const scheduledAt = parseScheduledAt(startMode, startDate, startTime);
+    const scheduledAt = parseScheduledAt(startMode, startDate, startTime, {
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
+    });
 
     if (!isDraft && startMode === "schedule" && !scheduledAt) {
       return res.status(400).json({
@@ -1353,6 +1411,8 @@ router.post("/custom-arenas", auth, async (req, res) => {
       startMode,
       startDate,
       startTime,
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
       joinCode,
       intent,
       hostPlays,
@@ -1387,7 +1447,10 @@ router.post("/custom-arenas", auth, async (req, res) => {
     const hostWillPlay = true;
 
     const isDraft = intent === "draft";
-    const scheduledAt = parseScheduledAt(startMode, startDate, startTime);
+    const scheduledAt = parseScheduledAt(startMode, startDate, startTime, {
+      scheduledAt: scheduledAtRaw,
+      timezoneOffsetMinutes,
+    });
 
     if (!isDraft && startMode === "schedule" && !scheduledAt) {
       return res.status(400).json({
