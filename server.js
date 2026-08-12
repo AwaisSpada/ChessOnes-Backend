@@ -1367,6 +1367,18 @@ io.on("connection", (socket) => {
                 // or the first move-made looks like a version gap and gets dropped.
                 if (typeof mem.syncVersion === "number") {
                   readySyncVersion = mem.syncVersion;
+                  // Keep Mongo in sync with memory so HTTP/GET (web) matches WS (mobile).
+                  try {
+                    await Game.updateOne(
+                      { gameId },
+                      { $set: { syncVersion: mem.syncVersion } }
+                    );
+                  } catch (svErr) {
+                    console.warn(
+                      "[live-sync] persist syncVersion after startClocks failed:",
+                      svErr?.message || svErr
+                    );
+                  }
                 }
                 readyPly = Array.isArray(mem.moves) ? mem.moves.length : 0;
               }
