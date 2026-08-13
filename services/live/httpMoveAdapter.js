@@ -83,12 +83,51 @@ async function tryHandleHttpMove(req, res, hooks) {
   }
 
   const gameId = req.params.gameId;
+  const st = req.liveMoveServerTiming || null;
 
-  let live = await LiveGameManager.getOrHydrate(gameId);
+  st?.mark("LIVE_GAME_MANAGER_LOOKUP_STARTED", { where: "httpMoveAdapter" });
+  let live = LiveGameManager.get(gameId);
   let mongo = null;
 
+  if (live) {
+    st?.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
+      where: "httpMoveAdapter",
+      source: "memory",
+      ply: live.ply,
+      status: live.status,
+    });
+    st?.mark("GAME_LOAD_COMPLETED", {
+      where: "httpMoveAdapter",
+      source: "memory",
+      skippedMongo: true,
+    });
+  } else {
+    st?.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
+      where: "httpMoveAdapter",
+      source: "miss",
+    });
+    st?.mark("GAME_LOAD_STARTED", {
+      where: "httpMoveAdapter",
+      source: "hydrate",
+    });
+    live = await LiveGameManager.getOrHydrate(gameId);
+    st?.mark("GAME_LOAD_COMPLETED", {
+      where: "httpMoveAdapter",
+      source: live ? "hydrate_mongo" : "hydrate_miss",
+      skippedMongo: false,
+    });
+  }
+
   if (!live) {
+    st?.mark("GAME_LOAD_STARTED", {
+      where: "httpMoveAdapter",
+      source: "fallback_mongo",
+    });
     mongo = await Game.findOne({ gameId });
+    st?.mark("GAME_LOAD_COMPLETED", {
+      where: "httpMoveAdapter",
+      source: "fallback_mongo",
+    });
     if (!mongo) {
       res.status(404).json({ success: false, message: "Game not found" });
       return true;
@@ -123,6 +162,7 @@ async function tryHandleHttpMove(req, res, hooks) {
   const playerColor = isWhite ? "white" : "black";
   const { from, to, piece, captured, notation } = req.body;
 
+  st?.mark("BEFORE_MOVE_APPLY", { path: "live_http_via_manager" });
   const outcome = await live.applyMove({
     from,
     to,
@@ -130,6 +170,10 @@ async function tryHandleHttpMove(req, res, hooks) {
     captured,
     notation,
     playerColor,
+  });
+  st?.mark("AFTER_MOVE_APPLY", {
+    path: "live_http_via_manager",
+    ok: !!outcome.ok,
   });
 
   if (!outcome.ok) {
@@ -164,6 +208,7 @@ async function tryHandleHttpMove(req, res, hooks) {
         : {}),
     };
 
+    st?.mark("BEFORE_SOCKET_EMIT", { path: "live_http_via_manager" });
     await liveSideEffects.afterMoveApplied({
       live,
       origin: ORIGIN.HTTP,
@@ -171,6 +216,8 @@ async function tryHandleHttpMove(req, res, hooks) {
       persist: false,
       reschedule: true,
     });
+    st?.mark("AFTER_SOCKET_EMIT", { path: "live_http_via_manager" });
+    st?.mark("MOVE_MADE_EMITTED", { path: "live_http_via_manager" });
     await liveSideEffects.afterGameEndedNotify({
       live,
       origin: ORIGIN.HTTP,
@@ -178,6 +225,22 @@ async function tryHandleHttpMove(req, res, hooks) {
       persist: false,
     });
 
+    st?.mark("BEFORE_DB_SAVE", {
+      awaited: false,
+      path: "live_http_via_manager",
+      note: "persist_after_response",
+    });
+    st?.mark("RESPONSE_SENT", { path: "live_http_via_manager" });
+    st?.markSpan?.(
+      "SPAN_REQUEST_TO_MOVE_MADE_EMITTED",
+      "REQUEST_RECEIVED",
+      "MOVE_MADE_EMITTED"
+    );
+    st?.markSpan?.(
+      "SPAN_REQUEST_TO_RESPONSE_SENT",
+      "REQUEST_RECEIVED",
+      "RESPONSE_SENT"
+    );
     res.status(outcome.httpStatus || 200).json(outcome.httpBody);
 
     void liveSideEffects.persistLive(live).then(() => {
@@ -190,6 +253,7 @@ async function tryHandleHttpMove(req, res, hooks) {
   }
 
   if (outcome.socketPayload) {
+    st?.mark("BEFORE_SOCKET_EMIT", { path: "live_http_via_manager" });
     await liveSideEffects.afterMoveApplied({
       live,
       origin: ORIGIN.HTTP,
@@ -197,11 +261,29 @@ async function tryHandleHttpMove(req, res, hooks) {
       persist: true,
       reschedule: true,
     });
+    st?.mark("AFTER_SOCKET_EMIT", { path: "live_http_via_manager" });
+    st?.mark("MOVE_MADE_EMITTED", { path: "live_http_via_manager" });
+    st?.mark("BEFORE_DB_SAVE", {
+      awaited: false,
+      path: "live_http_via_manager",
+      note: "persistence_queue_async",
+    });
   } else {
     void liveSideEffects.persistLive(live);
     live.rescheduleClocks();
   }
 
+  st?.mark("RESPONSE_SENT", { path: "live_http_via_manager" });
+  st?.markSpan?.(
+    "SPAN_REQUEST_TO_MOVE_MADE_EMITTED",
+    "REQUEST_RECEIVED",
+    "MOVE_MADE_EMITTED"
+  );
+  st?.markSpan?.(
+    "SPAN_REQUEST_TO_RESPONSE_SENT",
+    "REQUEST_RECEIVED",
+    "RESPONSE_SENT"
+  );
   res.status(outcome.httpStatus || 200).json(outcome.httpBody);
 
   if (

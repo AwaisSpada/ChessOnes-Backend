@@ -1,15 +1,23 @@
 /**
  * Move-route auth + game preload.
  *
- * Same guarantees as `auth` + `requirePoliciesAccepted`, but runs
- * User.findById and Game.findOne in parallel so the live-human clock drain
- * window (settle → applyServerElapsedClock) is max(auth, game) not sum.
+ * Same guarantees as `auth` + `requirePoliciesAccepted`.
  *
- * Does not change ClockAuthority, flags, or LIVE_WS_MOVES.
+ * When LIVE_HTTP_VIA_MANAGER + LIVE_MEMORY_SNAPSHOT are on, skips Mongo
+ * Game.findOne here: LiveGameManager memory hit is authoritative; cache miss
+ * hydrates once inside httpMoveAdapter (avoids double Mongo load).
+ *
+ * Legacy path (flags off / bot fallback): still Game.findOne in parallel with User.
  */
+
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Game = require("../models/Game");
+const {
+  LIVE_MEMORY_SNAPSHOT,
+  LIVE_HTTP_VIA_MANAGER,
+} = require("../services/live/flags");
+const LiveGameManager = require("../services/live/LiveGameManager");
 const {
   createLiveMoveServerTiming,
   resolveIncomingRequestId,
@@ -18,6 +26,10 @@ const {
 const MOVE_TIMING = () =>
   process.env.LIVE_MOVE_TIMING === "1" ||
   process.env.LIVE_MOVE_TIMING === "true";
+
+function useLiveHttpMovePath() {
+  return LIVE_HTTP_VIA_MANAGER === true && LIVE_MEMORY_SNAPSHOT === true;
+}
 
 async function authAndPreloadGameForMove(req, res, next) {
   const t0 = Date.now();
@@ -65,7 +77,13 @@ async function authAndPreloadGameForMove(req, res, next) {
     mark("jwt_ok");
 
     const gameId = req.params.gameId;
-    timing.mark("GAME_LOAD_STARTED");
+    const phase2 = useLiveHttpMovePath();
+
+    timing.mark("GAME_LOAD_STARTED", {
+      phase2HttpViaManager: phase2,
+    });
+    timing.mark("LIVE_GAME_MANAGER_LOOKUP_STARTED");
+
     const userPromise = User.findById(decoded.userId)
       .select("-password")
       .then((user) => {
@@ -73,13 +91,49 @@ async function authAndPreloadGameForMove(req, res, next) {
         timing.mark("AUTH_COMPLETED");
         return user;
       });
-    const gamePromise = (gameId
-      ? Game.findOne({ gameId })
-      : Promise.resolve(null)
-    ).then((game) => {
-      timing.mark("GAME_LOAD_COMPLETED");
-      return game;
-    });
+
+    let gamePromise;
+
+    if (phase2 && gameId) {
+      const cached = LiveGameManager.get(gameId);
+      if (cached) {
+        timing.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
+          source: "memory",
+          status: cached.status,
+          ply: cached.ply,
+        });
+        timing.mark("GAME_LOAD_COMPLETED", {
+          source: "memory",
+          skippedMongo: true,
+        });
+        // Leave req.preloadedGame unset so bot/legacy fallback can still Game.findOne.
+        req.liveGameMemoryHit = true;
+        gamePromise = Promise.resolve(null);
+      } else {
+        timing.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
+          source: "miss",
+          deferredHydrate: true,
+        });
+        // Defer Mongo hydrate to httpMoveAdapter.getOrHydrate (single load on miss).
+        timing.mark("GAME_LOAD_COMPLETED", {
+          source: "deferred_to_adapter",
+          skippedMongo: true,
+        });
+        req.liveGameMemoryHit = false;
+        gamePromise = Promise.resolve(null);
+      }
+    } else {
+      timing.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
+        source: "not_applicable",
+        reason: "phase2_flags_off",
+      });
+      gamePromise = (
+        gameId ? Game.findOne({ gameId }) : Promise.resolve(null)
+      ).then((game) => {
+        timing.mark("GAME_LOAD_COMPLETED", { source: "mongo" });
+        return game;
+      });
+    }
 
     const [user, game] = await Promise.all([userPromise, gamePromise]);
 
@@ -109,7 +163,9 @@ async function authAndPreloadGameForMove(req, res, next) {
     }
 
     req.user = user;
-    req.preloadedGame = game;
+    if (!phase2) {
+      req.preloadedGame = game;
+    }
     req._liveMoveTimingT0 = t0;
     timing.setUserId(user._id);
     next();
