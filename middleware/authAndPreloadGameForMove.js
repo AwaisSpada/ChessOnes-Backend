@@ -10,6 +10,10 @@
 const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Game = require("../models/Game");
+const {
+  createLiveMoveServerTiming,
+  resolveIncomingRequestId,
+} = require("../utils/liveMoveServerTiming");
 
 const MOVE_TIMING = () =>
   process.env.LIVE_MOVE_TIMING === "1" ||
@@ -17,6 +21,13 @@ const MOVE_TIMING = () =>
 
 async function authAndPreloadGameForMove(req, res, next) {
   const t0 = Date.now();
+  const timing = createLiveMoveServerTiming({
+    gameId: req.params?.gameId,
+    requestId: resolveIncomingRequestId(req),
+  });
+  req.liveMoveServerTiming = timing;
+  timing.mark("REQUEST_RECEIVED");
+
   const mark = (label) => {
     if (!MOVE_TIMING()) return;
     console.log(
@@ -25,6 +36,7 @@ async function authAndPreloadGameForMove(req, res, next) {
   };
 
   try {
+    timing.mark("AUTH_STARTED");
     const token = req.header("Authorization")?.replace("Bearer ", "");
     if (!token) {
       return res.status(401).json({
@@ -53,10 +65,23 @@ async function authAndPreloadGameForMove(req, res, next) {
     mark("jwt_ok");
 
     const gameId = req.params.gameId;
-    const [user, game] = await Promise.all([
-      User.findById(decoded.userId).select("-password"),
-      gameId ? Game.findOne({ gameId }) : Promise.resolve(null),
-    ]);
+    timing.mark("GAME_LOAD_STARTED");
+    const userPromise = User.findById(decoded.userId)
+      .select("-password")
+      .then((user) => {
+        timing.setUserId(user?._id);
+        timing.mark("AUTH_COMPLETED");
+        return user;
+      });
+    const gamePromise = (gameId
+      ? Game.findOne({ gameId })
+      : Promise.resolve(null)
+    ).then((game) => {
+      timing.mark("GAME_LOAD_COMPLETED");
+      return game;
+    });
+
+    const [user, game] = await Promise.all([userPromise, gamePromise]);
 
     mark("user_and_game_loaded");
 
@@ -86,6 +111,7 @@ async function authAndPreloadGameForMove(req, res, next) {
     req.user = user;
     req.preloadedGame = game;
     req._liveMoveTimingT0 = t0;
+    timing.setUserId(user._id);
     next();
   } catch (error) {
     console.error("authAndPreloadGameForMove error:", error);

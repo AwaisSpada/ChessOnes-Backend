@@ -6,6 +6,10 @@ const Stats = require("../models/Stats");
 const auth = require("../middleware/auth");
 const authAndPreloadGameForMove = require("../middleware/authAndPreloadGameForMove");
 const {
+  createLiveMoveServerTiming,
+  resolveIncomingRequestId,
+} = require("../utils/liveMoveServerTiming");
+const {
   attachReviewAccuracyToGames,
   attachRatingChangeToGames,
   getPlayedTodayCounts,
@@ -758,6 +762,23 @@ router.post(
       );
     };
 
+    // TEMPORARY server timing (always on) — see utils/liveMoveServerTiming.js
+    const st =
+      req.liveMoveServerTiming ||
+      createLiveMoveServerTiming({
+        gameId: req.params.gameId,
+        requestId: resolveIncomingRequestId(req),
+        userId: req.user?._id,
+      });
+    if (!req.liveMoveServerTiming) {
+      req.liveMoveServerTiming = st;
+      st.mark("REQUEST_RECEIVED", { note: "timing_created_in_handler" });
+    }
+    st.setGameId(req.params.gameId);
+    if (req.user?._id) st.setUserId(req.user._id);
+    const incomingRid = resolveIncomingRequestId(req);
+    if (incomingRid) st.setRequestId(incomingRid);
+
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
@@ -773,6 +794,7 @@ router.post(
       {
         const { LIVE_HTTP_VIA_MANAGER } = require("../services/live/flags");
         if (LIVE_HTTP_VIA_MANAGER) {
+          st.mark("LIVE_GAME_MANAGER_LOOKUP_STARTED");
           const {
             tryHandleHttpMove,
           } = require("../services/live/httpMoveAdapter");
@@ -784,6 +806,9 @@ router.post(
               gameEvaluationHistory.delete(id);
             },
             scheduleAdvantageScoreAfterMove,
+          });
+          st.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
+            handled: !!handled,
           });
           if (handled) return;
         }
@@ -854,7 +879,11 @@ router.post(
         }
         // Compute-only — rejected moves must not mutate storedRemaining.
         mark("before_clock_drain");
+        st.mark("BEFORE_CLOCK_PROCESSING");
         const clockResult = applyServerElapsedClock(game);
+        st.mark("AFTER_CLOCK_PROCESSING", {
+          timedOut: !!clockResult?.timedOut,
+        });
         mark("after_clock_drain");
         if (clockResult.timedOut) {
           commitElapsedClock(game, clockResult);
@@ -941,12 +970,14 @@ router.post(
           promotionPiece = "q";
         }
       }
+      st.mark("BEFORE_MOVE_VALIDATION");
       if (!isMoveLegal(game.board, from, to, promotionPiece)) {
         return res.status(400).json({
           success: false,
           message: "Illegal move - would leave king in check or invalid move",
         });
       }
+      st.mark("AFTER_MOVE_VALIDATION");
 
       // Calculate en passant target from last move (if it was a two-square pawn move)
       let enPassantTarget = null;
@@ -965,6 +996,7 @@ router.post(
       }
 
       // Update board
+      st.mark("BEFORE_MOVE_APPLY");
       const newBoard = [...game.board];
       const capturedPiece = newBoard[to];
 
@@ -1227,6 +1259,11 @@ router.post(
       const isStalemateState =
         !isInCheck && isStalemate(newBoard, isNextTurnWhite);
       const isInsufficientMaterialState = isInsufficientMaterial(newBoard);
+      st.mark("AFTER_MOVE_APPLY", {
+        isInCheck,
+        isCheckmate: isCheckmateState,
+        isStalemate: isStalemateState,
+      });
 
       // If checkmate, stalemate, threefold repetition, or insufficient material, end the game
       if (
@@ -1335,7 +1372,10 @@ router.post(
 
       const io = req.app.get("io");
       if (game.status !== "completed") {
+        st.mark("BEFORE_SOCKET_EMIT");
         io.to(req.params.gameId).emit("move-made", moveData);
+        st.mark("AFTER_SOCKET_EMIT");
+        st.mark("MOVE_MADE_EMITTED");
         mark("move_made_emitted");
       }
       maybeSyncLiveMemoryFromGame(game);
@@ -1346,6 +1386,26 @@ router.post(
       if (liveHuman && game.status !== "completed") {
         liveMoveAckedEarly = true;
         mark("ack_sent");
+        st.mark("BEFORE_DB_SAVE", {
+          awaited: false,
+          note: "fire_and_forget_after_response",
+        });
+        st.mark("RESPONSE_SENT");
+        st.markSpan(
+          "SPAN_REQUEST_TO_MOVE_MADE_EMITTED",
+          "REQUEST_RECEIVED",
+          "MOVE_MADE_EMITTED"
+        );
+        st.markSpan(
+          "SPAN_REQUEST_TO_RESPONSE_SENT",
+          "REQUEST_RECEIVED",
+          "RESPONSE_SENT"
+        );
+        st.markSpan(
+          "SPAN_MOVE_MADE_EMITTED_TO_RESPONSE_SENT",
+          "MOVE_MADE_EMITTED",
+          "RESPONSE_SENT"
+        );
         res.json({
           success: true,
           message: "Move made successfully",
@@ -1378,7 +1438,9 @@ router.post(
           );
         });
       } else {
+        st.mark("BEFORE_DB_SAVE", { awaited: true });
         await game.save();
+        st.mark("AFTER_DB_SAVE", { awaited: true });
 
         if (game.status === "completed") {
           const ratingChanges = await notifyGameEndedFast(
@@ -1408,6 +1470,12 @@ router.post(
       });
 
       if (!liveMoveAckedEarly) {
+        st.mark("RESPONSE_SENT");
+        st.markSpan(
+          "SPAN_REQUEST_TO_RESPONSE_SENT",
+          "REQUEST_RECEIVED",
+          "RESPONSE_SENT"
+        );
         res.json({
           success: true,
           message: "Move made successfully",
