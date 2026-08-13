@@ -4,6 +4,7 @@ const Game = require("../models/Game");
 const User = require("../models/User");
 const Stats = require("../models/Stats");
 const auth = require("../middleware/auth");
+const authAndPreloadGameForMove = require("../middleware/authAndPreloadGameForMove");
 const {
   attachReviewAccuracyToGames,
   attachRatingChangeToGames,
@@ -734,8 +735,9 @@ function scheduleAdvantageScoreAfterMove({
 router.post(
   "/:gameId/move",
   [
-    auth,
-    requirePoliciesAccepted,
+    // Parallel User.findById + Game.findOne (same auth/policy checks as before).
+    // Shrinks live-human clock drain window: max(auth, game) instead of sum.
+    authAndPreloadGameForMove,
     body("from").isInt({ min: 0, max: 63 }),
     body("to").isInt({ min: 0, max: 63 }),
     body("piece").isString(),
@@ -744,6 +746,18 @@ router.post(
     body("inCheck").optional().isBoolean(),
   ],
   async (req, res) => {
+    const timingT0 =
+      typeof req._liveMoveTimingT0 === "number" ? req._liveMoveTimingT0 : Date.now();
+    const moveTimingOn =
+      process.env.LIVE_MOVE_TIMING === "1" ||
+      process.env.LIVE_MOVE_TIMING === "true";
+    const mark = (label) => {
+      if (!moveTimingOn) return;
+      console.log(
+        `[live-move-timing] ${label}=${Date.now() - timingT0}ms game=${req.params.gameId}`
+      );
+    };
+
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
@@ -777,7 +791,12 @@ router.post(
 
       const { from, to, piece, captured, notation, timeRemaining, inCheck } =
         req.body;
-      const game = await Game.findOne({ gameId: req.params.gameId });
+      // Prefer parallel preload from authAndPreloadGameForMove (avoids 2nd Game.findOne).
+      const game =
+        req.preloadedGame !== undefined
+          ? req.preloadedGame
+          : await Game.findOne({ gameId: req.params.gameId });
+      mark("game_ready");
 
       if (!game) {
         return res.status(404).json({
@@ -834,7 +853,9 @@ router.post(
           game.clockStartedAt = game.clockStartedAt || new Date();
         }
         // Compute-only — rejected moves must not mutate storedRemaining.
+        mark("before_clock_drain");
         const clockResult = applyServerElapsedClock(game);
+        mark("after_clock_drain");
         if (clockResult.timedOut) {
           commitElapsedClock(game, clockResult);
           game.status = "completed";
@@ -1315,6 +1336,7 @@ router.post(
       const io = req.app.get("io");
       if (game.status !== "completed") {
         io.to(req.params.gameId).emit("move-made", moveData);
+        mark("move_made_emitted");
       }
       maybeSyncLiveMemoryFromGame(game);
 
@@ -1323,6 +1345,7 @@ router.post(
       let liveMoveAckedEarly = false;
       if (liveHuman && game.status !== "completed") {
         liveMoveAckedEarly = true;
+        mark("ack_sent");
         res.json({
           success: true,
           message: "Move made successfully",
