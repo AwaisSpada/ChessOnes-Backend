@@ -723,6 +723,7 @@ function emitMatchFoundToPlayer(player, payload) {
 
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
+  socket.emit("server-time", { serverNow: Date.now() });
 
   socket.on("register-user", async (userId) => {
     if (!userId) return;
@@ -789,6 +790,7 @@ io.on("connection", (socket) => {
     } catch (err) {
       console.error("Presence register-user error:", err);
     }
+    socket.emit("server-time", { serverNow: Date.now() });
   });
 
   // Client asks for the current online state of its friends (app foreground, reconnect).
