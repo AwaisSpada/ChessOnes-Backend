@@ -1376,6 +1376,10 @@ router.post(
             ? move.timestamp.toISOString()
             : move?.timestamp || null,
       });
+      // TEMPORARY diagnostic correlation only — clients ignore unknown fields.
+      if (st.requestId && moveData.requestId == null) {
+        moveData.requestId = st.requestId;
+      }
 
       const io = req.app.get("io");
       if (game.status !== "completed") {
@@ -1413,6 +1417,7 @@ router.post(
           "MOVE_MADE_EMITTED",
           "RESPONSE_SENT"
         );
+        st.attachResponseFinish(res);
         res.json({
           success: true,
           message: "Move made successfully",

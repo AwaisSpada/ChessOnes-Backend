@@ -23,7 +23,6 @@ function firstNonEmptyString(...candidates) {
 
 /**
  * Resolve client correlation id from HTTP move request.
- * Express lowercases header names; also accept common aliases.
  * @returns {{ requestId: string|null, source: string }}
  */
 function resolveIncomingRequestIdDetailed(req) {
@@ -119,6 +118,44 @@ function createLiveMoveServerTiming(opts = {}) {
     return payload;
   }
 
+  /**
+   * Log when Node finishes writing the HTTP response (after RESPONSE_SENT).
+   * Does not alter response body or status.
+   */
+  function attachResponseFinish(res) {
+    if (!res || typeof res.on !== "function") return;
+    if (res.__liveMoveTimingFinishBound) return;
+    res.__liveMoveTimingFinishBound = true;
+    res.on("finish", () => {
+      mark("RESPONSE_FINISH");
+      const emitStage =
+        stageHr.AFTER_SOCKET_EMIT != null
+          ? "AFTER_SOCKET_EMIT"
+          : stageHr.MOVE_MADE_EMITTED != null
+            ? "MOVE_MADE_EMITTED"
+            : null;
+      if (emitStage) {
+        markSpan(
+          "SPAN_REQUEST_TO_SOCKET_EMIT",
+          "REQUEST_RECEIVED",
+          emitStage
+        );
+      }
+      if (stageHr.RESPONSE_SENT != null) {
+        markSpan(
+          "SPAN_REQUEST_TO_RESPONSE_SENT",
+          "REQUEST_RECEIVED",
+          "RESPONSE_SENT"
+        );
+        markSpan(
+          "SPAN_RESPONSE_SENT_TO_FINISH",
+          "RESPONSE_SENT",
+          "RESPONSE_FINISH"
+        );
+      }
+    });
+  }
+
   return {
     get requestId() {
       return requestId;
@@ -128,6 +165,7 @@ function createLiveMoveServerTiming(opts = {}) {
     },
     mark,
     markSpan,
+    attachResponseFinish,
     setGameId(id) {
       if (id != null) gameId = String(id);
     },
@@ -137,10 +175,6 @@ function createLiveMoveServerTiming(opts = {}) {
         requestIdSource = source;
       }
     },
-    /**
-     * Re-read body/headers and overwrite srv-… fallback if client id is present.
-     * Safe to call multiple times; never clears a real client id.
-     */
     adoptIncomingRequestId(req) {
       const resolved = resolveIncomingRequestIdDetailed(req);
       if (!resolved.requestId) return false;
@@ -150,7 +184,6 @@ function createLiveMoveServerTiming(opts = {}) {
         String(requestId || "").startsWith("srv-");
       if (!wasServer && requestId === resolved.requestId) return false;
       if (!wasServer && requestId && requestId !== resolved.requestId) {
-        // Keep the first real client id.
         return false;
       }
       requestId = resolved.requestId;

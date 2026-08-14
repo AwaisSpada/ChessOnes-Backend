@@ -21,6 +21,20 @@ function playerMatches(seatId, userId) {
   return String(seatId) === String(userId);
 }
 
+/** TEMPORARY: stamp diag requestId onto socket payload for log correlation only. */
+function withDiagRequestId(payload, st, req) {
+  if (!payload || typeof payload !== "object") return payload;
+  if (payload.requestId != null && String(payload.requestId).length > 0) {
+    return payload;
+  }
+  const rid =
+    (st && st.requestId) ||
+    (req && req.body && req.body.requestId) ||
+    null;
+  if (!rid) return payload;
+  return { ...payload, requestId: String(rid) };
+}
+
 function buildGameDocForRatings(live, mongo) {
   const base =
     mongo && typeof mongo.toObject === "function" ? mongo.toObject() : mongo || {};
@@ -212,7 +226,7 @@ async function tryHandleHttpMove(req, res, hooks) {
     await liveSideEffects.afterMoveApplied({
       live,
       origin: ORIGIN.HTTP,
-      moveMade: socketPayload,
+      moveMade: withDiagRequestId(socketPayload, st, req),
       persist: false,
       reschedule: true,
     });
@@ -241,6 +255,7 @@ async function tryHandleHttpMove(req, res, hooks) {
       "REQUEST_RECEIVED",
       "RESPONSE_SENT"
     );
+    st?.attachResponseFinish?.(res);
     res.status(outcome.httpStatus || 200).json(outcome.httpBody);
 
     void liveSideEffects.persistLive(live).then(() => {
@@ -257,7 +272,7 @@ async function tryHandleHttpMove(req, res, hooks) {
     await liveSideEffects.afterMoveApplied({
       live,
       origin: ORIGIN.HTTP,
-      moveMade: outcome.socketPayload,
+      moveMade: withDiagRequestId(outcome.socketPayload, st, req),
       persist: true,
       reschedule: true,
     });
@@ -284,6 +299,7 @@ async function tryHandleHttpMove(req, res, hooks) {
     "REQUEST_RECEIVED",
     "RESPONSE_SENT"
   );
+  st?.attachResponseFinish?.(res);
   res.status(outcome.httpStatus || 200).json(outcome.httpBody);
 
   if (
