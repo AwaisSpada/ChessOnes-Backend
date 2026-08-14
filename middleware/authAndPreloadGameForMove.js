@@ -18,47 +18,13 @@ const {
   LIVE_HTTP_VIA_MANAGER,
 } = require("../services/live/flags");
 const LiveGameManager = require("../services/live/LiveGameManager");
-const {
-  createLiveMoveServerTiming,
-  resolveIncomingRequestIdDetailed,
-} = require("../utils/liveMoveServerTiming");
-
-const MOVE_TIMING = () =>
-  process.env.LIVE_MOVE_TIMING === "1" ||
-  process.env.LIVE_MOVE_TIMING === "true";
 
 function useLiveHttpMovePath() {
   return LIVE_HTTP_VIA_MANAGER === true && LIVE_MEMORY_SNAPSHOT === true;
 }
 
 async function authAndPreloadGameForMove(req, res, next) {
-  const t0 = Date.now();
-  const resolvedId = resolveIncomingRequestIdDetailed(req);
-  const timing = createLiveMoveServerTiming({
-    gameId: req.params?.gameId,
-    requestId: resolvedId.requestId,
-    requestIdSource: resolvedId.source,
-  });
-  req.liveMoveServerTiming = timing;
-  // Body is already parsed for POST /move; adopt again in case of odd middleware order.
-  timing.adoptIncomingRequestId(req);
-  timing.mark("REQUEST_RECEIVED", {
-    hasBodyRequestId: !!(req.body && req.body.requestId),
-    hasHeaderRequestId: !!(
-      req.headers &&
-      (req.headers["x-request-id"] || req.headers["x-live-move-request-id"])
-    ),
-  });
-
-  const mark = (label) => {
-    if (!MOVE_TIMING()) return;
-    console.log(
-      `[live-move-timing] ${label}=${Date.now() - t0}ms game=${req.params?.gameId || "?"}`
-    );
-  };
-
   try {
-    timing.mark("AUTH_STARTED");
     const token = req.header("Authorization")?.replace("Bearer ", "");
     if (!token) {
       return res.status(401).json({
@@ -84,70 +50,29 @@ async function authAndPreloadGameForMove(req, res, next) {
       });
     }
 
-    mark("jwt_ok");
-
     const gameId = req.params.gameId;
     const phase2 = useLiveHttpMovePath();
 
-    timing.mark("GAME_LOAD_STARTED", {
-      phase2HttpViaManager: phase2,
-    });
-    timing.mark("LIVE_GAME_MANAGER_LOOKUP_STARTED");
-
-    const userPromise = User.findById(decoded.userId)
-      .select("-password")
-      .then((user) => {
-        timing.setUserId(user?._id);
-        timing.mark("AUTH_COMPLETED");
-        return user;
-      });
+    const userPromise = User.findById(decoded.userId).select("-password");
 
     let gamePromise;
 
     if (phase2 && gameId) {
       const cached = LiveGameManager.get(gameId);
       if (cached) {
-        timing.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
-          source: "memory",
-          status: cached.status,
-          ply: cached.ply,
-        });
-        timing.mark("GAME_LOAD_COMPLETED", {
-          source: "memory",
-          skippedMongo: true,
-        });
         // Leave req.preloadedGame unset so bot/legacy fallback can still Game.findOne.
         req.liveGameMemoryHit = true;
         gamePromise = Promise.resolve(null);
       } else {
-        timing.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
-          source: "miss",
-          deferredHydrate: true,
-        });
         // Defer Mongo hydrate to httpMoveAdapter.getOrHydrate (single load on miss).
-        timing.mark("GAME_LOAD_COMPLETED", {
-          source: "deferred_to_adapter",
-          skippedMongo: true,
-        });
         req.liveGameMemoryHit = false;
         gamePromise = Promise.resolve(null);
       }
     } else {
-      timing.mark("LIVE_GAME_MANAGER_LOOKUP_COMPLETED", {
-        source: "not_applicable",
-        reason: "phase2_flags_off",
-      });
-      gamePromise = (
-        gameId ? Game.findOne({ gameId }) : Promise.resolve(null)
-      ).then((game) => {
-        timing.mark("GAME_LOAD_COMPLETED", { source: "mongo" });
-        return game;
-      });
+      gamePromise = gameId ? Game.findOne({ gameId }) : Promise.resolve(null);
     }
 
     const [user, game] = await Promise.all([userPromise, gamePromise]);
-
-    mark("user_and_game_loaded");
 
     if (!user) {
       return res.status(401).json({
@@ -176,8 +101,6 @@ async function authAndPreloadGameForMove(req, res, next) {
     if (!phase2) {
       req.preloadedGame = game;
     }
-    req._liveMoveTimingT0 = t0;
-    timing.setUserId(user._id);
     next();
   } catch (error) {
     console.error("authAndPreloadGameForMove error:", error);
