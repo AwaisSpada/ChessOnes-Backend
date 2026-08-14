@@ -20,7 +20,7 @@ const {
 const LiveGameManager = require("../services/live/LiveGameManager");
 const {
   createLiveMoveServerTiming,
-  resolveIncomingRequestId,
+  resolveIncomingRequestIdDetailed,
 } = require("../utils/liveMoveServerTiming");
 
 const MOVE_TIMING = () =>
@@ -33,12 +33,22 @@ function useLiveHttpMovePath() {
 
 async function authAndPreloadGameForMove(req, res, next) {
   const t0 = Date.now();
+  const resolvedId = resolveIncomingRequestIdDetailed(req);
   const timing = createLiveMoveServerTiming({
     gameId: req.params?.gameId,
-    requestId: resolveIncomingRequestId(req),
+    requestId: resolvedId.requestId,
+    requestIdSource: resolvedId.source,
   });
   req.liveMoveServerTiming = timing;
-  timing.mark("REQUEST_RECEIVED");
+  // Body is already parsed for POST /move; adopt again in case of odd middleware order.
+  timing.adoptIncomingRequestId(req);
+  timing.mark("REQUEST_RECEIVED", {
+    hasBodyRequestId: !!(req.body && req.body.requestId),
+    hasHeaderRequestId: !!(
+      req.headers &&
+      (req.headers["x-request-id"] || req.headers["x-live-move-request-id"])
+    ),
+  });
 
   const mark = (label) => {
     if (!MOVE_TIMING()) return;

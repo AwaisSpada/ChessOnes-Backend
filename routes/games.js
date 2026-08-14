@@ -748,6 +748,8 @@ router.post(
     body("notation").optional().isString(),
     body("timeRemaining").optional().isObject(),
     body("inCheck").optional().isBoolean(),
+    // TEMPORARY diagnostic correlation — ignored by gameplay / validators otherwise.
+    body("requestId").optional().isString(),
   ],
   async (req, res) => {
     const timingT0 =
@@ -776,8 +778,13 @@ router.post(
     }
     st.setGameId(req.params.gameId);
     if (req.user?._id) st.setUserId(req.user._id);
-    const incomingRid = resolveIncomingRequestId(req);
-    if (incomingRid) st.setRequestId(incomingRid);
+    // Prefer client diag-… / x-request-id over any srv-… fallback minted earlier.
+    if (typeof st.adoptIncomingRequestId === "function") {
+      st.adoptIncomingRequestId(req);
+    } else {
+      const incomingRid = resolveIncomingRequestId(req);
+      if (incomingRid) st.setRequestId(incomingRid, "body_or_header");
+    }
 
     try {
       const errors = validationResult(req);
