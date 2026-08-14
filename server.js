@@ -179,6 +179,7 @@ mongoose
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
+app.use("/api/diag", require("./routes/diag")); // TEMPORARY RTT diagnostics
 app.use("/api/users", require("./routes/users"));
 app.use("/api/games", require("./routes/games"));
 app.use("/api/friends", require("./routes/friends"));
