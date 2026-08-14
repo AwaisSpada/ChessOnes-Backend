@@ -1345,6 +1345,21 @@ io.on("connection", (socket) => {
               liveDoc,
               serverNow
             );
+            if (
+              !effectiveTimeRemaining ||
+              typeof effectiveTimeRemaining.white !== "number"
+            ) {
+              effectiveTimeRemaining = {
+                white:
+                  typeof liveDoc.timeRemaining?.white === "number"
+                    ? liveDoc.timeRemaining.white
+                    : null,
+                black:
+                  typeof liveDoc.timeRemaining?.black === "number"
+                    ? liveDoc.timeRemaining.black
+                    : null,
+              };
+            }
 
             const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require(
               "./services/live/flags"
@@ -1372,6 +1387,8 @@ io.on("connection", (socket) => {
         }
       }
 
+      // Clock contract v1: allReady always carries clockStartedAt, serverNow,
+      // timeRemaining so both clients share one server epoch (ADR-003).
       const readyPayload = {
         gameId,
         userId: normalizedId,
@@ -1382,9 +1399,10 @@ io.on("connection", (socket) => {
           ? {
               clockStartedAt,
               serverNow,
-              ...(effectiveTimeRemaining
-                ? { timeRemaining: effectiveTimeRemaining }
-                : {}),
+              timeRemaining: effectiveTimeRemaining || {
+                white: null,
+                black: null,
+              },
             }
           : {}),
       };

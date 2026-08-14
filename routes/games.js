@@ -55,6 +55,26 @@ function maybeSyncLiveMemoryFromGame(game) {
     );
   }
 }
+
+/**
+ * Terminal payload for late move / abandon race — clients force-resync, never invent end UI.
+ */
+function buildTerminalConflictPayload(game, now = Date.now()) {
+  const source = game || {};
+  const timeRemaining = getEffectiveTimeRemaining(source, now);
+  return {
+    result: source.result || null,
+    status: source.status,
+    syncVersion:
+      typeof source.syncVersion === "number" ? source.syncVersion : 0,
+    timeRemaining,
+    serverNow: now,
+    ply: Array.isArray(source.moves) ? source.moves.length : 0,
+    currentTurn: source.currentTurn === "black" ? "black" : "white",
+    board: source.board,
+    clockStartedAt: source.clockStartedAt || null,
+  };
+}
 // Evaluation history storage per game (for smoothing and momentum tracking)
 const gameEvaluationHistory = new Map(); // gameId -> { previousEval, previousSign, confirmCount, wasInCheck, checkEscapeConfirmCount, pendingEvaluation, kingUnderAttackCounter, unchangedEvalCount }
 
@@ -794,6 +814,17 @@ router.post(
       }
 
       if (game.status !== "active") {
+        // Live human: 409 + full terminal so both clients converge (move vs abandon race).
+        if (isLiveHumanGame(game)) {
+          const now = Date.now();
+          return res.status(409).json({
+            success: false,
+            code: "GAME_ALREADY_ENDED",
+            message: "Game is not active",
+            needSync: true,
+            data: buildTerminalConflictPayload(game, now),
+          });
+        }
         return res.status(400).json({
           success: false,
           message: "Game is not active",
@@ -2258,36 +2289,46 @@ router.post(
       const skipStats =
         result.reason === "first-move-abandon" && !arenaRatedAbandon;
 
-      // Phase 3: when server timeouts armed, already-ended is idempotent success.
+      // Already-ended: idempotent success for soft client claims (abandon/timeout/end).
+      // Prefer LiveGame memory when snapshot is on so move vs abandon share one truth.
       {
-        const { LIVE_SERVER_TIMEOUTS } = require("../services/live/flags");
-        if (LIVE_SERVER_TIMEOUTS) {
-          const LiveGameManager = require("../services/live/LiveGameManager");
-          const live = LiveGameManager.get(req.params.gameId);
-          if (live && live.status !== "active") {
-            return res.json({
-              success: true,
-              message: "Game already ended",
-              alreadyEnded: true,
-              data: {
-                result: live.result,
-                status: live.status,
-                syncVersion: live.syncVersion,
-              },
-            });
-          }
-          if (game.status !== "active") {
-            return res.json({
-              success: true,
-              message: "Game already ended",
-              alreadyEnded: true,
-              data: {
-                result: game.result,
-                status: game.status,
-                syncVersion: game.syncVersion,
-              },
-            });
-          }
+        const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require(
+          "../services/live/flags"
+        );
+        const LiveGameManager = require("../services/live/LiveGameManager");
+        const live =
+          LIVE_MEMORY_SNAPSHOT || LIVE_SERVER_TIMEOUTS
+            ? LiveGameManager.get(req.params.gameId)
+            : null;
+        if (live && live.status !== "active") {
+          return res.json({
+            success: true,
+            message: "Game already ended",
+            alreadyEnded: true,
+            data: {
+              result: live.result,
+              status: live.status,
+              syncVersion: live.syncVersion,
+              timeRemaining: live.timeRemaining,
+              serverNow: Date.now(),
+              ply: Array.isArray(live.moves) ? live.moves.length : 0,
+            },
+          });
+        }
+        if (game.status !== "active") {
+          return res.json({
+            success: true,
+            message: "Game already ended",
+            alreadyEnded: true,
+            data: {
+              result: game.result,
+              status: game.status,
+              syncVersion: game.syncVersion,
+              timeRemaining: game.timeRemaining,
+              serverNow: Date.now(),
+              ply: Array.isArray(game.moves) ? game.moves.length : 0,
+            },
+          });
         }
       }
 
@@ -2307,43 +2348,124 @@ router.post(
       }
 
       // Per-side first-move abandon (White ply0, Black ply1). After both moved → reject.
+      // Prefer LiveGame under lock when snapshot on so concurrent HTTP move cannot split state.
       if (result.reason === "first-move-abandon") {
-        const ply = Array.isArray(game.moves) ? game.moves.length : 0;
-        if (ply >= 2) {
-          return res.status(409).json({
-            success: false,
-            message: "Cannot abandon: both players have moved",
-          });
-        }
-        if (ply === 0 && game.currentTurn !== "white") {
-          return res.status(409).json({
-            success: false,
-            message: "Cannot abandon: not White's opening turn",
-          });
-        }
-        if (ply === 1 && game.currentTurn !== "black") {
-          return res.status(409).json({
-            success: false,
-            message: "Cannot abandon: not Black's first-move turn",
-          });
-        }
-        // Reject early claims (skew / race). Same window as AbandonManager.
-        try {
-          const {
-            shouldAbandonNow,
-          } = require("../services/live/AbandonManager");
-          if (!shouldAbandonNow(game, Date.now())) {
-            return res.status(409).json({
-              success: false,
-              message: "Cannot abandon: first-move window still open",
-              needSync: true,
-            });
+        const now = Date.now();
+        const { LIVE_MEMORY_SNAPSHOT } = require("../services/live/flags");
+        const {
+          shouldAbandonNow,
+        } = require("../services/live/AbandonManager");
+
+        const evaluateAbandonSource = (source) => {
+          const ply = Array.isArray(source.moves) ? source.moves.length : 0;
+          if (ply >= 2) {
+            return {
+              ok: false,
+              status: 409,
+              body: {
+                success: false,
+                message: "Cannot abandon: both players have moved",
+                needSync: true,
+                data: buildTerminalConflictPayload(source, now),
+              },
+            };
           }
-        } catch (abandonCheckErr) {
-          console.warn(
-            "[endGame] abandon deadline check failed:",
-            abandonCheckErr?.message || abandonCheckErr
-          );
+          if (ply === 0 && source.currentTurn !== "white") {
+            return {
+              ok: false,
+              status: 409,
+              body: {
+                success: false,
+                message: "Cannot abandon: not White's opening turn",
+                needSync: true,
+                data: buildTerminalConflictPayload(source, now),
+              },
+            };
+          }
+          if (ply === 1 && source.currentTurn !== "black") {
+            return {
+              ok: false,
+              status: 409,
+              body: {
+                success: false,
+                message: "Cannot abandon: not Black's first-move turn",
+                needSync: true,
+                data: buildTerminalConflictPayload(source, now),
+              },
+            };
+          }
+          if (!shouldAbandonNow(source, now)) {
+            return {
+              ok: false,
+              status: 409,
+              body: {
+                success: false,
+                message: "Cannot abandon: first-move window still open",
+                needSync: true,
+                data: buildTerminalConflictPayload(source, now),
+              },
+            };
+          }
+          return { ok: true };
+        };
+
+        let abandonGate = evaluateAbandonSource(game);
+        if (LIVE_MEMORY_SNAPSHOT) {
+          const LiveGameManager = require("../services/live/LiveGameManager");
+          let live = LiveGameManager.get(game.gameId);
+          if (!live) {
+            try {
+              live = await LiveGameManager.getOrHydrate(game.gameId);
+            } catch (_) {
+              live = null;
+            }
+          }
+          if (live) {
+            if (live.status !== "active") {
+              return res.json({
+                success: true,
+                message: "Game already ended",
+                alreadyEnded: true,
+                data: {
+                  result: live.result,
+                  status: live.status,
+                  syncVersion: live.syncVersion,
+                  timeRemaining: live.timeRemaining,
+                  serverNow: now,
+                  ply: Array.isArray(live.moves) ? live.moves.length : 0,
+                },
+              });
+            }
+            abandonGate = await live.runSerialized(async () => {
+              if (live.status !== "active") {
+                return {
+                  ok: false,
+                  alreadyEnded: true,
+                  data: {
+                    result: live.result,
+                    status: live.status,
+                    syncVersion: live.syncVersion,
+                    timeRemaining: live.timeRemaining,
+                    serverNow: Date.now(),
+                    ply: Array.isArray(live.moves) ? live.moves.length : 0,
+                  },
+                };
+              }
+              return evaluateAbandonSource(live);
+            });
+            if (abandonGate?.alreadyEnded) {
+              return res.json({
+                success: true,
+                message: "Game already ended",
+                alreadyEnded: true,
+                data: abandonGate.data,
+              });
+            }
+          }
+        }
+
+        if (!abandonGate.ok) {
+          return res.status(abandonGate.status || 409).json(abandonGate.body);
         }
       }
 
@@ -2471,12 +2593,34 @@ router.post(
         { $set: endSet }
       );
       if (claimed.matchedCount === 0) {
+        const fresh = await Game.findOne({ gameId: game.gameId })
+          .select("status result syncVersion timeRemaining moves currentTurn board clockStartedAt")
+          .lean();
+        if (fresh && fresh.status !== "active") {
+          return res.json({
+            success: true,
+            message: "Game already ended",
+            alreadyEnded: true,
+            data: buildTerminalConflictPayload(fresh),
+          });
+        }
         return res.status(404).json({
           success: false,
           message: "Game not found",
         });
       }
       if (claimed.modifiedCount === 0) {
+        const fresh = await Game.findOne({ gameId: game.gameId })
+          .select("status result syncVersion timeRemaining moves currentTurn board clockStartedAt")
+          .lean();
+        if (fresh && fresh.status !== "active") {
+          return res.json({
+            success: true,
+            message: "Game already ended",
+            alreadyEnded: true,
+            data: buildTerminalConflictPayload(fresh),
+          });
+        }
         return res.status(400).json({
           success: false,
           message: "Game is already ended",

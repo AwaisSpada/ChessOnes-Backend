@@ -13,14 +13,29 @@ function parseEnvFlag(name, defaultValue = false) {
   return defaultValue;
 }
 
+/**
+ * ADR-003 production arming: memory snapshots + server timeouts ON by default
+ * when NODE_ENV=production. Explicit env still wins (true/false). Keep
+ * LIVE_WS_MOVES / LIVE_HTTP_VIA_MANAGER off unless rolled out separately.
+ */
+const isProductionEnv = String(process.env.NODE_ENV || "")
+  .trim()
+  .toLowerCase() === "production";
+
 /** @type {boolean} Phase 1 — memory snapshots / hydration reads */
-const LIVE_MEMORY_SNAPSHOT = parseEnvFlag("LIVE_MEMORY_SNAPSHOT", false);
+const LIVE_MEMORY_SNAPSHOT = parseEnvFlag(
+  "LIVE_MEMORY_SNAPSHOT",
+  isProductionEnv
+);
 
 /** @type {boolean} Phase 2 — HTTP moves via LiveGame actor */
 const LIVE_HTTP_VIA_MANAGER = parseEnvFlag("LIVE_HTTP_VIA_MANAGER", false);
 
 /** @type {boolean} Phase 3 — server TimeoutManager flag/abandon */
-const LIVE_SERVER_TIMEOUTS = parseEnvFlag("LIVE_SERVER_TIMEOUTS", false);
+const LIVE_SERVER_TIMEOUTS = parseEnvFlag(
+  "LIVE_SERVER_TIMEOUTS",
+  isProductionEnv
+);
 
 /** @type {boolean} Phase 4 — authenticated live:move WebSocket commands */
 const LIVE_WS_MOVES = parseEnvFlag("LIVE_WS_MOVES", false);

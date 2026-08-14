@@ -18,7 +18,19 @@ is; they do not authorize implementation by themselves.
 
 - Applies to **live-human** games (`type` multiplayer | friend).
 - Bot / pass-play paths remain Mongo-authoritative and out of LiveGame scope.
-- Feature flags default **OFF** until phased rollout sign-off.
+- ADR-003 flags (`LIVE_MEMORY_SNAPSHOT`, `LIVE_SERVER_TIMEOUTS`) default **ON** in
+  production (`NODE_ENV=production`); other live flags stay **OFF** until rollout.
+
+### Clock contract v1 (socket / HTTP)
+
+Clients treat these as display-only / soft-claim inputs — never invent terminal state:
+
+| Field | Where |
+|-------|--------|
+| `serverNow` | `ready:update`, `move-made`, `game-ended`, GET game, 409 sync |
+| `clockStartedAt` | `ready:update` (allReady), GET game |
+| `timeRemaining` | same as `serverNow` |
+| `syncVersion` / `ply` | `move-made`, GET game, terminal 409 |
 
 ## Related documents
 
