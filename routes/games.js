@@ -2327,6 +2327,24 @@ router.post(
             message: "Cannot abandon: not Black's first-move turn",
           });
         }
+        // Reject early claims (skew / race). Same window as AbandonManager.
+        try {
+          const {
+            shouldAbandonNow,
+          } = require("../services/live/AbandonManager");
+          if (!shouldAbandonNow(game, Date.now())) {
+            return res.status(409).json({
+              success: false,
+              message: "Cannot abandon: first-move window still open",
+              needSync: true,
+            });
+          }
+        } catch (abandonCheckErr) {
+          console.warn(
+            "[endGame] abandon deadline check failed:",
+            abandonCheckErr?.message || abandonCheckErr
+          );
+        }
       }
 
       // Check if user is part of this game
