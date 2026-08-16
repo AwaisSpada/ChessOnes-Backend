@@ -777,6 +777,16 @@ io.on("connection", (socket) => {
         });
       }
       FindRivalJoinWait.onJoined(gameId);
+      // join-game may have run before register-user, so the existing-player
+      // snapshot never reached this socket. Replay who is already in the room.
+      Array.from(userSet)
+        .filter((id) => id !== uid)
+        .forEach((existingUserId) => {
+          socket.emit("player-joined", {
+            gameId,
+            userId: existingUserId,
+          });
+        });
       if (resumedGameIds.includes(String(gameId))) {
         emitPlayerReconnected(io, gameId, uid);
         console.log(
@@ -844,19 +854,18 @@ io.on("connection", (socket) => {
       }
       FindRivalJoinWait.onJoined(gameId);
 
-      // If this is a new join, sync presence both ways
-      if (isNewJoin) {
-        // 1. Tell the new joiner who's already in the room
+      // Notify this socket of existing occupants on first user-tracked join,
+      // including the case where join-game ran earlier without userId so
+      // isNewJoin is now false.
+      if (isNewJoin || !wasUserAlreadyTracked) {
         const existingUserIds = Array.from(userSet).filter(
           (uid) => uid !== userId
         );
-
         if (existingUserIds.length > 0) {
           console.log(
-            `📢 Notifying new joiner ${userId} about existing players:`,
+            `📢 Notifying joiner ${userId} about existing players:`,
             existingUserIds
           );
-          // Emit to the new joiner for each existing player
           existingUserIds.forEach((existingUserId) => {
             socket.emit("player-joined", {
               gameId,
@@ -864,8 +873,9 @@ io.on("connection", (socket) => {
             });
           });
         }
+      }
 
-        // 2. Tell existing players that the new joiner arrived
+      if (isNewJoin) {
         socket.to(gameId).emit("player-joined", {
           gameId,
           userId: userId,
