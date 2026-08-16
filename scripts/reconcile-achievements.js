@@ -5,7 +5,9 @@
  * Policy:
  *   - Win badges  → rated multiplayer/friend wins only
  *   - Rating badges → remove if TC never confirmed (gamesPlayed < 5);
- *                     keep if confirmed (even after a rating drop)
+ *                     keep if confirmed (even after a rating drop).
+ *                     Do not backfill lower rating badges; new ones only
+ *                     on a confirmed threshold cross.
  *   - Puzzles / anniversary → real solves / account age
  *   - Unknown catalog ids → remove
  *

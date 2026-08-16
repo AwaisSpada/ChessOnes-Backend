@@ -261,6 +261,15 @@ const userSchema = new mongoose.Schema(
         },
       },
     ],
+    /**
+     * Last confirmed rating seen per TC for rating-achievement crosses.
+     * Null until that TC is confirmed — first snapshot does not backfill lower badges.
+     */
+    ratingAchievementWatermark: {
+      bullet: { type: Number, default: null },
+      blitz: { type: Number, default: null },
+      rapid: { type: Number, default: null },
+    },
     // User suspension status
     isSuspended: {
       type: Boolean,

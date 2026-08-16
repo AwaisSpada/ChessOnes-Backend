@@ -23,7 +23,7 @@ function isRatingConfirmed(user, timeControl) {
 /**
  * Resolve a dotted path against stats + user + extras.
  * wins.* → rated online wins only (extras.ratedWins)
- * ratings.* → rating value (unlock gated separately via confirmation)
+ * ratings.* → rating value (display progress); unlock is confirmed cross-only
  */
 function resolveStatValue(path, stats, user, extras = {}) {
   if (!path) return 0;
@@ -64,14 +64,59 @@ function resolveStatValue(path, stats, user, extras = {}) {
   return typeof cur === "number" ? cur : 0;
 }
 
+function getRatingWatermark(user, timeControl) {
+  const v = user?.ratingAchievementWatermark?.[timeControl];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Rating badge is earned only when that threshold is crossed while confirmed.
+ *
+ * - Provisional ★ → never.
+ * - First confirmed snapshot (no watermark): only a badge whose value equals
+ *   the rounded current rating (e.g. exactly 1800). No 1000/1200/1500 pile.
+ * - After that: last watermark < T ≤ current rating (drop then recross works).
+ * Persistence of the unlock is still forever; this only gates NEW awards.
+ */
+function ratingThresholdJustReached(user, timeControl, threshold) {
+  if (!isRatingConfirmed(user, timeControl)) return false;
+  if (typeof threshold !== "number" || !Number.isFinite(threshold)) return false;
+  const current = user?.ratings?.[timeControl]?.rating;
+  if (typeof current !== "number" || !Number.isFinite(current)) return false;
+
+  const last = getRatingWatermark(user, timeControl);
+  if (last == null) {
+    return Math.round(current) === threshold;
+  }
+  return last < threshold && threshold <= current;
+}
+
+/** After unlock checks, store current confirmed rating so the next game can detect a cross. */
+function snapshotRatingWatermarks(user) {
+  if (!user) return false;
+  const tcs = ["bullet", "blitz", "rapid"];
+  if (!user.ratingAchievementWatermark) {
+    user.ratingAchievementWatermark = {};
+  }
+  let changed = false;
+  for (const tc of tcs) {
+    if (!isRatingConfirmed(user, tc)) continue;
+    const current = user.ratings?.[tc]?.rating;
+    if (typeof current !== "number" || !Number.isFinite(current)) continue;
+    if (user.ratingAchievementWatermark[tc] !== current) {
+      user.ratingAchievementWatermark[tc] = current;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function ruleSatisfied(rule, stats, user, extras = {}) {
   if (!rule || rule.type !== "stat") return false;
 
-  // Rating milestones: never while provisional (★); once confirmed, all
-  // thresholds ≤ current rating unlock (and stay unlocked forever).
   if (rule.path && rule.path.startsWith("ratings.")) {
     const tc = rule.path.split(".")[1];
-    if (!isRatingConfirmed(user, tc)) return false;
+    return ratingThresholdJustReached(user, tc, rule.value);
   }
 
   const current = resolveStatValue(rule.path, stats, user, extras);
@@ -86,8 +131,8 @@ function ruleSatisfied(rule, stats, user, extras = {}) {
  * - Unknown catalog ids → drop
  * - Wins / puzzles / anniversary → must still satisfy current rules
  *   (rated human wins only, real puzzle solves, account age)
- * - Ratings → drop if that TC was never confirmed (★). If confirmed, keep
- *   even when rating later drops (permanent badges).
+ * - Ratings → drop if that TC never confirmed (★). If confirmed, keep
+ *   even when rating later drops (permanent).
  */
 function shouldRetainUnlock(def, stats, user, extras = {}) {
   if (!def || !def.rule) return false;
@@ -101,7 +146,8 @@ function shouldRetainUnlock(def, stats, user, extras = {}) {
 }
 
 /**
- * Prune invalid unlocks and silently grant any currently earned missing ones.
+ * Prune invalid unlocks and silently grant missing ones that qualify now.
+ * Rating badges are granted on threshold-cross only (no ≤ current backfill).
  * Does not emit socket events (migration / repair only).
  *
  * @returns {{ removed: string[], added: string[], kept: string[] }}
@@ -154,7 +200,8 @@ async function reconcileUserAchievements(userId, { persist = true } = {}) {
   }
 
   const changed = removed.length > 0 || added.length > 0;
-  if (persist && changed) {
+  const watermarkChanged = snapshotRatingWatermarks(user);
+  if (persist && (changed || watermarkChanged)) {
     user.unlockedAchievements = keptEntries;
     await user.save();
   }
@@ -245,6 +292,7 @@ async function loadExtras(userId) {
 /**
  * Persist newly qualified catalog achievements and emit ACHIEVEMENT_UNLOCKED.
  * Never revokes existing unlocks (rating drop / loss streak cannot remove badges).
+ * Rating badges use confirmed threshold-cross only (no lower-badge backfill).
  */
 async function checkAndUnlockAchievements(userId, io = null) {
   const user = await User.findById(userId);
@@ -281,15 +329,18 @@ async function checkAndUnlockAchievements(userId, io = null) {
     });
   }
 
-  if (newlyUnlocked.length > 0) {
+  const watermarkChanged = snapshotRatingWatermarks(user);
+
+  if (newlyUnlocked.length > 0 || watermarkChanged) {
     await user.save();
-    if (io) {
-      for (const item of newlyUnlocked) {
-        io.to(`user:${userId}`).emit("ACHIEVEMENT_UNLOCKED", {
-          achievement: item,
-          unlockedAt: item.unlockedAt,
-        });
-      }
+  }
+
+  if (newlyUnlocked.length > 0 && io) {
+    for (const item of newlyUnlocked) {
+      io.to(`user:${userId}`).emit("ACHIEVEMENT_UNLOCKED", {
+        achievement: item,
+        unlockedAt: item.unlockedAt,
+      });
     }
   }
 
@@ -320,8 +371,11 @@ async function buildAchievementsPayload(userId) {
   const items = ACHIEVEMENTS.map((def) => {
     const progress = resolveStatValue(def.rule.path, stats, user, extras);
     const target = def.rule.value;
+    const isRatingBadge =
+      def.rule.path && def.rule.path.startsWith("ratings.");
     const unlocked =
-      unlockedMap.has(def.id) || ruleSatisfied(def.rule, stats, user, extras);
+      unlockedMap.has(def.id) ||
+      (!isRatingBadge && ruleSatisfied(def.rule, stats, user, extras));
 
     // For display: provisional ratings still show numeric progress, but stay locked.
     const ratingPath =
@@ -374,6 +428,8 @@ module.exports = {
   resolveStatValue,
   ruleSatisfied,
   isRatingConfirmed,
+  ratingThresholdJustReached,
+  snapshotRatingWatermarks,
   assetUrlFor,
   loadRatedWinCounts,
   RATING_CONFIRM_GAMES,

@@ -76,42 +76,92 @@ test("provisional 1500 does NOT unlock rating_bullet_1500", () => {
   assert.strictEqual(ruleSatisfied(rule, {}, provisionalUser, {}), false);
 });
 
-console.log("\n2) Confirmed rating backfill");
-test("confirmed 1600 unlocks 1000/1200/1500", () => {
+console.log("\n2) Confirmed rating — cross only, no lower-badge pile");
+test("first confirm at 1600 (no watermark) does NOT grant 1000/1200/1500", () => {
   for (const v of [1000, 1200, 1500]) {
     const rule = { type: "stat", path: "ratings.bullet", op: "gte", value: v };
     assert.strictEqual(
       ruleSatisfied(rule, {}, confirmed1600, {}),
-      true,
-      `expected unlock at ${v}`,
+      false,
+      `must not backfill ${v}`,
     );
   }
 });
-test("confirmed 1600 does NOT unlock 1800", () => {
-  const rule = { type: "stat", path: "ratings.bullet", op: "gte", value: 1800 };
-  assert.strictEqual(ruleSatisfied(rule, {}, confirmed1600, {}), false);
-});
-test("confirmed blitz 1350 unlocks 1000+1200 only", () => {
+test("first confirm at exact 1500 grants only 1500", () => {
+  const user = {
+    ratings: { bullet: { rating: 1500, gamesPlayed: 5 } },
+  };
   assert.strictEqual(
-    ruleSatisfied(
-      { type: "stat", path: "ratings.blitz", op: "gte", value: 1200 },
-      {},
-      confirmed1600,
-      {},
-    ),
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1500 }, {}, user, {}),
     true,
   );
   assert.strictEqual(
-    ruleSatisfied(
-      { type: "stat", path: "ratings.blitz", op: "gte", value: 1500 },
-      {},
-      confirmed1600,
-      {},
-    ),
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1200 }, {}, user, {}),
+    false,
+  );
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1800 }, {}, user, {}),
     false,
   );
 });
-test("confirmed rapid 980 unlocks nothing in rating thresholds", () => {
+test("confirm at 1820 then climb to 2000 grants only 2000", () => {
+  const user = {
+    ratings: { bullet: { rating: 2000, gamesPlayed: 12 } },
+    ratingAchievementWatermark: { bullet: 1820 },
+  };
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 2000 }, {}, user, {}),
+    true,
+  );
+  for (const v of [1000, 1200, 1500, 1800]) {
+    assert.strictEqual(
+      ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: v }, {}, user, {}),
+      false,
+      `must not grant ${v} on the way to 2000`,
+    );
+  }
+});
+test("drop to 1440 then recross 1500 grants only 1500", () => {
+  const user = {
+    ratings: { bullet: { rating: 1510, gamesPlayed: 20 } },
+    ratingAchievementWatermark: { bullet: 1440 },
+  };
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1500 }, {}, user, {}),
+    true,
+  );
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1200 }, {}, user, {}),
+    false,
+  );
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1800 }, {}, user, {}),
+    false,
+  );
+});
+test("one jump 1440 → 1850 crosses 1500 and 1800", () => {
+  const user = {
+    ratings: { bullet: { rating: 1850, gamesPlayed: 20 } },
+    ratingAchievementWatermark: { bullet: 1440 },
+  };
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1500 }, {}, user, {}),
+    true,
+  );
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1800 }, {}, user, {}),
+    true,
+  );
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 1000 }, {}, user, {}),
+    false,
+  );
+  assert.strictEqual(
+    ruleSatisfied({ type: "stat", path: "ratings.bullet", op: "gte", value: 2000 }, {}, user, {}),
+    false,
+  );
+});
+test("confirmed rapid 980 with no watermark unlocks nothing", () => {
   assert.strictEqual(
     ruleSatisfied(
       { type: "stat", path: "ratings.rapid", op: "gte", value: 1000 },
