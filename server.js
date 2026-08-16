@@ -277,6 +277,12 @@ const {
 
 initReconnectManager(io);
 
+const FindRivalJoinWait = require("./services/live/FindRivalJoinWait");
+FindRivalJoinWait.init({
+  io,
+  getGameRoomUsers: (gameId) => gameRoomUsers.get(String(gameId)),
+});
+
 // Phase 3: wire Socket.IO into server-authoritative end helpers (flag/abandon).
 require("./services/live/liveGameEnd").init(io);
 
@@ -503,6 +509,7 @@ async function createMatchmakingGame(player1, player2, category) {
     // Set category based on time control
     setGameCategory(game);
     await game.save();
+    FindRivalJoinWait.schedule(game);
     
     // Update user statuses
     await User.findByIdAndUpdate(player1.userId, { status: "in-game" });
@@ -769,6 +776,7 @@ io.on("connection", (socket) => {
           userId: uid,
         });
       }
+      FindRivalJoinWait.onJoined(gameId);
       if (resumedGameIds.includes(String(gameId))) {
         emitPlayerReconnected(io, gameId, uid);
         console.log(
@@ -834,6 +842,7 @@ io.on("connection", (socket) => {
       if (!wasUserAlreadyTracked) {
         userSet.add(userId);
       }
+      FindRivalJoinWait.onJoined(gameId);
 
       // If this is a new join, sync presence both ways
       if (isNewJoin) {
@@ -1321,6 +1330,7 @@ io.on("connection", (socket) => {
       let effectiveTimeRemaining = null;
       let serverNow = Date.now();
       if (allReady) {
+        FindRivalJoinWait.cancel(gameId);
         try {
           const ClockAuthority = require("./services/live/ClockAuthority");
           const startedAt = new Date();
