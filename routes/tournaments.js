@@ -934,7 +934,7 @@ router.post("/custom-arenas/:id/leave", auth, async (req, res) => {
 });
 
 // @route   POST /api/tournaments/custom-arenas/:id/end
-// @desc    Host ends the arena for everyone (blocked while games are live)
+// @desc    Host ends the arena: no new pairings; in-progress games may finish
 // @access  Private (host only)
 router.post("/custom-arenas/:id/end", auth, async (req, res) => {
   try {

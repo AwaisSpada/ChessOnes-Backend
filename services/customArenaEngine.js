@@ -1319,7 +1319,8 @@ async function leaveArenaTournament(arenaId, userId) {
 
 /**
  * Host ends a live/scheduled arena for everyone.
- * Blocks while any real games are still active so mid-match play is not cut off.
+ * Stops new pairings immediately. In-progress games keep running; standings
+ * update when those games complete (`recordArenaGameResult` already allows ended).
  */
 async function endArenaByHost(arenaId, hostUserId) {
   let arena = await syncStaleArenaPairings(arenaId);
@@ -1354,14 +1355,10 @@ async function endArenaByHost(arenaId, hostUserId) {
     };
   }
 
-  const openPairings = (arena.activePairings || []).filter(
-    (p) => p.status === "pending" || p.status === "active"
-  );
-
-  const activeGameIds = new Set();
-  for (const pairing of openPairings) {
+  const liveGameIds = new Set();
+  for (const pairing of arena.activePairings || []) {
     if (pairing.gameId && (await isGameStillActive(pairing.gameId))) {
-      activeGameIds.add(String(pairing.gameId));
+      liveGameIds.add(String(pairing.gameId));
     }
   }
   for (const state of arena.playerStates || []) {
@@ -1370,39 +1367,26 @@ async function endArenaByHost(arenaId, hostUserId) {
       state.currentGameId &&
       (await isGameStillActive(state.currentGameId))
     ) {
-      activeGameIds.add(String(state.currentGameId));
+      liveGameIds.add(String(state.currentGameId));
     }
   }
 
-  if (activeGameIds.size > 0) {
-    const n = activeGameIds.size;
-    return {
-      arena,
-      runtime: serializeArenaRuntime(arena),
-      error:
-        n === 1
-          ? "A few players are still in a game in this tournament. Once they finish, you can end it."
-          : `${n} games are still in progress in this tournament. Once they finish, you can end it.`,
-      code: "GAMES_IN_PROGRESS",
-      activeGameCount: n,
-    };
-  }
-
-  // Keep completed history; close leftover non-live active rows; drop unmatched pending.
+  // Keep completed history + pairings whose games are still live.
+  // Drop unmatched pending so nobody can start a new game after the arena ended.
   const closedPairings = [];
   for (const pairing of arena.activePairings || []) {
     if (pairing.status === "completed") {
       closedPairings.push(pairing);
       continue;
     }
+    if (pairing.gameId && liveGameIds.has(String(pairing.gameId))) {
+      closedPairings.push(pairing);
+      continue;
+    }
     if (pairing.status === "active" && pairing.gameId) {
       const plain =
         typeof pairing.toObject === "function" ? pairing.toObject() : { ...pairing };
-      closedPairings.push({
-        ...plain,
-        status: "completed",
-        completedAt: plain.completedAt || new Date(),
-      });
+      closedPairings.push(plain);
     }
   }
   arena.activePairings = closedPairings;
@@ -1410,7 +1394,22 @@ async function endArenaByHost(arenaId, hostUserId) {
   let playerStates = [...(arena.playerStates || [])];
   for (const state of playerStates) {
     if (state.status === "left_tournament") continue;
-    playerStates = setPlayerStatus(playerStates, String(state.userId), {
+    const uid = String(state.userId);
+    const livePairing = closedPairings.find(
+      (pairing) =>
+        pairing.gameId &&
+        liveGameIds.has(String(pairing.gameId)) &&
+        (String(pairing.whiteUserId) === uid || String(pairing.blackUserId) === uid)
+    );
+    if (livePairing) {
+      playerStates = setPlayerStatus(playerStates, uid, {
+        status: "in_game",
+        matchmakingReady: false,
+        currentGameId: String(livePairing.gameId),
+      });
+      continue;
+    }
+    playerStates = setPlayerStatus(playerStates, uid, {
       status: "idle",
       matchmakingReady: false,
       currentGameId: null,
