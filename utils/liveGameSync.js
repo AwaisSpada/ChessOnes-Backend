@@ -159,6 +159,7 @@ function buildLiveSyncFields(game, overrides = {}) {
       black: timeRemaining?.black,
     },
     status: game.status,
+    clockStartedAt: game.clockStartedAt || null,
   };
 }
 

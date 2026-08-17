@@ -2939,9 +2939,12 @@ io.on("connection", (socket) => {
             const Game = require("./models/Game");
             const game = await Game.findOne({ gameId }).lean();
             const gameHasStarted = game && game.moves && game.moves.length > 0;
+            const clocksLive = Boolean(game?.clockStartedAt);
 
-            // Only reset ready state if game hasn't started
-            if (!gameHasStarted && gameReadyState.has(gameId)) {
+            // Only reset ready if the match has not actually started. Do not
+            // wipe allReady after clockStartedAt just because someone briefly
+            // disconnected (leave-game remount / websocket blip).
+            if (!gameHasStarted && !clocksLive && gameReadyState.has(gameId)) {
               gameReadyState.delete(gameId);
               console.log(
                 `🔄 Reset ready state for game ${gameId} due to disconnect (game not started)`
