@@ -204,6 +204,11 @@ const gameSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /** Seated user(s) already on the board when that wait started. Only they see the 30s timer. */
+    boardOpenWaitWaiterUserIds: {
+      type: [String],
+      default: [],
+    },
     botDifficulty: {
       type: String,
       enum: ["easy", "medium", "hard"],

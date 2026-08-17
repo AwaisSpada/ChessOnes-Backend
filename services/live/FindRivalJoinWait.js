@@ -13,6 +13,8 @@ let getRoomUsers = () => undefined;
 
 /** @type {Map<string, { timer: ReturnType<typeof setTimeout>, whiteId: string, blackId: string }>} */
 const pending = new Map();
+/** @type {Map<string, string[]>} */
+const waiterIdsByGame = new Map();
 
 function seatId(player) {
   if (!player) return "";
@@ -51,6 +53,47 @@ function cancel(gameId) {
   if (!entry) return;
   clearTimeout(entry.timer);
   pending.delete(id);
+}
+
+function seatedWaitersFromRoom(game) {
+  const gameId = String(game?.gameId || "");
+  const whiteId = seatId(game?.players?.white);
+  const blackId = seatId(game?.players?.black);
+  const users = getRoomUsers(gameId) || new Set();
+  return [whiteId, blackId].filter((id) => id && users.has(String(id))).map(String);
+}
+
+function getWaiterUserIds(gameId) {
+  return waiterIdsByGame.get(String(gameId || "")) || [];
+}
+
+function setWaiterUserIds(gameId, ids) {
+  const unique = [...new Set((ids || []).map(String).filter(Boolean))];
+  waiterIdsByGame.set(String(gameId), unique);
+}
+
+async function persistWaiterUserIds(gameId, ids) {
+  try {
+    const Game = require("../../models/Game");
+    await Game.updateOne(
+      { gameId: String(gameId) },
+      { $set: { boardOpenWaitWaiterUserIds: ids } }
+    );
+  } catch (err) {
+    console.error("[FindRival] persist waiter ids failed:", gameId, err);
+  }
+}
+
+function emitOccupants(gameId) {
+  const io = ioRef;
+  if (!io) return;
+  const id = String(gameId || "");
+  const users = getRoomUsers(id);
+  io.to(id).emit("game-room-occupants", {
+    gameId: id,
+    userIds: users ? Array.from(users) : [],
+    waiterUserIds: getWaiterUserIds(id),
+  });
 }
 
 function bothInRoom(gameId, whiteId, blackId) {
@@ -98,27 +141,56 @@ function schedule(game) {
     pending.delete(gameId);
     void expire(gameId, whiteId, blackId);
   }, remaining);
+  const fromDoc = Array.isArray(game.boardOpenWaitWaiterUserIds)
+    ? game.boardOpenWaitWaiterUserIds.map(String).filter(Boolean)
+    : [];
+  if (fromDoc.length && getWaiterUserIds(gameId).length === 0) {
+    setWaiterUserIds(gameId, fromDoc);
+  } else if (getWaiterUserIds(gameId).length === 0) {
+    const fromRoom = seatedWaitersFromRoom(game);
+    if (fromRoom.length) setWaiterUserIds(gameId, fromRoom);
+  }
   pending.set(gameId, { timer, whiteId, blackId });
 }
 
 async function stampAndSchedule(game) {
   if (!isBoardOpenWaitGame(game)) return;
+  const waiters = seatedWaitersFromRoom(game);
+  if (waiters.length) setWaiterUserIds(game.gameId, waiters);
+  let dirty = false;
   if (!game.boardOpenWaitStartedAt) {
     game.boardOpenWaitStartedAt = new Date();
-    if (typeof game.save === "function") {
-      try {
-        await game.save();
-      } catch (err) {
-        console.error("[FindRival] stamp boardOpenWaitStartedAt failed:", err);
-      }
+    dirty = true;
+  }
+  if (
+    waiters.length &&
+    (!Array.isArray(game.boardOpenWaitWaiterUserIds) ||
+      game.boardOpenWaitWaiterUserIds.length === 0)
+  ) {
+    game.boardOpenWaitWaiterUserIds = waiters;
+    dirty = true;
+  }
+  if (dirty && typeof game.save === "function") {
+    try {
+      await game.save();
+    } catch (err) {
+      console.error("[FindRival] stamp boardOpenWaitStartedAt failed:", err);
     }
   }
   schedule(game);
+  emitOccupants(game.gameId);
 }
 
-function onJoined(gameId) {
+function onJoined(gameId, userId) {
   const id = String(gameId || "");
+  const uid = userId ? String(userId) : "";
   const entry = pending.get(id);
+  if (uid && getWaiterUserIds(id).length === 0) {
+    if (!entry || uid === entry.whiteId || uid === entry.blackId) {
+      setWaiterUserIds(id, [uid]);
+      void persistWaiterUserIds(id, [uid]);
+    }
+  }
   if (!entry) return;
   if (bothInRoom(id, entry.whiteId, entry.blackId)) {
     cancel(id);
@@ -234,5 +306,6 @@ module.exports = {
   cancel,
   onJoined,
   onLeft,
+  getWaiterUserIds,
   claim,
 };

@@ -242,6 +242,7 @@ function occupantsPayload(gameId) {
   return {
     gameId,
     userIds: userSet ? Array.from(userSet) : [],
+    waiterUserIds: FindRivalJoinWait.getWaiterUserIds(gameId),
   };
 }
 
@@ -803,7 +804,7 @@ io.on("connection", (socket) => {
             });
           });
       }
-      FindRivalJoinWait.onJoined(gameId);
+      FindRivalJoinWait.onJoined(gameId, uid);
       emitGameRoomOccupants(socket, gameId);
       if (resumedGameIds.includes(String(gameId))) {
         emitPlayerReconnected(io, gameId, uid);
@@ -870,7 +871,7 @@ io.on("connection", (socket) => {
       if (!wasUserAlreadyTracked) {
         userSet.add(userId);
       }
-      FindRivalJoinWait.onJoined(gameId);
+      FindRivalJoinWait.onJoined(gameId, userId);
 
       // Occupant list for THIS socket: first user-tracked join, including
       // join-game that ran before register-user (isNewJoin already false).
