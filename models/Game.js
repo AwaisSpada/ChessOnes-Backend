@@ -152,6 +152,14 @@ const gameSchema = new mongoose.Schema(
           "first-move-abandon",
         ],
       },
+      joinWaitExpired: {
+        type: Boolean,
+        default: undefined,
+      },
+      inactiveUserIds: {
+        type: [String],
+        default: undefined,
+      },
     },
     timeControl: {
       initial: {

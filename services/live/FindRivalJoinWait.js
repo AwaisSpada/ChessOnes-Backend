@@ -42,6 +42,11 @@ function bothInRoom(gameId, whiteId, blackId) {
   return users.has(String(whiteId)) && users.has(String(blackId));
 }
 
+function inactiveSeatIds(gameId, whiteId, blackId) {
+  const users = getRoomUsers(String(gameId)) || new Set();
+  return [whiteId, blackId].filter((id) => id && !users.has(String(id)));
+}
+
 function broadcastEnded(gameId, whiteId, blackId, result) {
   const io = ioRef;
   if (!io) return;
@@ -49,6 +54,7 @@ function broadcastEnded(gameId, whiteId, blackId, result) {
     gameId,
     result: result || { winner: "draw", reason: "first-move-abandon" },
     joinWaitExpired: true,
+    inactiveUserIds: result?.inactiveUserIds || inactiveSeatIds(gameId, whiteId, blackId),
   };
   io.to(gameId).emit("game-ended", payload);
   if (whiteId) io.to(`user:${whiteId}`).emit("game-ended", payload);
@@ -102,8 +108,14 @@ async function expire(gameId, whiteId, blackId) {
     if (Array.isArray(game.moves) && game.moves.length > 0) return;
     if (game.clockStartedAt) return;
 
+    const inactiveUserIds = inactiveSeatIds(gameId, wId, bId);
     game.status = "abandoned";
-    game.result = { winner: "draw", reason: "first-move-abandon" };
+    game.result = {
+      winner: "draw",
+      reason: "first-move-abandon",
+      joinWaitExpired: true,
+      inactiveUserIds,
+    };
     await game.save();
 
     try {
