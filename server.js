@@ -236,6 +236,8 @@ const {
 const gameRoomSockets = new Map(); // gameId -> Set of socket IDs
 // Track which users (by userId) are in each game room for presence sync
 const gameRoomUsers = new Map(); // gameId -> Set of userIds
+/** socketId:gameId -> last game:sync time (blocks snapshot storms). */
+const lastGameSyncAt = new Map();
 
 function occupantsPayload(gameId) {
   const userSet = gameRoomUsers.get(gameId);
@@ -755,7 +757,10 @@ io.on("connection", (socket) => {
 
   socket.on("register-user", async (userId) => {
     if (!userId) return;
-    
+    if (socket.data.userId && String(socket.data.userId) === String(userId)) {
+      return;
+    }
+
     // Check if user is suspended
     try {
       const user = await User.findById(userId).select("isSuspended").lean();
@@ -913,6 +918,9 @@ io.on("connection", (socket) => {
     // Don't reset ready state on join-game - only reset on actual disconnect/reconnect
     // This prevents the ready state from being reset when the frontend effect runs multiple times
 
+    // Repeat join-game from a client render loop must not reload the full game doc.
+    if (!isNewJoin) return;
+
     // Live sync: push authoritative snapshot to the joining socket (Plan B).
     // Reconnect uses the same join-game path (hydration policy §4.1 / §4.4).
     void (async () => {
@@ -999,6 +1007,11 @@ io.on("connection", (socket) => {
     try {
       const gameId = payload?.gameId;
       if (!gameId) return;
+      const syncKey = `${socket.id}:${gameId}`;
+      const now = Date.now();
+      const prev = lastGameSyncAt.get(syncKey) || 0;
+      if (now - prev < 2000) return;
+      lastGameSyncAt.set(syncKey, now);
 
       const { LIVE_MEMORY_SNAPSHOT } = require("./services/live/flags");
       if (LIVE_MEMORY_SNAPSHOT) {
@@ -1366,6 +1379,7 @@ io.on("connection", (socket) => {
 
       const normalizedId = String(userId);
       const current = gameReadyState.get(gameId) || {};
+      if (current[normalizedId] === !!ready) return;
       current[normalizedId] = !!ready;
 
       const Game = require("./models/Game");
