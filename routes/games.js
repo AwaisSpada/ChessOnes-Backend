@@ -2370,6 +2370,14 @@ router.post(
               },
             };
           }
+          const arena = Boolean(source.arenaId);
+          const buddyLive =
+            source.type === "multiplayer" || source.type === "friend";
+          // Online / friends: player may abort any time before they have moved.
+          // Do not wait for the first-move stall window (that's auto-abandon only).
+          if (!arena && buddyLive && ply < 2) {
+            return { ok: true };
+          }
           if (ply === 0 && source.currentTurn !== "white") {
             return {
               ok: false,
