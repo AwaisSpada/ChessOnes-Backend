@@ -1,7 +1,7 @@
 /**
- * Find Rival only: after a match is created, both players must join the
- * game room within JOIN_WAIT_MS. Does not change clocks, player-ready,
- * first-move abandon (post clockStartedAt), or disconnect-with-moves grace.
+ * Find Rival + Friends (post-accept): both players must join the game room
+ * within JOIN_WAIT_MS. Does not change clocks, player-ready after both join,
+ * first-move abandon (post clockStartedAt), invite expiry, or disconnect grace.
  */
 
 const JOIN_WAIT_MS = 30_000;
@@ -20,6 +20,23 @@ function seatId(player) {
     return String(player._id || player.id || "");
   }
   return String(player);
+}
+
+function isBoardOpenWaitGame(game) {
+  if (!game || game.arenaId) return false;
+  return game.type === "multiplayer" || game.type === "friend";
+}
+
+function waitStartMs(game) {
+  if (game?.boardOpenWaitStartedAt) {
+    const stamped = new Date(game.boardOpenWaitStartedAt).getTime();
+    if (Number.isFinite(stamped)) return stamped;
+  }
+  if (game?.type === "multiplayer" && game.createdAt) {
+    const created = new Date(game.createdAt).getTime();
+    if (Number.isFinite(created)) return created;
+  }
+  return NaN;
 }
 
 function init({ io, getGameRoomUsers }) {
@@ -62,7 +79,7 @@ function broadcastEnded(gameId, whiteId, blackId, result) {
 }
 
 function schedule(game) {
-  if (!game?.gameId || game.type !== "multiplayer" || game.arenaId) return;
+  if (!isBoardOpenWaitGame(game) || !game?.gameId) return;
   const gameId = String(game.gameId);
   const whiteId = seatId(game.players?.white);
   const blackId = seatId(game.players?.black);
@@ -74,6 +91,21 @@ function schedule(game) {
     void expire(gameId, whiteId, blackId);
   }, JOIN_WAIT_MS);
   pending.set(gameId, { timer, whiteId, blackId });
+}
+
+async function stampAndSchedule(game) {
+  if (!isBoardOpenWaitGame(game)) return;
+  if (!game.boardOpenWaitStartedAt) {
+    game.boardOpenWaitStartedAt = new Date();
+    if (typeof game.save === "function") {
+      try {
+        await game.save();
+      } catch (err) {
+        console.error("[FindRival] stamp boardOpenWaitStartedAt failed:", err);
+      }
+    }
+  }
+  schedule(game);
 }
 
 function onJoined(gameId) {
@@ -89,7 +121,7 @@ async function expire(gameId, whiteId, blackId) {
   try {
     const Game = require("../../models/Game");
     const game = await Game.findOne({ gameId });
-    if (!game || game.type !== "multiplayer" || game.arenaId) return;
+    if (!isBoardOpenWaitGame(game)) return;
 
     const wId = whiteId || seatId(game.players?.white);
     const bId = blackId || seatId(game.players?.black);
@@ -132,7 +164,7 @@ async function expire(gameId, whiteId, blackId) {
     }
 
     broadcastEnded(gameId, wId, bId, game.result);
-    console.log(`[FindRival] Join wait expired — abandoned ${gameId} (unrated)`);
+    console.log(`[FindRival] Board-open wait expired — abandoned ${gameId} (unrated)`);
 
     try {
       const { syncStoredPresenceStatus } = require("../../utils/presence");
@@ -153,12 +185,12 @@ async function claim(gameId, userId) {
   try {
     const Game = require("../../models/Game");
     const game = await Game.findOne({ gameId: id });
-    if (!game) return;
+    if (!isBoardOpenWaitGame(game)) return;
     const whiteId = seatId(game.players?.white);
     const blackId = seatId(game.players?.black);
     if (uid !== whiteId && uid !== blackId) return;
-    const createdMs = game.createdAt ? new Date(game.createdAt).getTime() : NaN;
-    const due = Number.isFinite(createdMs) ? createdMs + JOIN_WAIT_MS : 0;
+    const startMs = waitStartMs(game);
+    const due = Number.isFinite(startMs) ? startMs + JOIN_WAIT_MS : 0;
     if (game.status === "active" && Date.now() + 750 < due) return;
     await expire(id, whiteId, blackId);
   } catch (err) {
@@ -170,6 +202,7 @@ module.exports = {
   JOIN_WAIT_MS,
   init,
   schedule,
+  stampAndSchedule,
   cancel,
   onJoined,
   claim,

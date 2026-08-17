@@ -199,6 +199,11 @@ const gameSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /** Find Rival: match create. Friends: invite accept. 30s board-open wait. */
+    boardOpenWaitStartedAt: {
+      type: Date,
+      default: null,
+    },
     botDifficulty: {
       type: String,
       enum: ["easy", "medium", "hard"],

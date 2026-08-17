@@ -370,6 +370,13 @@ async function confirmOpenLinkByHost(invitation, host, action, io) {
     });
   }
 
+  try {
+    const FindRivalJoinWait = require("../services/live/FindRivalJoinWait");
+    await FindRivalJoinWait.stampAndSchedule(game);
+  } catch (err) {
+    console.error("[open-link] board-open wait schedule failed:", err);
+  }
+
   const payload = formatOpenLinkSocketPayload(invitation);
   if (io) {
     io.to(`user:${fromUserId}`).emit("challenge:update", payload);

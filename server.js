@@ -512,6 +512,7 @@ async function createMatchmakingGame(player1, player2, category) {
       },
       currentTurn: "white",
       status: "active",
+      boardOpenWaitStartedAt: new Date(),
     });
     
     // Set category based on time control
@@ -2086,11 +2087,8 @@ io.on("connection", (socket) => {
             gameRoomUsers.set(gameId, new Set());
           }
           const socketSet = gameRoomSockets.get(gameId);
-          const userSet = gameRoomUsers.get(gameId);
           socket.join(gameId);
           socketSet.add(socket.id);
-          const acceptingUserId = String(acceptor._id);
-          if (!userSet.has(acceptingUserId)) userSet.add(acceptingUserId);
 
           socket.emit("invite-accepted", {
             gameId: game.gameId,
@@ -2142,6 +2140,7 @@ io.on("connection", (socket) => {
 
       invitation.status = "accepted";
       await invitation.save();
+      await FindRivalJoinWait.stampAndSchedule(game);
 
       const formatted = {
         id: invitation._id,
@@ -2188,9 +2187,8 @@ io.on("connection", (socket) => {
       socketSet.add(socket.id);
 
       const acceptingUserId = invitation.toUser._id.toString();
-      if (!userSet.has(acceptingUserId)) {
-        userSet.add(acceptingUserId);
-      }
+      // Do not userSet.add here — accept is not "opened the board".
+      // Occupants / 30s wait key off join-game from the game screen.
 
       // Check if the sender is already in the room
       const senderId = invitation.fromUser._id.toString();

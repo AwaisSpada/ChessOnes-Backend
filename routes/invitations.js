@@ -13,6 +13,7 @@ const {
 } = require("../services/arenaNotificationService");
 
 const { buildChallengeJoinUrls } = require("../utils/frontendUrl");
+const FindRivalJoinWait = require("../services/live/FindRivalJoinWait");
 const { claimOpenLinkInvitation } = require("../utils/openLinkInvite");
 
 const router = express.Router();
@@ -1161,6 +1162,7 @@ router.post(
         // Update invitation status
         invitation.status = "accepted";
         await invitation.save();
+        await FindRivalJoinWait.stampAndSchedule(game);
 
         const io = req.app.get("io");
         if (io) {

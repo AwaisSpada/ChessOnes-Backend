@@ -2382,6 +2382,14 @@ router.post(
               },
             };
           }
+          const preClockBoardWait =
+            ply === 0 &&
+            !source.clockStartedAt &&
+            !source.arenaId &&
+            (source.type === "multiplayer" || source.type === "friend");
+          if (preClockBoardWait) {
+            return { ok: true };
+          }
           if (ply === 1 && source.currentTurn !== "black") {
             return {
               ok: false,
