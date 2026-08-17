@@ -236,6 +236,14 @@ const {
 const gameRoomSockets = new Map(); // gameId -> Set of socket IDs
 // Track which users (by userId) are in each game room for presence sync
 const gameRoomUsers = new Map(); // gameId -> Set of userIds
+
+function emitGameRoomOccupants(socket, gameId) {
+  const userSet = gameRoomUsers.get(gameId);
+  socket.emit("game-room-occupants", {
+    gameId,
+    userIds: userSet ? Array.from(userSet) : [],
+  });
+}
 // Track per-game ready state in memory: Map<gameId, { [userId]: boolean }>
 const gameReadyState = new Map();
 
@@ -785,6 +793,7 @@ io.on("connection", (socket) => {
           });
       }
       FindRivalJoinWait.onJoined(gameId);
+      emitGameRoomOccupants(socket, gameId);
       if (resumedGameIds.includes(String(gameId))) {
         emitPlayerReconnected(io, gameId, uid);
         console.log(
@@ -885,6 +894,8 @@ io.on("connection", (socket) => {
         emitPlayerReconnected(io, gameId, userId);
       }
     }
+
+    emitGameRoomOccupants(socket, gameId);
 
     // Don't reset ready state on join-game - only reset on actual disconnect/reconnect
     // This prevents the ready state from being reset when the frontend effect runs multiple times
