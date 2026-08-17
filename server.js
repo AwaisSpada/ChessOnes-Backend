@@ -1801,6 +1801,7 @@ io.on("connection", (socket) => {
         gameType: normalizedGameType,
         matchType: normalizedMatchType,
         timeControl: resolvedTimeControl,
+        preferredColor: seats.inviterSide,
         expiresAt,
         gameId: gameId,
       });
@@ -1817,6 +1818,7 @@ io.on("connection", (socket) => {
         gameType: invitation.gameType,
         matchType: invitation.matchType || "rated",
         gameFormat: "friend",
+        preferredColor: seats.inviterSide,
         inviterSide: seats.inviterSide,
         inviteeSide: seats.inviteeSide,
         timeControl: invitation.timeControl,
@@ -2170,6 +2172,12 @@ io.on("connection", (socket) => {
       await invitation.save();
       await FindRivalJoinWait.stampAndSchedule(game);
 
+      const fromId = String(invitation.fromUser._id);
+      const whiteId = String(game.players.white?._id || game.players.white || "");
+      const inviterIsWhite = whiteId === fromId;
+      const inviterSide = inviterIsWhite ? "white" : "black";
+      const inviteeSide = inviterIsWhite ? "black" : "white";
+
       const formatted = {
         id: invitation._id,
         token: invitation.token,
@@ -2177,8 +2185,9 @@ io.on("connection", (socket) => {
         gameType: invitation.gameType,
         matchType: invitation.matchType || "rated",
         gameFormat: "friend",
-        inviterSide: "white",
-        inviteeSide: "black",
+        preferredColor: inviterSide,
+        inviterSide,
+        inviteeSide,
         timeControl: invitation.timeControl,
         gameId: game.gameId,
         from: {
