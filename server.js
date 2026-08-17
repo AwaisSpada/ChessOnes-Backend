@@ -298,127 +298,9 @@ initReconnectManager(io);
 
 const FindRivalJoinWait = require("./services/live/FindRivalJoinWait");
 
-/** One occupancy clock-start (and one allReady emit) per game. */
-const occupancyClockInFlight = new Set();
-const occupancyClockDone = new Set();
-
-/**
- * Find Rival / friends: both seated players on the visible board → start clocks.
- * Same epoch as player-ready allReady. Runs at most once per gameId.
- */
-async function startClocksWhenBothOnBoard(gameId) {
-  const id = String(gameId || "");
-  if (!id) return;
-  if (occupancyClockDone.has(id) || occupancyClockInFlight.has(id)) return;
-  const userSet = gameRoomUsers.get(id);
-  if (!userSet || userSet.size < 2) return;
-
-  occupancyClockInFlight.add(id);
-  try {
-    const Game = require("./models/Game");
-    const game = await Game.findOne({ gameId: id })
-      .select(
-        "players status type arenaId clockStartedAt timeRemaining timeControl currentTurn"
-      )
-      .lean();
-    if (!game || game.arenaId) return;
-    if (game.type !== "multiplayer" && game.type !== "friend") return;
-    if (game.status !== "active") return;
-
-    const whiteId = String(game.players?.white || "");
-    const blackId = String(game.players?.black || "");
-    if (!whiteId || !blackId) return;
-    if (!userSet.has(whiteId) || !userSet.has(blackId)) return;
-
-    const state = { [whiteId]: true, [blackId]: true };
-    gameReadyState.set(id, state);
-    FindRivalJoinWait.cancel(id);
-
-    let clockStartedAt = game.clockStartedAt || null;
-    let liveDoc = game;
-
-    if (!clockStartedAt) {
-      const startedAt = new Date();
-      await Game.updateOne(
-        {
-          gameId: id,
-          status: "active",
-          type: { $in: ["multiplayer", "friend"] },
-          $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
-        },
-        { $set: { clockStartedAt: startedAt } }
-      );
-      liveDoc = await Game.findOne({ gameId: id })
-        .select("clockStartedAt timeRemaining timeControl currentTurn status type")
-        .lean();
-      clockStartedAt = liveDoc?.clockStartedAt || startedAt;
-      console.log(`[FindRival] Both on the board — clocks started ${id}`);
-    }
-
-    occupancyClockDone.add(id);
-
-    const ClockAuthority = require("./services/live/ClockAuthority");
-    const serverNow = Date.now();
-    let effectiveTimeRemaining = ClockAuthority.effectiveRemaining(
-      liveDoc || game,
-      serverNow
-    );
-    if (
-      !effectiveTimeRemaining ||
-      typeof effectiveTimeRemaining.white !== "number"
-    ) {
-      const src = liveDoc || game;
-      effectiveTimeRemaining = {
-        white:
-          typeof src.timeRemaining?.white === "number" ? src.timeRemaining.white : null,
-        black:
-          typeof src.timeRemaining?.black === "number" ? src.timeRemaining.black : null,
-      };
-    }
-
-    const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require(
-      "./services/live/flags"
-    );
-    if (LIVE_MEMORY_SNAPSHOT) {
-      const LiveGameManager = require("./services/live/LiveGameManager");
-      let mem = LiveGameManager.get(id);
-      if (!mem) {
-        mem = LiveGameManager.createFromDoc(liveDoc || game);
-      }
-      if (mem && clockStartedAt) {
-        mem.startClocks(clockStartedAt);
-        if (LIVE_SERVER_TIMEOUTS) {
-          mem.rescheduleClocks();
-        }
-        effectiveTimeRemaining = ClockAuthority.effectiveRemaining(mem, serverNow);
-      }
-    }
-
-    const readyPayload = {
-      gameId: id,
-      userId: whiteId,
-      ready: true,
-      state,
-      allReady: true,
-      clockStartedAt,
-      serverNow,
-      timeRemaining: effectiveTimeRemaining || { white: null, black: null },
-    };
-    io.to(id).emit("ready:update", readyPayload);
-    io.to(`user:${whiteId}`).emit("ready:update", readyPayload);
-    io.to(`user:${blackId}`).emit("ready:update", readyPayload);
-  } catch (err) {
-    occupancyClockDone.delete(id);
-    console.error("[FindRival] startClocksWhenBothOnBoard failed:", gameId, err);
-  } finally {
-    occupancyClockInFlight.delete(id);
-  }
-}
-
 FindRivalJoinWait.init({
   io,
   getGameRoomUsers: (gameId) => gameRoomUsers.get(String(gameId)),
-  onBothPlayersOnBoard: startClocksWhenBothOnBoard,
 });
 
 // Phase 3: wire Socket.IO into server-authoritative end helpers (flag/abandon).
@@ -876,7 +758,7 @@ io.on("connection", (socket) => {
     
     // Check if user is suspended
     try {
-      const user = await User.findById(userId);
+      const user = await User.findById(userId).select("isSuspended").lean();
       if (user && user.isSuspended) {
         socket.emit("ACCOUNT_SUSPENDED", {
           message: "Your account has been suspended by an administrator",
