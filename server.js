@@ -298,21 +298,27 @@ initReconnectManager(io);
 
 const FindRivalJoinWait = require("./services/live/FindRivalJoinWait");
 
+/** One occupancy clock-start (and one allReady emit) per game. */
+const occupancyClockInFlight = new Set();
+const occupancyClockDone = new Set();
+
 /**
  * Find Rival / friends: both seated players on the visible board → start clocks.
- * Same epoch as player-ready allReady. Safe to call on every join (idempotent).
+ * Same epoch as player-ready allReady. Runs at most once per gameId.
  */
 async function startClocksWhenBothOnBoard(gameId) {
-  try {
-    const id = String(gameId || "");
-    if (!id) return;
-    const userSet = gameRoomUsers.get(id);
-    if (!userSet || userSet.size < 2) return;
+  const id = String(gameId || "");
+  if (!id) return;
+  if (occupancyClockDone.has(id) || occupancyClockInFlight.has(id)) return;
+  const userSet = gameRoomUsers.get(id);
+  if (!userSet || userSet.size < 2) return;
 
+  occupancyClockInFlight.add(id);
+  try {
     const Game = require("./models/Game");
     const game = await Game.findOne({ gameId: id })
       .select(
-        "players status type arenaId clockStartedAt moves timeRemaining timeControl currentTurn category isRated board syncVersion positionHistory createdAt"
+        "players status type arenaId clockStartedAt timeRemaining timeControl currentTurn"
       )
       .lean();
     if (!game || game.arenaId) return;
@@ -328,12 +334,10 @@ async function startClocksWhenBothOnBoard(gameId) {
     gameReadyState.set(id, state);
     FindRivalJoinWait.cancel(id);
 
-    const ClockAuthority = require("./services/live/ClockAuthority");
     let clockStartedAt = game.clockStartedAt || null;
-    let serverNow = Date.now();
     let liveDoc = game;
 
-    if (!clockStartedAt && !(Array.isArray(game.moves) && game.moves.length > 0)) {
+    if (!clockStartedAt) {
       const startedAt = new Date();
       await Game.updateOne(
         {
@@ -345,15 +349,16 @@ async function startClocksWhenBothOnBoard(gameId) {
         { $set: { clockStartedAt: startedAt } }
       );
       liveDoc = await Game.findOne({ gameId: id })
-        .select(
-          "clockStartedAt timeRemaining timeControl currentTurn moves status type category isRated players board syncVersion positionHistory createdAt"
-        )
+        .select("clockStartedAt timeRemaining timeControl currentTurn status type")
         .lean();
       clockStartedAt = liveDoc?.clockStartedAt || startedAt;
       console.log(`[FindRival] Both on the board — clocks started ${id}`);
     }
 
-    serverNow = Date.now();
+    occupancyClockDone.add(id);
+
+    const ClockAuthority = require("./services/live/ClockAuthority");
+    const serverNow = Date.now();
     let effectiveTimeRemaining = ClockAuthority.effectiveRemaining(
       liveDoc || game,
       serverNow
@@ -362,15 +367,12 @@ async function startClocksWhenBothOnBoard(gameId) {
       !effectiveTimeRemaining ||
       typeof effectiveTimeRemaining.white !== "number"
     ) {
+      const src = liveDoc || game;
       effectiveTimeRemaining = {
         white:
-          typeof (liveDoc || game).timeRemaining?.white === "number"
-            ? (liveDoc || game).timeRemaining.white
-            : null,
+          typeof src.timeRemaining?.white === "number" ? src.timeRemaining.white : null,
         black:
-          typeof (liveDoc || game).timeRemaining?.black === "number"
-            ? (liveDoc || game).timeRemaining.black
-            : null,
+          typeof src.timeRemaining?.black === "number" ? src.timeRemaining.black : null,
       };
     }
 
@@ -383,7 +385,7 @@ async function startClocksWhenBothOnBoard(gameId) {
       if (!mem) {
         mem = LiveGameManager.createFromDoc(liveDoc || game);
       }
-      if (mem) {
+      if (mem && clockStartedAt) {
         mem.startClocks(clockStartedAt);
         if (LIVE_SERVER_TIMEOUTS) {
           mem.rescheduleClocks();
@@ -406,7 +408,10 @@ async function startClocksWhenBothOnBoard(gameId) {
     io.to(`user:${whiteId}`).emit("ready:update", readyPayload);
     io.to(`user:${blackId}`).emit("ready:update", readyPayload);
   } catch (err) {
+    occupancyClockDone.delete(id);
     console.error("[FindRival] startClocksWhenBothOnBoard failed:", gameId, err);
+  } finally {
+    occupancyClockInFlight.delete(id);
   }
 }
 

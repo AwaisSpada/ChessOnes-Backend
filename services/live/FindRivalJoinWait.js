@@ -202,7 +202,10 @@ function onJoined(gameId, userId) {
   if (entry && whiteId && blackId && bothInRoom(id, whiteId, blackId)) {
     cancel(id);
   }
-  void onBothOnBoard(id);
+  const users = getRoomUsers(id);
+  if (users && users.size >= 2) {
+    void onBothOnBoard(id);
+  }
 }
 
 /** If someone leaves the board before clocks start, resume the original 30s wait. */
