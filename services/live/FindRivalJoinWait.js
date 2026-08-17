@@ -1,7 +1,8 @@
 /**
  * Find Rival + Friends (post-accept): both players must join the game room
- * within JOIN_WAIT_MS. Does not change clocks, player-ready after both join,
- * first-move abandon (post clockStartedAt), invite expiry, or disconnect grace.
+ * within JOIN_WAIT_MS. When both seated players are in the visible game room,
+ * clocks start (same as allReady). Does not change first-move abandon after
+ * clockStartedAt, invite expiry, or disconnect grace.
  */
 
 const JOIN_WAIT_MS = 30_000;
@@ -41,9 +42,14 @@ function waitStartMs(game) {
   return NaN;
 }
 
-function init({ io, getGameRoomUsers }) {
+let onBothOnBoard = async () => {};
+
+function init({ io, getGameRoomUsers, onBothPlayersOnBoard }) {
   ioRef = io;
   if (typeof getGameRoomUsers === "function") getRoomUsers = getGameRoomUsers;
+  if (typeof onBothPlayersOnBoard === "function") {
+    onBothOnBoard = onBothPlayersOnBoard;
+  }
 }
 
 function cancel(gameId) {
@@ -191,10 +197,12 @@ function onJoined(gameId, userId) {
       void persistWaiterUserIds(id, [uid]);
     }
   }
-  if (!entry) return;
-  if (bothInRoom(id, entry.whiteId, entry.blackId)) {
+  const whiteId = entry?.whiteId;
+  const blackId = entry?.blackId;
+  if (entry && whiteId && blackId && bothInRoom(id, whiteId, blackId)) {
     cancel(id);
   }
+  void onBothOnBoard(id);
 }
 
 /** If someone leaves the board before clocks start, resume the original 30s wait. */

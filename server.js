@@ -297,9 +297,123 @@ const {
 initReconnectManager(io);
 
 const FindRivalJoinWait = require("./services/live/FindRivalJoinWait");
+
+/**
+ * Find Rival / friends: both seated players on the visible board → start clocks.
+ * Same epoch as player-ready allReady. Safe to call on every join (idempotent).
+ */
+async function startClocksWhenBothOnBoard(gameId) {
+  try {
+    const id = String(gameId || "");
+    if (!id) return;
+    const userSet = gameRoomUsers.get(id);
+    if (!userSet || userSet.size < 2) return;
+
+    const Game = require("./models/Game");
+    const game = await Game.findOne({ gameId: id })
+      .select(
+        "players status type arenaId clockStartedAt moves timeRemaining timeControl currentTurn category isRated board syncVersion positionHistory createdAt"
+      )
+      .lean();
+    if (!game || game.arenaId) return;
+    if (game.type !== "multiplayer" && game.type !== "friend") return;
+    if (game.status !== "active") return;
+
+    const whiteId = String(game.players?.white || "");
+    const blackId = String(game.players?.black || "");
+    if (!whiteId || !blackId) return;
+    if (!userSet.has(whiteId) || !userSet.has(blackId)) return;
+
+    const state = { [whiteId]: true, [blackId]: true };
+    gameReadyState.set(id, state);
+    FindRivalJoinWait.cancel(id);
+
+    const ClockAuthority = require("./services/live/ClockAuthority");
+    let clockStartedAt = game.clockStartedAt || null;
+    let serverNow = Date.now();
+    let liveDoc = game;
+
+    if (!clockStartedAt && !(Array.isArray(game.moves) && game.moves.length > 0)) {
+      const startedAt = new Date();
+      await Game.updateOne(
+        {
+          gameId: id,
+          status: "active",
+          type: { $in: ["multiplayer", "friend"] },
+          $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
+        },
+        { $set: { clockStartedAt: startedAt } }
+      );
+      liveDoc = await Game.findOne({ gameId: id })
+        .select(
+          "clockStartedAt timeRemaining timeControl currentTurn moves status type category isRated players board syncVersion positionHistory createdAt"
+        )
+        .lean();
+      clockStartedAt = liveDoc?.clockStartedAt || startedAt;
+      console.log(`[FindRival] Both on the board — clocks started ${id}`);
+    }
+
+    serverNow = Date.now();
+    let effectiveTimeRemaining = ClockAuthority.effectiveRemaining(
+      liveDoc || game,
+      serverNow
+    );
+    if (
+      !effectiveTimeRemaining ||
+      typeof effectiveTimeRemaining.white !== "number"
+    ) {
+      effectiveTimeRemaining = {
+        white:
+          typeof (liveDoc || game).timeRemaining?.white === "number"
+            ? (liveDoc || game).timeRemaining.white
+            : null,
+        black:
+          typeof (liveDoc || game).timeRemaining?.black === "number"
+            ? (liveDoc || game).timeRemaining.black
+            : null,
+      };
+    }
+
+    const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require(
+      "./services/live/flags"
+    );
+    if (LIVE_MEMORY_SNAPSHOT) {
+      const LiveGameManager = require("./services/live/LiveGameManager");
+      let mem = LiveGameManager.get(id);
+      if (!mem) {
+        mem = LiveGameManager.createFromDoc(liveDoc || game);
+      }
+      if (mem) {
+        mem.startClocks(clockStartedAt);
+        if (LIVE_SERVER_TIMEOUTS) {
+          mem.rescheduleClocks();
+        }
+        effectiveTimeRemaining = ClockAuthority.effectiveRemaining(mem, serverNow);
+      }
+    }
+
+    const readyPayload = {
+      gameId: id,
+      userId: whiteId,
+      ready: true,
+      state,
+      allReady: true,
+      clockStartedAt,
+      serverNow,
+      timeRemaining: effectiveTimeRemaining || { white: null, black: null },
+    };
+    io.to(id).emit("ready:update", readyPayload);
+    io.to(`user:${whiteId}`).emit("ready:update", readyPayload);
+    io.to(`user:${blackId}`).emit("ready:update", readyPayload);
+  } catch (err) {
+    console.error("[FindRival] startClocksWhenBothOnBoard failed:", gameId, err);
+  }
+}
+
 FindRivalJoinWait.init({
   io,
   getGameRoomUsers: (gameId) => gameRoomUsers.get(String(gameId)),
+  onBothPlayersOnBoard: startClocksWhenBothOnBoard,
 });
 
 // Phase 3: wire Socket.IO into server-authoritative end helpers (flag/abandon).
