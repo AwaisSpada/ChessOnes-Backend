@@ -775,6 +775,14 @@ io.on("connection", (socket) => {
           gameId,
           userId: uid,
         });
+        Array.from(userSet)
+          .filter((id) => id !== uid)
+          .forEach((existingUserId) => {
+            socket.emit("player-joined", {
+              gameId,
+              userId: existingUserId,
+            });
+          });
       }
       FindRivalJoinWait.onJoined(gameId);
       if (resumedGameIds.includes(String(gameId))) {
@@ -844,16 +852,15 @@ io.on("connection", (socket) => {
       }
       FindRivalJoinWait.onJoined(gameId);
 
-      // If this is a new join, sync presence both ways
-      if (isNewJoin) {
-        // 1. Tell the new joiner who's already in the room
+      // Occupant list for THIS socket: first user-tracked join, including
+      // join-game that ran before register-user (isNewJoin already false).
+      if (isNewJoin || !wasUserAlreadyTracked) {
         const existingUserIds = Array.from(userSet).filter(
           (uid) => uid !== userId
         );
-
         if (existingUserIds.length > 0) {
           console.log(
-            `📢 Notifying new joiner ${userId} about existing players:`,
+            `📢 Notifying joiner ${userId} about existing players:`,
             existingUserIds
           );
           existingUserIds.forEach((existingUserId) => {
@@ -863,8 +870,9 @@ io.on("connection", (socket) => {
             });
           });
         }
+      }
 
-        // 2. Tell existing players that the new joiner arrived
+      if (isNewJoin) {
         socket.to(gameId).emit("player-joined", {
           gameId,
           userId: userId,
@@ -891,6 +899,17 @@ io.on("connection", (socket) => {
           const memSnapshot = await LiveGameManager.trySnapshot(gameId);
           if (memSnapshot) {
             socket.emit("game:snapshot", memSnapshot);
+            if (
+              memSnapshot.status === "abandoned" &&
+              memSnapshot.result?.joinWaitExpired
+            ) {
+              socket.emit("game-ended", {
+                gameId,
+                result: memSnapshot.result,
+                joinWaitExpired: true,
+                inactiveUserIds: memSnapshot.result?.inactiveUserIds || [],
+              });
+            }
             const live = LiveGameManager.get(gameId);
             if (live) live.rescheduleClocks();
             return;
@@ -904,6 +923,17 @@ io.on("connection", (socket) => {
         } = require("./services/live/ClockManager");
         const Game = require("./models/Game");
         let game = await Game.findOne({ gameId }).lean();
+        if (
+          game?.status === "abandoned" &&
+          game.result?.joinWaitExpired
+        ) {
+          socket.emit("game-ended", {
+            gameId,
+            result: game.result,
+            joinWaitExpired: true,
+            inactiveUserIds: game.result?.inactiveUserIds || [],
+          });
+        }
         if (!game || !isLiveHumanGame(game)) return;
 
         // Clocks must NOT start on seat fill — that burns white during page render.
