@@ -933,6 +933,14 @@ io.on("connection", (socket) => {
     })();
   });
 
+  socket.on("find-rival:join-wait-claim", (payload) => {
+    const claimGameId =
+      typeof payload === "string" ? payload : payload?.gameId;
+    const uid = socket.data.userId;
+    if (!claimGameId || !uid) return;
+    void FindRivalJoinWait.claim(claimGameId, uid);
+  });
+
   socket.on("game:sync", async (payload) => {
     try {
       const gameId = payload?.gameId;

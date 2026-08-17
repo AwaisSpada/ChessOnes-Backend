@@ -14,6 +14,14 @@ let getRoomUsers = () => undefined;
 /** @type {Map<string, { timer: ReturnType<typeof setTimeout>, whiteId: string, blackId: string }>} */
 const pending = new Map();
 
+function seatId(player) {
+  if (!player) return "";
+  if (typeof player === "object") {
+    return String(player._id || player.id || "");
+  }
+  return String(player);
+}
+
 function init({ io, getGameRoomUsers }) {
   ioRef = io;
   if (typeof getGameRoomUsers === "function") getRoomUsers = getGameRoomUsers;
@@ -34,11 +42,24 @@ function bothInRoom(gameId, whiteId, blackId) {
   return users.has(String(whiteId)) && users.has(String(blackId));
 }
 
+function broadcastEnded(gameId, whiteId, blackId, result) {
+  const io = ioRef;
+  if (!io) return;
+  const payload = {
+    gameId,
+    result: result || { winner: "draw", reason: "first-move-abandon" },
+    joinWaitExpired: true,
+  };
+  io.to(gameId).emit("game-ended", payload);
+  if (whiteId) io.to(`user:${whiteId}`).emit("game-ended", payload);
+  if (blackId) io.to(`user:${blackId}`).emit("game-ended", payload);
+}
+
 function schedule(game) {
   if (!game?.gameId || game.type !== "multiplayer" || game.arenaId) return;
   const gameId = String(game.gameId);
-  const whiteId = game.players?.white ? String(game.players.white) : "";
-  const blackId = game.players?.black ? String(game.players.black) : "";
+  const whiteId = seatId(game.players?.white);
+  const blackId = seatId(game.players?.black);
   if (!whiteId || !blackId) return;
 
   cancel(gameId);
@@ -61,11 +82,25 @@ function onJoined(gameId) {
 async function expire(gameId, whiteId, blackId) {
   try {
     const Game = require("../../models/Game");
-    const game = await Game.findOne({ gameId, status: "active" });
+    const game = await Game.findOne({ gameId });
     if (!game || game.type !== "multiplayer" || game.arenaId) return;
+
+    const wId = whiteId || seatId(game.players?.white);
+    const bId = blackId || seatId(game.players?.black);
+
+    if (game.status === "abandoned" || game.status === "completed") {
+      if (
+        game.result?.reason === "first-move-abandon" ||
+        !Array.isArray(game.moves) ||
+        game.moves.length === 0
+      ) {
+        broadcastEnded(gameId, wId, bId, game.result);
+      }
+      return;
+    }
+    if (game.status !== "active") return;
     if (Array.isArray(game.moves) && game.moves.length > 0) return;
     if (game.clockStartedAt) return;
-    if (bothInRoom(gameId, whiteId, blackId)) return;
 
     game.status = "abandoned";
     game.result = { winner: "draw", reason: "first-move-abandon" };
@@ -84,27 +119,38 @@ async function expire(gameId, whiteId, blackId) {
       // memory snapshot optional
     }
 
-    const io = ioRef;
-    if (!io) return;
-    const payload = {
-      gameId,
-      result: game.result,
-      joinWaitExpired: true,
-    };
-    io.to(gameId).emit("game-ended", payload);
-    io.to(`user:${whiteId}`).emit("game-ended", payload);
-    io.to(`user:${blackId}`).emit("game-ended", payload);
+    broadcastEnded(gameId, wId, bId, game.result);
     console.log(`[FindRival] Join wait expired — abandoned ${gameId} (unrated)`);
 
     try {
       const { syncStoredPresenceStatus } = require("../../utils/presence");
-      await syncStoredPresenceStatus(whiteId);
-      await syncStoredPresenceStatus(blackId);
+      await syncStoredPresenceStatus(wId);
+      await syncStoredPresenceStatus(bId);
     } catch (err) {
       console.error("[FindRival] presence sync after join-wait expire:", err);
     }
   } catch (err) {
     console.error("[FindRival] join-wait expire failed:", gameId, err);
+  }
+}
+
+async function claim(gameId, userId) {
+  const id = String(gameId || "");
+  const uid = String(userId || "");
+  if (!id || !uid) return;
+  try {
+    const Game = require("../../models/Game");
+    const game = await Game.findOne({ gameId: id });
+    if (!game) return;
+    const whiteId = seatId(game.players?.white);
+    const blackId = seatId(game.players?.black);
+    if (uid !== whiteId && uid !== blackId) return;
+    const createdMs = game.createdAt ? new Date(game.createdAt).getTime() : NaN;
+    const due = Number.isFinite(createdMs) ? createdMs + JOIN_WAIT_MS : 0;
+    if (game.status === "active" && Date.now() + 750 < due) return;
+    await expire(id, whiteId, blackId);
+  } catch (err) {
+    console.error("[FindRival] join-wait claim failed:", gameId, err);
   }
 }
 
@@ -114,4 +160,5 @@ module.exports = {
   schedule,
   cancel,
   onJoined,
+  claim,
 };
