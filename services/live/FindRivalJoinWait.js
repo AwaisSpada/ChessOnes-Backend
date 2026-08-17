@@ -86,10 +86,18 @@ function schedule(game) {
   if (!whiteId || !blackId) return;
 
   cancel(gameId);
+  const startMs = waitStartMs(game);
+  const remaining = Number.isFinite(startMs)
+    ? startMs + JOIN_WAIT_MS - Date.now()
+    : JOIN_WAIT_MS;
+  if (remaining <= 0) {
+    void expire(gameId, whiteId, blackId);
+    return;
+  }
   const timer = setTimeout(() => {
     pending.delete(gameId);
     void expire(gameId, whiteId, blackId);
-  }, JOIN_WAIT_MS);
+  }, remaining);
   pending.set(gameId, { timer, whiteId, blackId });
 }
 
@@ -114,6 +122,26 @@ function onJoined(gameId) {
   if (!entry) return;
   if (bothInRoom(id, entry.whiteId, entry.blackId)) {
     cancel(id);
+  }
+}
+
+/** If someone leaves the board before clocks start, resume the original 30s wait. */
+async function onLeft(gameId) {
+  const id = String(gameId || "");
+  if (!id) return;
+  try {
+    const Game = require("../../models/Game");
+    const game = await Game.findOne({ gameId: id });
+    if (!isBoardOpenWaitGame(game) || game.status !== "active") return;
+    if (game.clockStartedAt) return;
+    if (Array.isArray(game.moves) && game.moves.length > 0) return;
+    if (game.type === "friend" && !game.boardOpenWaitStartedAt) return;
+    const whiteId = seatId(game.players?.white);
+    const blackId = seatId(game.players?.black);
+    if (bothInRoom(id, whiteId, blackId)) return;
+    schedule(game);
+  } catch (err) {
+    console.error("[FindRival] onLeft failed:", gameId, err);
   }
 }
 
@@ -205,5 +233,6 @@ module.exports = {
   stampAndSchedule,
   cancel,
   onJoined,
+  onLeft,
   claim,
 };

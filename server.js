@@ -237,12 +237,22 @@ const gameRoomSockets = new Map(); // gameId -> Set of socket IDs
 // Track which users (by userId) are in each game room for presence sync
 const gameRoomUsers = new Map(); // gameId -> Set of userIds
 
-function emitGameRoomOccupants(socket, gameId) {
+function occupantsPayload(gameId) {
   const userSet = gameRoomUsers.get(gameId);
-  socket.emit("game-room-occupants", {
+  return {
     gameId,
     userIds: userSet ? Array.from(userSet) : [],
-  });
+  };
+}
+
+function emitGameRoomOccupants(socket, gameId) {
+  const payload = occupantsPayload(gameId);
+  socket.emit("game-room-occupants", payload);
+  socket.to(gameId).emit("game-room-occupants", payload);
+}
+
+function broadcastGameRoomOccupants(io, gameId) {
+  io.to(gameId).emit("game-room-occupants", occupantsPayload(gameId));
 }
 // Track per-game ready state in memory: Map<gameId, { [userId]: boolean }>
 const gameReadyState = new Map();
@@ -1335,6 +1345,8 @@ io.on("connection", (socket) => {
       if (!hasOtherSockets) {
         emitPlayerDisconnected(io, gameId, userId);
         clearGameHeartbeat(gameId, userId);
+        void FindRivalJoinWait.onLeft(gameId);
+        broadcastGameRoomOccupants(io, gameId);
       }
 
       console.log(
@@ -2171,24 +2183,14 @@ io.on("connection", (socket) => {
         },
       };
 
-      // Ensure the accepting user joins the game room
+      // Accept is not "opened the board" — do not join-game / userSet.add.
       const gameId = game.gameId;
-      if (!gameRoomSockets.has(gameId)) {
-        gameRoomSockets.set(gameId, new Set());
-      }
       if (!gameRoomUsers.has(gameId)) {
         gameRoomUsers.set(gameId, new Set());
       }
-
-      const socketSet = gameRoomSockets.get(gameId);
       const userSet = gameRoomUsers.get(gameId);
 
-      socket.join(gameId);
-      socketSet.add(socket.id);
-
       const acceptingUserId = invitation.toUser._id.toString();
-      // Do not userSet.add here — accept is not "opened the board".
-      // Occupants / 30s wait key off join-game from the game screen.
 
       // Check if the sender is already in the room
       const senderId = invitation.fromUser._id.toString();
@@ -2924,6 +2926,8 @@ io.on("connection", (socket) => {
               // online elsewhere (another tab) outside this game room.
               emitPlayerDisconnected(io, gameId, userId);
               clearGameHeartbeat(gameId, userId);
+              void FindRivalJoinWait.onLeft(gameId);
+              broadcastGameRoomOccupants(io, gameId);
             }
           }
         }
