@@ -40,7 +40,7 @@ const userSchema = new mongoose.Schema(
     },
     provider: {
       type: String,
-      enum: ["google", "facebook", null],
+      enum: ["google", "facebook", "apple", null],
       default: null,
     },
     providerId: {
@@ -291,6 +291,11 @@ const userSchema = new mongoose.Schema(
       default: true,
       index: true,
     },
+    /** False for social signup until the user sets a real ChessOnes password. */
+    hasPassword: {
+      type: Boolean,
+      index: true,
+    },
     hasAcceptedMessengerTerms: {
       type: Boolean,
       default: false,
@@ -306,21 +311,20 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-// Hash password before saving
+function isBcryptHash(value) {
+  return typeof value === "string" && /^\$2[aby]\$\d{2}\$/.test(value);
+}
+
+// Hash password before saving.
+// Social users (provider google/facebook) can still set a real password via reset;
+// skipping hash for them stored plaintext and broke email/password login.
 userSchema.pre("save", async function (next) {
-  // Skip password hashing for social auth users (no password)
-  if (this.provider) {
-    return next();
-  }
-  
-  // Skip password hashing for deleted accounts (password is already hashed in anonymizeUser)
-  // Deleted accounts have passwords that are already bcrypt hashes (60 chars)
-  if (this.isDeleted && this.password && this.password.length >= 60) {
-    // Password is already a hash, skip re-hashing
-    return next();
-  }
-  
   if (!this.isModified("password")) return next();
+
+  // Deleted accounts already store a bcrypt hash from anonymizeUser
+  if (this.isDeleted && isBcryptHash(this.password)) {
+    return next();
+  }
 
   try {
     const salt = await bcrypt.genSalt(10);
@@ -333,6 +337,20 @@ userSchema.pre("save", async function (next) {
 
 // Compare password method
 userSchema.methods.comparePassword = async function (candidatePassword) {
+  if (!this.password || candidatePassword == null) return false;
+
+  // Upgrade leftover plaintext passwords (social signup / reset used to skip hashing)
+  if (!isBcryptHash(this.password)) {
+    if (this.password !== candidatePassword) return false;
+    try {
+      this.password = candidatePassword;
+      await this.save();
+    } catch (error) {
+      console.error("[comparePassword] Failed to hash leftover plaintext password:", error);
+    }
+    return true;
+  }
+
   return bcrypt.compare(candidatePassword, this.password);
 };
 

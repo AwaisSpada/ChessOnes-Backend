@@ -3,8 +3,8 @@ const { body, validationResult } = require("express-validator");
 const User = require("../models/User");
 const Stats = require("../models/Stats");
 const auth = require("../middleware/auth");
-const bcrypt = require("bcryptjs");
 const multer = require("multer");
+const { resolveHasPassword } = require("../utils/hasPassword");
 const {
   uploadImage,
   deleteImage,
@@ -306,6 +306,9 @@ router.get("/profile", auth, async (req, res) => {
     const userPayload = user.toObject();
     const memberSince = formatMemberSince(userPayload.createdAt);
     if (memberSince) userPayload.memberSince = memberSince;
+    if (isOwnProfile) {
+      userPayload.hasPassword = resolveHasPassword(user);
+    }
 
     // Friends list / other-user profile: never leak real online if privacy hides it.
     if (Array.isArray(userPayload.friends) && userPayload.friends.length) {
@@ -497,12 +500,12 @@ router.put(
         });
       }
 
-      // 🔑 Handle password change
+      // Handle set-password (social users) vs change-password (existing credentials)
       if (currentPassword || newPassword || confirmNewPassword) {
-        if (!currentPassword || !newPassword || !confirmNewPassword) {
+        if (!newPassword || !confirmNewPassword) {
           return res.status(400).json({
             success: false,
-            message: "All password fields are required",
+            message: "New password and confirm password are required",
           });
         }
 
@@ -512,39 +515,43 @@ router.put(
             message: "New password and confirm password do not match",
           });
         }
-        console.log("pass:", user.password);
 
-        // Compare current password
-        const isMatch = await bcrypt.compare(currentPassword, user.password);
-        console.log(isMatch);
-        if (!isMatch) {
-          return res.status(400).json({
-            success: false,
-            message: "Current password is incorrect",
-          });
+        const passwordAlreadySet = resolveHasPassword(user);
+        if (passwordAlreadySet) {
+          if (!currentPassword) {
+            return res.status(400).json({
+              success: false,
+              message: "Current password is required",
+            });
+          }
+          const isMatch = await user.comparePassword(currentPassword);
+          if (!isMatch) {
+            return res.status(400).json({
+              success: false,
+              message: "Current password is incorrect",
+            });
+          }
         }
 
-        // Hash new password
         user.password = newPassword;
+        user.hasPassword = true;
         await user.save();
-
-        return res.json({
-          success: true,
-          message: "Password updated successfully",
-        });
       }
 
-      // 🔄 Normal profile update
+      // Normal profile update
       const updatedUser = await User.findByIdAndUpdate(
         req.user._id,
         updateFields,
         { new: true }
       ).select("-password");
 
+      const updatedPayload = updatedUser ? updatedUser.toObject() : {};
+      updatedPayload.hasPassword = resolveHasPassword(updatedUser || user);
+
       res.json({
         success: true,
         message: "Profile updated successfully",
-        data: { user: updatedUser },
+        data: { user: updatedPayload },
       });
     } catch (error) {
       console.error("Update profile error:", error);

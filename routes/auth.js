@@ -12,6 +12,8 @@ const {
   buildPasswordResetEmail,
   CHESSONES_FROM_NOREPLY,
 } = require("../utils/sendMail");
+const { resolveHasPassword } = require("../utils/hasPassword");
+const { verifyAppleIdentityToken } = require("../utils/appleAuth");
 
 const router = express.Router();
 
@@ -105,6 +107,7 @@ router.post(
         status: "online",
         ratings: defaultRatings,
         hasCompletedSignupDetails: true,
+        hasPassword: true,
       });
 
       await user.save();
@@ -183,6 +186,7 @@ router.post(
             hasAcceptedPolicies: user.hasAcceptedPolicies === true,
             hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
             hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
+            hasPassword: resolveHasPassword(user),
           },
         },
       });
@@ -264,6 +268,10 @@ router.post(
         return res.status(400).json({ success: false, message: "Invalid credentials" });
       }
 
+      if (user.hasPassword !== true) {
+        user.hasPassword = true;
+      }
+
       console.log("[Login] Password verified successfully for user:", user.email);
 
       // Check if user is suspended BEFORE generating token
@@ -308,6 +316,7 @@ router.post(
               hasAcceptedPolicies: user.hasAcceptedPolicies === true,
               hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
               hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
+              hasPassword: resolveHasPassword(user),
             },
           },
         });
@@ -344,6 +353,7 @@ router.post(
             hasAcceptedPolicies: user.hasAcceptedPolicies === true,
             hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
             hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
+            hasPassword: resolveHasPassword(user),
           },
         },
       })
@@ -714,6 +724,7 @@ router.post(
 
       // Update password (bcrypt hashing is handled by User model pre-save hook)
       user.password = newPassword;
+      user.hasPassword = true;
       await user.save();
 
       // Mark code as used
@@ -737,29 +748,57 @@ router.post(
   );
 
 // @route   POST /api/auth/social
-// @desc    Create or login user via social auth (Google/Facebook)
+// @desc    Create or login user via social auth (Google/Facebook/Apple)
 // @access  Public
 router.post("/social", async (req, res) => {
   try {
-    const { provider, providerId, email, name, image } = req.body;
+    let { provider, providerId, email, name, image, identityToken } = req.body;
 
-    if (!provider || !providerId || !email) {
+    if (!provider) {
       return res.status(400).json({
         success: false,
         message: "Missing required fields",
       });
     }
 
-    // Normalize email
-    const normalizedEmail = email.toLowerCase().trim();
+    if (provider === "apple") {
+      try {
+        const appleUser = await verifyAppleIdentityToken(identityToken);
+        providerId = appleUser.sub;
+        email = appleUser.email || (typeof email === "string" ? email : "");
+      } catch (appleErr) {
+        console.error("[AppleAuth] Token verify failed:", appleErr.message);
+        return res.status(401).json({
+          success: false,
+          message: "Invalid Apple sign-in token",
+        });
+      }
+    } else if (!providerId || !email) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required fields",
+      });
+    }
 
-    // Check if user exists by providerId or email
-    let user = await User.findOne({
-      $or: [
-        { provider, providerId },
-        { email: normalizedEmail },
-      ],
-    });
+    const normalizedEmail = typeof email === "string" ? email.toLowerCase().trim() : "";
+
+    let user = null;
+    if (provider === "apple") {
+      user = await User.findOne({ provider: "apple", providerId });
+      if (!user && normalizedEmail) {
+        user = await User.findOne({ email: normalizedEmail });
+      }
+      if (!user && !normalizedEmail) {
+        return res.status(400).json({
+          success: false,
+          message: "Apple did not share an email. Try again or use Google / email signup.",
+        });
+      }
+    } else {
+      user = await User.findOne({
+        $or: [{ provider, providerId }, { email: normalizedEmail }],
+      });
+    }
 
     let isNewUser = false;
 
@@ -780,7 +819,7 @@ router.post("/social", async (req, res) => {
       isNewUser = true;
       // Create new user
       // Generate username from email or name
-      let username = email.split("@")[0].toLowerCase();
+      let username = normalizedEmail.split("@")[0].toLowerCase();
       if (name) {
         username = name.toLowerCase().replace(/\s+/g, "").substring(0, 20);
       }
@@ -828,6 +867,7 @@ router.post("/social", async (req, res) => {
         ratings: defaultRatings,
         hasCompletedSignupDetails: false,
         hasAcceptedPolicies: false,
+        hasPassword: false,
       });
 
       await user.save();
@@ -865,6 +905,7 @@ router.post("/social", async (req, res) => {
           hasAcceptedPolicies: user.hasAcceptedPolicies === true,
           hasAcceptedMessengerTerms: user.hasAcceptedMessengerTerms === true,
           hasCompletedSignupDetails: user.hasCompletedSignupDetails !== false,
+          hasPassword: resolveHasPassword(user),
         },
       },
     });
