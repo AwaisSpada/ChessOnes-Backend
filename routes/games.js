@@ -1554,16 +1554,21 @@ router.post(
                 normalizedIncRaw > 0 && normalizedIncRaw <= 60
                   ? normalizedIncRaw * 1000
                   : normalizedIncRaw;
-              const engineClockConfig = isUntimed
-                ? botStrength
-                : {
-                    ...(botStrength || {}),
-                    whiteTime,
-                    blackTime,
-                    whiteInc: incrementMs,
-                    blackInc: incrementMs,
-                    incrementMs,
-                  };
+              const engineClockConfig = {
+                ...(botStrength || {}),
+                ...(isUntimed
+                  ? {}
+                  : {
+                      whiteTime,
+                      blackTime,
+                      whiteInc: incrementMs,
+                      blackInc: incrementMs,
+                      incrementMs,
+                    }),
+                botKey: bot?.key || currentGame.customBot?.key,
+                botName: bot?.name || currentGame.customBot?.name,
+                elo: effectiveElo,
+              };
               botMoveIndices = await getBestMove(
                 currentGame.board,
                 currentGame.currentTurn,
@@ -3190,6 +3195,29 @@ router.post(
     };
     game.drawRequest = { from: null, timestamp: null };
     await game.save();
+
+    // Keep LiveGame + timers coherent when draw-accept wins (same as HTTP /end).
+    try {
+      const { LIVE_MEMORY_SNAPSHOT } = require("../services/live/flags");
+      if (LIVE_MEMORY_SNAPSHOT) {
+        const LiveGameManager = require("../services/live/LiveGameManager");
+        const live = LiveGameManager.get(game.gameId);
+        if (live) {
+          live.status = "completed";
+          live.result = game.result;
+          if (typeof live.syncVersion === "number") {
+            require("../services/live/ClockAuthority").bumpSyncVersion(live);
+          }
+          require("../services/live/ClockScheduler").cancel(game.gameId);
+        }
+      }
+    } catch (syncErr) {
+      console.warn(
+        "[live] draw-accept LiveGame sync failed:",
+        game.gameId,
+        syncErr?.message || syncErr
+      );
+    }
 
     const io = req.app.get("io");
 

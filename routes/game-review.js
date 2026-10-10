@@ -213,17 +213,66 @@ function convertGameMovesToUCI(moves) {
 
 /**
  * Copy per-move clock timing from Game.moves onto review.moves (same index order as UCI list).
+ * Falls back to timestamp deltas when moveTimeMs was not persisted.
  */
 function attachMoveTimingsToReview(review, game) {
   if (!review || !Array.isArray(review.moves) || !game?.moves?.length) {
     return review;
   }
+
+  const gameStartMs = (() => {
+    if (game.clockStartedAt) {
+      const t = new Date(game.clockStartedAt).getTime();
+      if (Number.isFinite(t)) return t;
+    }
+    if (game.createdAt) {
+      const t = new Date(game.createdAt).getTime();
+      if (Number.isFinite(t)) return t;
+    }
+    return null;
+  })();
+
   review.moves = review.moves.map((rm, i) => {
     const gm = game.moves[i];
     if (!gm) return rm;
     const next = { ...rm };
-    if (typeof gm.moveTimeMs === "number") next.moveTimeMs = gm.moveTimeMs;
-    if (typeof gm.moveTimeSeconds === "number") next.moveTimeSeconds = gm.moveTimeSeconds;
+
+    let moveTimeMs =
+      typeof gm.moveTimeMs === "number" && Number.isFinite(gm.moveTimeMs)
+        ? Math.max(0, gm.moveTimeMs)
+        : null;
+    let moveTimeSeconds =
+      typeof gm.moveTimeSeconds === "number" && Number.isFinite(gm.moveTimeSeconds)
+        ? Math.max(0, gm.moveTimeSeconds)
+        : null;
+
+    if ((moveTimeMs == null || moveTimeMs <= 0) && (moveTimeSeconds == null || moveTimeSeconds <= 0)) {
+      const currTs = gm.timestamp ? new Date(gm.timestamp).getTime() : NaN;
+      let prevTs = NaN;
+      if (i > 0 && game.moves[i - 1]?.timestamp) {
+        prevTs = new Date(game.moves[i - 1].timestamp).getTime();
+      } else if (gameStartMs != null) {
+        prevTs = gameStartMs;
+      }
+      if (Number.isFinite(currTs) && Number.isFinite(prevTs) && currTs >= prevTs) {
+        const delta = currTs - prevTs;
+        // Ignore absurd gaps (paused / abandoned sessions) — still show reasonable think times.
+        if (delta > 0 && delta < 60 * 60 * 1000) {
+          moveTimeMs = delta;
+          moveTimeSeconds = Number((delta / 1000).toFixed(2));
+        }
+      }
+    }
+
+    if (moveTimeMs == null && moveTimeSeconds != null) {
+      moveTimeMs = Math.round(moveTimeSeconds * 1000);
+    }
+    if (moveTimeSeconds == null && moveTimeMs != null) {
+      moveTimeSeconds = Number((moveTimeMs / 1000).toFixed(2));
+    }
+
+    if (typeof moveTimeMs === "number") next.moveTimeMs = moveTimeMs;
+    if (typeof moveTimeSeconds === "number") next.moveTimeSeconds = moveTimeSeconds;
     return next;
   });
   return review;

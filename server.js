@@ -187,11 +187,13 @@ app.use("/api/stats", require("./routes/stats"));
 app.use("/api/bot", require("./routes/bot")); // legacy simple bot endpoints
 app.use("/api/bots", require("./routes/bots")); // new Bot definitions for Bot Battles
 app.use("/api/bot-games", require("./routes/bot-games")); // Bot game creation
+app.use("/api/bot-stats", require("./routes/bot-stats")); // Bot training record (new)
 app.use("/api/pass-play", require("./routes/pass-play")); // Pass-and-play import for review
 app.use("/api/invitations", require("./routes/invitations"));
 app.use("/api/game-review", require("./routes/game-review")); // Game review analysis
 app.use("/api/puzzles", require("./routes/puzzles")); // Puzzles endpoints
 app.use("/api/daily-puzzle", require("./routes/daily-puzzle")); // Daily puzzle (isolated)
+app.use("/api/puzzle-rush", require("./routes/puzzle-rush")); // Puzzle Rush (3/5 min)
 app.use("/api/tournaments", require("./routes/tournaments"));
 app.use("/api/learn", require("./routes/learn")); // Learn SRS progress sync
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
@@ -1379,7 +1381,8 @@ io.on("connection", (socket) => {
 
       const normalizedId = String(userId);
       const current = gameReadyState.get(gameId) || {};
-      if (current[normalizedId] === !!ready) return;
+      // Do not early-return on duplicate ready — rebroadcast so a peer that
+      // missed ready:update can catch up (Find Rival stuck until refresh).
       current[normalizedId] = !!ready;
 
       const Game = require("./models/Game");
@@ -1389,8 +1392,8 @@ io.on("connection", (socket) => {
       let allReady = false;
 
       if (game?.players?.white && game?.players?.black) {
-        const whiteId = String(game.players.white);
-        const blackId = String(game.players.black);
+        const whiteId = String(game.players.white?._id || game.players.white);
+        const blackId = String(game.players.black?._id || game.players.black);
         state = buildCanonicalReadyState(current, whiteId, blackId);
         allReady = state[whiteId] === true && state[blackId] === true;
       } else {
@@ -1494,12 +1497,14 @@ io.on("connection", (socket) => {
           : {}),
       };
 
+      const whiteRoomId = String(game?.players?.white?._id || game?.players?.white || "");
+      const blackRoomId = String(game?.players?.black?._id || game?.players?.black || "");
       io.to(gameId).emit("ready:update", readyPayload);
-      if (game?.players?.white) {
-        io.to(`user:${String(game.players.white)}`).emit("ready:update", readyPayload);
+      if (whiteRoomId) {
+        io.to(`user:${whiteRoomId}`).emit("ready:update", readyPayload);
       }
-      if (game?.players?.black) {
-        io.to(`user:${String(game.players.black)}`).emit("ready:update", readyPayload);
+      if (blackRoomId) {
+        io.to(`user:${blackRoomId}`).emit("ready:update", readyPayload);
       }
     } catch (err) {
       console.error("player-ready socket handler error:", err);

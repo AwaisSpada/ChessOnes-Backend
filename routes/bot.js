@@ -346,6 +346,7 @@ router.post("/hint", auth, requirePoliciesAccepted, async (req, res) => {
       depth: 8,
       movetime: 140,
       disableArtificialDelay: true,
+      hintMode: true,
     };
     const { getBestMove, findCheckmateMove } = require("../utils/stockfish");
     const cacheKey = getHintCacheKey(board, currentTurn, moveHistory);
@@ -398,6 +399,7 @@ router.post("/hint", auth, requirePoliciesAccepted, async (req, res) => {
             depth: 9,
             movetime: 220,
             disableArtificialDelay: true,
+            hintMode: true,
           }),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error("Hint fallback timeout")), HINT_FALLBACK_TIMEOUT_MS)

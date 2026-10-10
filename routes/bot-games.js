@@ -265,16 +265,21 @@ router.post(
                 normalizedIncRaw > 0 && normalizedIncRaw <= 60
                   ? normalizedIncRaw * 1000
                   : normalizedIncRaw;
-              const engineClockConfig = isUntimed
-                ? botStrength
-                : {
-                    ...(botStrength || {}),
-                    whiteTime,
-                    blackTime,
-                    whiteInc: incrementMs,
-                    blackInc: incrementMs,
-                    incrementMs,
-                  };
+              const engineClockConfig = {
+                ...(botStrength || {}),
+                ...(isUntimed
+                  ? {}
+                  : {
+                      whiteTime,
+                      blackTime,
+                      whiteInc: incrementMs,
+                      blackInc: incrementMs,
+                      incrementMs,
+                    }),
+                botKey: botForMove?.key || currentGame.customBot?.key,
+                botName: botForMove?.name || currentGame.customBot?.name,
+                elo: effectiveElo,
+              };
               botMoveIndices = await getBestMove(
                 currentGame.board,
                 "white",

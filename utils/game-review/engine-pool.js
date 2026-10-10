@@ -4,16 +4,8 @@ const fs = require("fs");
 const os = require("os");
 
 function getStockfishPath() {
-  const stockfishDir = path.join(__dirname, "..", "..", "stockfish");
-  const isWindows = process.platform === "win32";
-  if (isWindows) {
-    const windowsPath = path.join(stockfishDir, "Windows", "stockfish-windows-x86-64-avx2.exe");
-    if (fs.existsSync(windowsPath)) return windowsPath;
-  } else {
-    const linuxPath = path.join(stockfishDir, "Linux", "stockfish-ubuntu-x86-64-avx2");
-    if (fs.existsSync(linuxPath)) return linuxPath;
-  }
-  return "stockfish";
+  const { resolveStockfishBinary } = require("../resolveStockfishBinary");
+  return resolveStockfishBinary(path.join(__dirname, "..", "..", "stockfish"));
 }
 
 const STOCKFISH_PATH = getStockfishPath();
