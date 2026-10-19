@@ -131,15 +131,43 @@ async function createMatch({ mode, playerA, playerB, challengerId = null, challe
   return match;
 }
 
-/** Pending / ready / live — user should not appear in open seeks. */
-async function findBusyMatch(userId) {
+/** Only a live match should block Find Rival / new challenges. */
+async function findLiveMatch(userId) {
   if (!userId) return null;
   return PuzzleWarsMatch.findOne({
-    status: { $in: ["pending", "ready", "live"] },
+    status: "live",
     "players.userId": userId,
   })
     .select("_id status mode")
     .lean();
+}
+
+/**
+ * Abandoned lobby / ready shells left after a previous session.
+ * Closing them lets the player search again without a hard block.
+ */
+async function abandonNonLiveMatches(userId) {
+  if (!userId) return 0;
+  const res = await PuzzleWarsMatch.updateMany(
+    {
+      status: { $in: ["pending", "ready"] },
+      "players.userId": userId,
+    },
+    {
+      $set: {
+        status: "finished",
+        finishedAt: new Date(),
+        result: "draw",
+        winnerId: null,
+      },
+    },
+  );
+  return res.modifiedCount || res.nModified || 0;
+}
+
+/** @deprecated use findLiveMatch — kept for older callers */
+async function findBusyMatch(userId) {
+  return findLiveMatch(userId);
 }
 
 function findPlayerIndex(match, userId) {
@@ -288,7 +316,9 @@ module.exports = {
   serializePlayer,
   loadUserBrief,
   createMatch,
+  findLiveMatch,
   findBusyMatch,
+  abandonNonLiveMatches,
   findPlayerIndex,
   opponentOf,
   markReady,

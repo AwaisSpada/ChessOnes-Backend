@@ -51,16 +51,16 @@ function broadcastLobby() {
   }
 }
 
-/** Remove seeks for users already in pending/ready/live matches. */
-async function scrubBusySeeks() {
+/** Remove seeks only for users currently in a live match. */
+async function scrubLiveSeeks() {
   const ids = [...openSeeks.keys()];
   if (!ids.length) return false;
   let changed = false;
   await Promise.all(
     ids.map(async (uid) => {
       try {
-        const busy = await matchService.findBusyMatch(uid);
-        if (busy) {
+        const live = await matchService.findLiveMatch(uid);
+        if (live) {
           queue.delete(uid);
           if (openSeeks.delete(uid)) changed = true;
         }
@@ -184,10 +184,12 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "Accept policies to play" });
         return;
       }
-      const busy = await matchService.findBusyMatch(userId);
-      if (busy) {
+      // Clear abandoned pending/ready shells so Find Rival always works after a prior game.
+      await matchService.abandonNonLiveMatches(userId);
+      const live = await matchService.findLiveMatch(userId);
+      if (live) {
         socket.emit("puzzle-wars:error", {
-          message: "Already in a Puzzle Wars match",
+          message: "Finish your current Puzzle Wars match first",
         });
         return;
       }
@@ -227,7 +229,7 @@ function bindSocket(socket) {
 
   socket.on("puzzle-wars:lobby-subscribe", async () => {
     lobbySockets.add(socket.id);
-    const scrubbed = await scrubBusySeeks();
+    const scrubbed = await scrubLiveSeeks();
     if (scrubbed) broadcastLobby();
     else socket.emit("puzzle-wars:lobby", lobbyPayload());
   });
@@ -257,20 +259,21 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "Challenge no longer available" });
         return;
       }
-      const [targetBusy, joinerBusy] = await Promise.all([
-        matchService.findBusyMatch(targetUserId),
-        matchService.findBusyMatch(joinerId),
+      await matchService.abandonNonLiveMatches(joinerId);
+      const [targetLive, joinerLive] = await Promise.all([
+        matchService.findLiveMatch(targetUserId),
+        matchService.findLiveMatch(joinerId),
       ]);
-      if (targetBusy) {
+      if (targetLive) {
         leaveQueue(targetUserId);
         socket.emit("puzzle-wars:error", {
           message: "Challenge no longer available",
         });
         return;
       }
-      if (joinerBusy) {
+      if (joinerLive) {
         socket.emit("puzzle-wars:error", {
-          message: "Already in a Puzzle Wars match",
+          message: "Finish your current Puzzle Wars match first",
         });
         return;
       }
@@ -316,17 +319,18 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "User not found" });
         return;
       }
-      const [challengerBusy, friendBusy] = await Promise.all([
-        matchService.findBusyMatch(challengerId),
-        matchService.findBusyMatch(friendId),
+      await matchService.abandonNonLiveMatches(challengerId);
+      const [challengerLive, friendLive] = await Promise.all([
+        matchService.findLiveMatch(challengerId),
+        matchService.findLiveMatch(friendId),
       ]);
-      if (challengerBusy) {
+      if (challengerLive) {
         socket.emit("puzzle-wars:error", {
-          message: "Already in a Puzzle Wars match",
+          message: "Finish your current Puzzle Wars match first",
         });
         return;
       }
-      if (friendBusy) {
+      if (friendLive) {
         leaveQueue(friendId);
         socket.emit("puzzle-wars:error", {
           message: "Friend is already in a Puzzle Wars match",
