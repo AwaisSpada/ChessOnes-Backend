@@ -158,7 +158,14 @@ async function markReady(matchId, userId) {
     const now = new Date();
     match.status = "live";
     match.startedAt = now;
-    match.endsAt = new Date(now.getTime() + (match.durationMs || MATCH_DURATION_MS));
+    // Full duration after client 3-2-1 (not eaten by the countdown).
+    const countdownMs =
+      PuzzleWarsMatch.CLIENT_COUNTDOWN_MS != null
+        ? PuzzleWarsMatch.CLIENT_COUNTDOWN_MS
+        : 3000;
+    match.endsAt = new Date(
+      now.getTime() + countdownMs + (match.durationMs || MATCH_DURATION_MS),
+    );
   } else if (match.status === "pending") {
     match.status = "ready";
   } else if (match.status !== "live") {

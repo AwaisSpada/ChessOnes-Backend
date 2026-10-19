@@ -1,6 +1,8 @@
 const mongoose = require("mongoose");
 
 const MATCH_DURATION_MS = 3 * 60 * 1000;
+/** Client 3-2-1 overlay — play clock starts after this, not at live. */
+const CLIENT_COUNTDOWN_MS = 3 * 1000;
 const SEQUENCE_SIZE = 48;
 
 const puzzleSnapshotSchema = new mongoose.Schema(
@@ -86,6 +88,7 @@ puzzleWarsMatchSchema.index({ status: 1, updatedAt: -1 });
 puzzleWarsMatchSchema.index({ "players.userId": 1, status: 1 });
 
 puzzleWarsMatchSchema.statics.MATCH_DURATION_MS = MATCH_DURATION_MS;
+puzzleWarsMatchSchema.statics.CLIENT_COUNTDOWN_MS = CLIENT_COUNTDOWN_MS;
 puzzleWarsMatchSchema.statics.SEQUENCE_SIZE = SEQUENCE_SIZE;
 
 module.exports = mongoose.model("PuzzleWarsMatch", puzzleWarsMatchSchema);
