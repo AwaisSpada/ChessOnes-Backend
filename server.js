@@ -194,6 +194,7 @@ app.use("/api/game-review", require("./routes/game-review")); // Game review ana
 app.use("/api/puzzles", require("./routes/puzzles")); // Puzzles endpoints
 app.use("/api/daily-puzzle", require("./routes/daily-puzzle")); // Daily puzzle (isolated)
 app.use("/api/puzzle-rush", require("./routes/puzzle-rush")); // Puzzle Rush (3/5 min)
+app.use("/api/puzzle-wars", require("./routes/puzzle-wars")); // Puzzle Wars (isolated 1v1)
 app.use("/api/tournaments", require("./routes/tournaments"));
 app.use("/api/learn", require("./routes/learn")); // Learn SRS progress sync
 app.use("/api/admin", require("./routes/admin")); // Admin panel routes
@@ -309,6 +310,9 @@ FindRivalJoinWait.init({
 
 // Phase 3: wire Socket.IO into server-authoritative end helpers (flag/abandon).
 require("./services/live/liveGameEnd").init(io);
+
+// Puzzle Wars — isolated matchmaking / scoring (does not touch chess pool)
+require("./services/puzzleWars").init(io);
 
 function readyFlagForPlayer(state, playerId) {
   if (!playerId) return false;
