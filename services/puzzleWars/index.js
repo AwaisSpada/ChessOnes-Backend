@@ -51,6 +51,27 @@ function broadcastLobby() {
   }
 }
 
+/** Remove seeks for users already in pending/ready/live matches. */
+async function scrubBusySeeks() {
+  const ids = [...openSeeks.keys()];
+  if (!ids.length) return false;
+  let changed = false;
+  await Promise.all(
+    ids.map(async (uid) => {
+      try {
+        const busy = await matchService.findBusyMatch(uid);
+        if (busy) {
+          queue.delete(uid);
+          if (openSeeks.delete(uid)) changed = true;
+        }
+      } catch {
+        /* ignore single-user lookup errors */
+      }
+    }),
+  );
+  return changed;
+}
+
 function clearEndTimer(matchId) {
   const t = endTimers.get(String(matchId));
   if (t) clearTimeout(t);
@@ -83,13 +104,36 @@ function broadcastState(match) {
 
 function broadcastFinished(match) {
   clearEndTimer(match._id);
+  // Safety: never leave finished players listed as open challenges.
+  leaveQueueMany(playerIdsOf(match));
   const payload = matchService.serializeMatch(match, { includePuzzles: false });
   for (const p of match.players || []) {
     emitToUser(p.userId, "puzzle-wars:finished", payload);
   }
 }
 
+function leaveQueueMany(userIds) {
+  let seeksChanged = false;
+  for (const id of userIds || []) {
+    if (!id) continue;
+    const uid = String(id);
+    queue.delete(uid);
+    if (openSeeks.delete(uid)) seeksChanged = true;
+  }
+  if (seeksChanged) broadcastLobby();
+}
+
+function leaveQueue(userId) {
+  leaveQueueMany([userId]);
+}
+
+function playerIdsOf(match) {
+  return (match?.players || []).map((p) => p.userId).filter(Boolean);
+}
+
 function emitMatchFound(match) {
+  // Every match path must drop both players from queue + open seeks.
+  leaveQueueMany(playerIdsOf(match));
   const full = matchService.serializeMatch(match, { includePuzzles: true });
   for (const p of match.players || []) {
     const opp = matchService.opponentOf(match, p.userId);
@@ -97,15 +141,6 @@ function emitMatchFound(match) {
       ...full,
       opponent: opp ? matchService.serializePlayer(opp) : null,
     });
-  }
-}
-
-function leaveQueue(userId) {
-  const uid = String(userId);
-  queue.delete(uid);
-  if (openSeeks.has(uid)) {
-    openSeeks.delete(uid);
-    broadcastLobby();
   }
 }
 
@@ -149,6 +184,13 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "Accept policies to play" });
         return;
       }
+      const busy = await matchService.findBusyMatch(userId);
+      if (busy) {
+        socket.emit("puzzle-wars:error", {
+          message: "Already in a Puzzle Wars match",
+        });
+        return;
+      }
       const brief = await matchService.loadUserBrief(userId);
       if (!brief) {
         socket.emit("puzzle-wars:error", { message: "User not found" });
@@ -183,9 +225,11 @@ function bindSocket(socket) {
     socket.emit("puzzle-wars:queue-left", { ok: true });
   });
 
-  socket.on("puzzle-wars:lobby-subscribe", () => {
+  socket.on("puzzle-wars:lobby-subscribe", async () => {
     lobbySockets.add(socket.id);
-    socket.emit("puzzle-wars:lobby", lobbyPayload());
+    const scrubbed = await scrubBusySeeks();
+    if (scrubbed) broadcastLobby();
+    else socket.emit("puzzle-wars:lobby", lobbyPayload());
   });
 
   socket.on("puzzle-wars:lobby-unsubscribe", () => {
@@ -211,6 +255,23 @@ function bindSocket(socket) {
       const seek = openSeeks.get(targetUserId);
       if (!seek) {
         socket.emit("puzzle-wars:error", { message: "Challenge no longer available" });
+        return;
+      }
+      const [targetBusy, joinerBusy] = await Promise.all([
+        matchService.findBusyMatch(targetUserId),
+        matchService.findBusyMatch(joinerId),
+      ]);
+      if (targetBusy) {
+        leaveQueue(targetUserId);
+        socket.emit("puzzle-wars:error", {
+          message: "Challenge no longer available",
+        });
+        return;
+      }
+      if (joinerBusy) {
+        socket.emit("puzzle-wars:error", {
+          message: "Already in a Puzzle Wars match",
+        });
         return;
       }
       const joiner = await matchService.loadUserBrief(joinerId);
@@ -255,7 +316,25 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "User not found" });
         return;
       }
-      leaveQueue(challengerId);
+      const [challengerBusy, friendBusy] = await Promise.all([
+        matchService.findBusyMatch(challengerId),
+        matchService.findBusyMatch(friendId),
+      ]);
+      if (challengerBusy) {
+        socket.emit("puzzle-wars:error", {
+          message: "Already in a Puzzle Wars match",
+        });
+        return;
+      }
+      if (friendBusy) {
+        leaveQueue(friendId);
+        socket.emit("puzzle-wars:error", {
+          message: "Friend is already in a Puzzle Wars match",
+        });
+        return;
+      }
+      // Drop both from open seeks so neither stays Accept-able mid-challenge.
+      leaveQueueMany([challengerId, friendId]);
       const match = await matchService.createMatch({
         mode: "friend",
         playerA: challenger,
@@ -287,6 +366,7 @@ function bindSocket(socket) {
         return;
       }
       const match = await matchService.acceptChallenge(matchId, userId);
+      leaveQueueMany(playerIdsOf(match));
       emitMatchFound(match);
     } catch (err) {
       socket.emit("puzzle-wars:error", { message: err.message || "Accept failed" });

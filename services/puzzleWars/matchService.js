@@ -131,6 +131,17 @@ async function createMatch({ mode, playerA, playerB, challengerId = null, challe
   return match;
 }
 
+/** Pending / ready / live — user should not appear in open seeks. */
+async function findBusyMatch(userId) {
+  if (!userId) return null;
+  return PuzzleWarsMatch.findOne({
+    status: { $in: ["pending", "ready", "live"] },
+    "players.userId": userId,
+  })
+    .select("_id status mode")
+    .lean();
+}
+
 function findPlayerIndex(match, userId) {
   const uid = String(userId);
   return (match.players || []).findIndex((p) => String(p.userId) === uid);
@@ -277,6 +288,7 @@ module.exports = {
   serializePlayer,
   loadUserBrief,
   createMatch,
+  findBusyMatch,
   findPlayerIndex,
   opponentOf,
   markReady,
