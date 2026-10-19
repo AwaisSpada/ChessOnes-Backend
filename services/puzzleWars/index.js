@@ -51,7 +51,7 @@ function broadcastLobby() {
   }
 }
 
-/** Remove seeks only for users currently in a live match. */
+/** Remove seeks only for users currently in an active (on-clock) live match. */
 async function scrubLiveSeeks() {
   const ids = [...openSeeks.keys()];
   if (!ids.length) return false;
@@ -59,7 +59,7 @@ async function scrubLiveSeeks() {
   await Promise.all(
     ids.map(async (uid) => {
       try {
-        const live = await matchService.findLiveMatch(uid);
+        const live = await matchService.releaseUserForQueue(uid);
         if (live) {
           queue.delete(uid);
           if (openSeeks.delete(uid)) changed = true;
@@ -184,9 +184,8 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "Accept policies to play" });
         return;
       }
-      // Clear abandoned pending/ready shells so Find Rival always works after a prior game.
-      await matchService.abandonNonLiveMatches(userId);
-      const live = await matchService.findLiveMatch(userId);
+      // Clear abandoned pending/ready/expired-live shells so search isn't permanently stuck.
+      const live = await matchService.releaseUserForQueue(userId);
       if (live) {
         socket.emit("puzzle-wars:error", {
           message: "Finish your current Puzzle Wars match first",
@@ -259,10 +258,9 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "Challenge no longer available" });
         return;
       }
-      await matchService.abandonNonLiveMatches(joinerId);
       const [targetLive, joinerLive] = await Promise.all([
-        matchService.findLiveMatch(targetUserId),
-        matchService.findLiveMatch(joinerId),
+        matchService.releaseUserForQueue(targetUserId),
+        matchService.releaseUserForQueue(joinerId),
       ]);
       if (targetLive) {
         leaveQueue(targetUserId);
@@ -319,10 +317,9 @@ function bindSocket(socket) {
         socket.emit("puzzle-wars:error", { message: "User not found" });
         return;
       }
-      await matchService.abandonNonLiveMatches(challengerId);
       const [challengerLive, friendLive] = await Promise.all([
-        matchService.findLiveMatch(challengerId),
-        matchService.findLiveMatch(friendId),
+        matchService.releaseUserForQueue(challengerId),
+        matchService.releaseUserForQueue(friendId),
       ]);
       if (challengerLive) {
         socket.emit("puzzle-wars:error", {

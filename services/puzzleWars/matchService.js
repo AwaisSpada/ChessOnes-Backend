@@ -131,14 +131,18 @@ async function createMatch({ mode, playerA, playerB, challengerId = null, challe
   return match;
 }
 
-/** Only a live match should block Find Rival / new challenges. */
+/**
+ * Only a live match still on the clock should block Find Rival / challenges.
+ * Expired / null-endsAt shells must not trap players after a crash or missed timer.
+ */
 async function findLiveMatch(userId) {
   if (!userId) return null;
   return PuzzleWarsMatch.findOne({
     status: "live",
     "players.userId": userId,
+    endsAt: { $gt: new Date() },
   })
-    .select("_id status mode")
+    .select("_id status mode endsAt")
     .lean();
 }
 
@@ -163,6 +167,40 @@ async function abandonNonLiveMatches(userId) {
     },
   );
   return res.modifiedCount || res.nModified || 0;
+}
+
+/** Live matches whose clock already ended (or never got endsAt). */
+async function abandonStaleLiveMatches(userId) {
+  if (!userId) return 0;
+  const graceMs = MATCH_DURATION_MS + 5 * 60 * 1000;
+  const startedCutoff = new Date(Date.now() - graceMs);
+  const res = await PuzzleWarsMatch.updateMany(
+    {
+      status: "live",
+      "players.userId": userId,
+      $or: [
+        { endsAt: { $lte: new Date() } },
+        { endsAt: null },
+        { startedAt: { $lte: startedCutoff } },
+      ],
+    },
+    {
+      $set: {
+        status: "finished",
+        finishedAt: new Date(),
+        result: "draw",
+        winnerId: null,
+      },
+    },
+  );
+  return res.modifiedCount || res.nModified || 0;
+}
+
+/** Clear abandoned shells, then report only a truly active live match. */
+async function releaseUserForQueue(userId) {
+  await abandonNonLiveMatches(userId);
+  await abandonStaleLiveMatches(userId);
+  return findLiveMatch(userId);
 }
 
 /** @deprecated use findLiveMatch — kept for older callers */
@@ -319,6 +357,8 @@ module.exports = {
   findLiveMatch,
   findBusyMatch,
   abandonNonLiveMatches,
+  abandonStaleLiveMatches,
+  releaseUserForQueue,
   findPlayerIndex,
   opponentOf,
   markReady,
