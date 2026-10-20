@@ -281,8 +281,22 @@ async function declineChallenge(matchId, userId) {
   return match;
 }
 
+/** Puzzle Wars points only (+3 / −1 / −2). Never goes below 0. */
+const WARS_SCORE_DELTA = {
+  solved: 3,
+  skip: -1,
+  wrong: -2,
+};
+
+function applyWarsScoreDelta(current, action) {
+  const delta = WARS_SCORE_DELTA[action];
+  if (delta == null) return null;
+  return Math.max(0, (Number(current) || 0) + delta);
+}
+
 /**
- * Advance only the reporting player's index. Score++ only on solved.
+ * Advance only the reporting player's index.
+ * Score: solve +3, skip −1, wrong −2 (floor at 0). Socket/event flow unchanged.
  * Shared sequence is never mutated; both players read puzzles[player.puzzleIndex].
  */
 async function reportProgress(matchId, userId, { action, puzzleId, puzzleIndex }) {
@@ -308,11 +322,11 @@ async function reportProgress(matchId, userId, { action, puzzleId, puzzleIndex }
   }
 
   const act = String(action || "").toLowerCase();
-  if (act === "solved") {
-    player.score = (player.score || 0) + 1;
-  } else if (act !== "skip" && act !== "wrong") {
+  const nextScore = applyWarsScoreDelta(player.score, act);
+  if (nextScore == null) {
     throw new Error("Invalid action");
   }
+  player.score = nextScore;
 
   player.puzzleIndex = expectedIndex + 1;
   match.markModified("players");
