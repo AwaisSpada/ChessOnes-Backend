@@ -476,6 +476,26 @@ function isStalemate(board, isWhite) {
   return legalMoves.length === 0;
 }
 
+/** Map board letter (K/Q/R/B/N/P) → count bucket used below. */
+function pieceLetterToName(letter) {
+  switch (String(letter || "").toLowerCase()) {
+    case "k":
+      return "king";
+    case "q":
+      return "queen";
+    case "r":
+      return "rook";
+    case "b":
+      return "bishop";
+    case "n":
+      return "knight";
+    case "p":
+      return "pawn";
+    default:
+      return null;
+  }
+}
+
 // Check if there is insufficient material for checkmate
 // Returns true if neither side can possibly checkmate the other
 function isInsufficientMaterial(board) {
@@ -502,12 +522,14 @@ function isInsufficientMaterial(board) {
 
   let totalPieces = 0;
 
-  // Count all pieces on the board
+  // Count all pieces on the board (letters KQRBNP — not full names)
   for (let i = 0; i < 64; i++) {
     const piece = board[i];
-    if (!piece) continue;
+    if (!piece || typeof piece !== "string") continue;
 
-    const pieceType = piece.toLowerCase();
+    const pieceType = pieceLetterToName(piece);
+    if (!pieceType) continue;
+
     const isWhite = piece === piece.toUpperCase();
 
     if (isWhite) {

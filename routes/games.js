@@ -2582,6 +2582,12 @@ router.post(
           white: sideToMove === "white" ? 0 : Math.max(0, effective.white),
           black: sideToMove === "black" ? 0 : Math.max(0, effective.black),
         };
+
+        // Flag with dead position → draw (same rule as TimeoutManager).
+        if (isInsufficientMaterial(game.board)) {
+          result.winner = "draw";
+          result.reason = "insufficient-material";
+        }
       } else if (
         isLiveHumanGame(game) &&
         result.reason !== "first-move-abandon"
