@@ -5,8 +5,11 @@ const multer = require("multer");
 const User = require("../models/User");
 const News = require("../models/News");
 const Stats = require("../models/Stats");
+const Game = require("../models/Game");
 const DailyPuzzleUserProgress = require("../models/DailyPuzzleUserProgress");
 const PuzzleAttempt = require("../models/PuzzleAttempt");
+const PuzzleRushRun = require("../models/PuzzleRushRun");
+const PuzzleWarsMatch = require("../models/PuzzleWarsMatch");
 const { todayDateKey } = require("../utils/daily-puzzle-dates");
 const MessengerConversation = require("../models/MessengerConversation");
 const MessengerMessage = require("../models/MessengerMessage");
@@ -23,6 +26,29 @@ const { formatMemberSince } = require("../utils/userProjections");
 
 /** Matches socket presence: users marked online or in an active game. */
 const ACTIVE_USER_STATUSES = ["online", "in-game"];
+
+const PLATFORM_KEYS = ["web", "ios", "android", "unknown"];
+
+/** Prefer signupPlatform; else last FCM device platform; else unknown. */
+function resolveUserPlatform(user) {
+  const signed = String(user?.signupPlatform || "")
+    .toLowerCase()
+    .trim();
+  if (signed === "web" || signed === "ios" || signed === "android") {
+    return { platform: signed, platformSource: "signup" };
+  }
+  const tokens = Array.isArray(user?.fcmTokens) ? user.fcmTokens : [];
+  if (tokens.length > 0) {
+    const last = tokens[tokens.length - 1];
+    const p = String(last?.platform || "")
+      .toLowerCase()
+      .trim();
+    if (p === "web" || p === "ios" || p === "android") {
+      return { platform: p, platformSource: "device" };
+    }
+  }
+  return { platform: "unknown", platformSource: null };
+}
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
@@ -86,21 +112,41 @@ router.get("/users", async (req, res) => {
     delete baseCountQuery.status;
 
     const users = await User.find(query)
-      .select("-password")
-      .select("username email fullName avatar status role ratings createdAt isSuspended")
+      .select(
+        "username email fullName avatar status role ratings createdAt isSuspended signupPlatform fcmTokens"
+      )
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .lean();
 
-    const [total, totalUsers, onlineCount] = await Promise.all([
+    const [total, totalUsers, onlineCount, platformDocs] = await Promise.all([
       User.countDocuments(query),
       User.countDocuments(baseCountQuery),
       User.countDocuments({
         ...baseCountQuery,
         status: { $in: ACTIVE_USER_STATUSES },
       }),
+      // Lightweight scan for engagement mix (signup → FCM fallback). Caps memory vs full user dump.
+      User.find(baseCountQuery)
+        .select("signupPlatform fcmTokens")
+        .lean(),
     ]);
+
+    const platformBreakdown = {
+      web: 0,
+      ios: 0,
+      android: 0,
+      unknown: 0,
+    };
+    for (const doc of platformDocs) {
+      const { platform } = resolveUserPlatform(doc);
+      if (PLATFORM_KEYS.includes(platform)) {
+        platformBreakdown[platform] += 1;
+      } else {
+        platformBreakdown.unknown += 1;
+      }
+    }
 
     const userIds = users.map((user) => user._id);
     const today = todayDateKey();
@@ -136,13 +182,20 @@ router.get("/users", async (req, res) => {
       const stats = statsByUserId.get(userId);
       const memberSince = formatMemberSince(user.createdAt);
       const isOnline = ACTIVE_USER_STATUSES.includes(user.status);
+      const { platform, platformSource } = resolveUserPlatform(user);
+      const { fcmTokens: _omitTokens, ...safeUser } = user;
       return {
-        ...user,
+        ...safeUser,
         ...(memberSince ? { memberSince } : {}),
         isOnline,
+        signupPlatform: user.signupPlatform || "unknown",
+        platform,
+        platformSource,
         stats: stats || {
           wins: { total: 0 },
           gamesPlayed: { total: 0 },
+          losses: { total: 0 },
+          draws: { total: 0 },
         },
         dailyPuzzleSolvedToday: dailySolvedTodaySet.has(userId),
         normalPuzzlesSolvedCount: normalSolvedByUserId.get(userId) ?? 0,
@@ -162,6 +215,7 @@ router.get("/users", async (req, res) => {
         summary: {
           totalUsers,
           onlineCount,
+          platformBreakdown,
         },
       },
     });
@@ -825,6 +879,272 @@ router.get(
     }
   }
 );
+
+// ========== DASHBOARD METRICS (read-only; does not touch sockets / gameplay) ==========
+
+function startOfUtcDay(d = new Date()) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+function startOfUtcMonth(d = new Date()) {
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+}
+
+function monthKey(y, m) {
+  return `${y}-${String(m).padStart(2, "0")}`;
+}
+
+function fillMonths(fromDate, toDate, countsByKey) {
+  const out = [];
+  const cur = new Date(
+    Date.UTC(fromDate.getUTCFullYear(), fromDate.getUTCMonth(), 1)
+  );
+  const end = new Date(
+    Date.UTC(toDate.getUTCFullYear(), toDate.getUTCMonth(), 1)
+  );
+  while (cur <= end) {
+    const y = cur.getUTCFullYear();
+    const m = cur.getUTCMonth() + 1;
+    const key = monthKey(y, m);
+    out.push({
+      key,
+      label: cur.toLocaleString("en-US", { month: "short", year: "2-digit", timeZone: "UTC" }),
+      count: countsByKey.get(key) || 0,
+    });
+    cur.setUTCMonth(cur.getUTCMonth() + 1);
+  }
+  return out;
+}
+
+function fillDays(fromDate, toDate, countsByKey) {
+  const out = [];
+  const cur = new Date(fromDate.getTime());
+  while (cur <= toDate) {
+    const key = cur.toISOString().slice(0, 10);
+    out.push({
+      key,
+      label: cur.toLocaleString("en-US", { month: "short", day: "numeric", timeZone: "UTC" }),
+      count: countsByKey.get(key) || 0,
+    });
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return out;
+}
+
+// @route   GET /api/admin/metrics
+// @desc    CMS overview: registrations over time, platforms, activity counts
+// @access  Private (Admin only)
+router.get("/metrics", async (req, res) => {
+  try {
+    const now = new Date();
+    const todayStart = startOfUtcDay(now);
+    const tomorrowStart = new Date(todayStart);
+    tomorrowStart.setUTCDate(tomorrowStart.getUTCDate() + 1);
+
+    const weekStart = new Date(todayStart);
+    weekStart.setUTCDate(weekStart.getUTCDate() - 6);
+
+    const thisMonthStart = startOfUtcMonth(now);
+    const lastMonthStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)
+    );
+    const nextMonthStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+    );
+
+    const monthsBackStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 11, 1)
+    );
+    const daysBackStart = new Date(todayStart);
+    daysBackStart.setUTCDate(daysBackStart.getUTCDate() - 29);
+
+    const activeUsersQuery = { isDeleted: false };
+
+    const [
+      totalUsers,
+      onlineCount,
+      suspendedCount,
+      adminCount,
+      registeredToday,
+      registeredThisWeek,
+      registeredThisMonth,
+      registeredLastMonth,
+      monthAgg,
+      dayAgg,
+      platformDocs,
+      gamesToday,
+      gamesThisMonth,
+      puzzlesToday,
+      rushThisMonth,
+      warsThisMonth,
+      recentUsers,
+    ] = await Promise.all([
+      User.countDocuments(activeUsersQuery),
+      User.countDocuments({
+        ...activeUsersQuery,
+        status: { $in: ACTIVE_USER_STATUSES },
+      }),
+      User.countDocuments({ ...activeUsersQuery, isSuspended: true }),
+      User.countDocuments({ ...activeUsersQuery, role: "ADMIN" }),
+      User.countDocuments({
+        ...activeUsersQuery,
+        createdAt: { $gte: todayStart, $lt: tomorrowStart },
+      }),
+      User.countDocuments({
+        ...activeUsersQuery,
+        createdAt: { $gte: weekStart },
+      }),
+      User.countDocuments({
+        ...activeUsersQuery,
+        createdAt: { $gte: thisMonthStart, $lt: nextMonthStart },
+      }),
+      User.countDocuments({
+        ...activeUsersQuery,
+        createdAt: { $gte: lastMonthStart, $lt: thisMonthStart },
+      }),
+      User.aggregate([
+        {
+          $match: {
+            isDeleted: false,
+            createdAt: { $gte: monthsBackStart },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              y: { $year: "$createdAt" },
+              m: { $month: "$createdAt" },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { "_id.y": 1, "_id.m": 1 } },
+      ]),
+      User.aggregate([
+        {
+          $match: {
+            isDeleted: false,
+            createdAt: { $gte: daysBackStart },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $dateToString: { format: "%Y-%m-%d", date: "$createdAt" },
+            },
+            count: { $sum: 1 },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      User.find(activeUsersQuery).select("signupPlatform fcmTokens").lean(),
+      Game.countDocuments({
+        createdAt: { $gte: todayStart, $lt: tomorrowStart },
+      }),
+      Game.countDocuments({
+        createdAt: { $gte: thisMonthStart, $lt: nextMonthStart },
+      }),
+      PuzzleAttempt.countDocuments({
+        createdAt: { $gte: todayStart, $lt: tomorrowStart },
+      }),
+      PuzzleRushRun.countDocuments({
+        createdAt: { $gte: thisMonthStart, $lt: nextMonthStart },
+      }),
+      PuzzleWarsMatch.countDocuments({
+        createdAt: { $gte: thisMonthStart, $lt: nextMonthStart },
+      }),
+      User.find(activeUsersQuery)
+        .select("username email avatar createdAt signupPlatform fcmTokens status")
+        .sort({ createdAt: -1 })
+        .limit(8)
+        .lean(),
+    ]);
+
+    const monthMap = new Map();
+    for (const row of monthAgg) {
+      monthMap.set(monthKey(row._id.y, row._id.m), row.count);
+    }
+    const dayMap = new Map();
+    for (const row of dayAgg) {
+      dayMap.set(row._id, row.count);
+    }
+
+    const platformBreakdown = {
+      web: 0,
+      ios: 0,
+      android: 0,
+      unknown: 0,
+    };
+    for (const doc of platformDocs) {
+      const { platform } = resolveUserPlatform(doc);
+      if (PLATFORM_KEYS.includes(platform)) {
+        platformBreakdown[platform] += 1;
+      } else {
+        platformBreakdown.unknown += 1;
+      }
+    }
+
+    const monthDelta =
+      registeredLastMonth > 0
+        ? Math.round(
+            ((registeredThisMonth - registeredLastMonth) / registeredLastMonth) *
+              100
+          )
+        : registeredThisMonth > 0
+          ? 100
+          : 0;
+
+    res.json({
+      success: true,
+      data: {
+        totals: {
+          users: totalUsers,
+          online: onlineCount,
+          suspended: suspendedCount,
+          admins: adminCount,
+        },
+        registrations: {
+          today: registeredToday,
+          last7Days: registeredThisWeek,
+          thisMonth: registeredThisMonth,
+          lastMonth: registeredLastMonth,
+          monthDeltaPct: monthDelta,
+        },
+        activity: {
+          gamesToday,
+          gamesThisMonth,
+          puzzleAttemptsToday: puzzlesToday,
+          rushRunsThisMonth: rushThisMonth,
+          warsMatchesThisMonth: warsThisMonth,
+        },
+        platformBreakdown,
+        charts: {
+          registrationsByMonth: fillMonths(monthsBackStart, now, monthMap),
+          registrationsByDay: fillDays(daysBackStart, todayStart, dayMap),
+        },
+        recentUsers: recentUsers.map((u) => {
+          const { platform, platformSource } = resolveUserPlatform(u);
+          return {
+            _id: u._id,
+            username: u.username,
+            email: u.email,
+            avatar: u.avatar,
+            createdAt: u.createdAt,
+            status: u.status,
+            platform,
+            platformSource,
+          };
+        }),
+      },
+    });
+  } catch (error) {
+    console.error("[Admin] metrics error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to load admin metrics",
+    });
+  }
+});
 
 module.exports = router;
 

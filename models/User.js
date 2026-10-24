@@ -305,6 +305,17 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /**
+     * Where the account was created: web | ios | android.
+     * Additive only — older users stay "unknown" (admin may fall back to last FCM device).
+     * Does not affect gameplay or sockets.
+     */
+    signupPlatform: {
+      type: String,
+      enum: ["web", "ios", "android", "unknown"],
+      default: "unknown",
+      index: true,
+    },
   },
   {
     timestamps: true,

@@ -17,6 +17,15 @@ const { verifyAppleIdentityToken } = require("../utils/appleAuth");
 
 const router = express.Router();
 
+/** Normalize client-reported signup/source platform. Additive; never required. */
+function normalizeSignupPlatform(raw) {
+  const v = String(raw || "")
+    .toLowerCase()
+    .trim();
+  if (v === "ios" || v === "android" || v === "web") return v;
+  return "unknown";
+}
+
 // Generate JWT token
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET, { expiresIn: "7d" })
@@ -34,6 +43,8 @@ router.post(
     body("fullName").isLength({ min: 2 }).trim(),
     body("ageGroup").isIn(["under-18", "18-25", "26-35", "36-50", "over-50"]),
     body("inviteToken").optional().isString(),
+    body("signupPlatform").optional().isIn(["web", "ios", "android", "unknown"]),
+    body("platform").optional().isIn(["web", "ios", "android", "unknown"]),
   ],
   async (req, res) => {
     try {
@@ -54,7 +65,12 @@ router.post(
         ageGroup,
         country,
         inviteToken,
+        signupPlatform,
+        platform,
       } = req.body;
+      const resolvedPlatform = normalizeSignupPlatform(
+        signupPlatform || platform
+      );
 
       // Normalize email for storage (lowercase and trim, but preserve dots)
       const normalizedEmail = email.toLowerCase().trim();
@@ -108,6 +124,7 @@ router.post(
         ratings: defaultRatings,
         hasCompletedSignupDetails: true,
         hasPassword: true,
+        signupPlatform: resolvedPlatform,
       });
 
       await user.save();
@@ -752,7 +769,19 @@ router.post(
 // @access  Public
 router.post("/social", async (req, res) => {
   try {
-    let { provider, providerId, email, name, image, identityToken } = req.body;
+    let {
+      provider,
+      providerId,
+      email,
+      name,
+      image,
+      identityToken,
+      signupPlatform,
+      platform,
+    } = req.body;
+    const resolvedPlatform = normalizeSignupPlatform(
+      signupPlatform || platform
+    );
 
     if (!provider) {
       return res.status(400).json({
@@ -868,6 +897,7 @@ router.post("/social", async (req, res) => {
         hasCompletedSignupDetails: false,
         hasAcceptedPolicies: false,
         hasPassword: false,
+        signupPlatform: resolvedPlatform,
       });
 
       await user.save();
