@@ -27,9 +27,10 @@ const { formatMemberSince } = require("../utils/userProjections");
 /** Matches socket presence: users marked online or in an active game. */
 const ACTIVE_USER_STATUSES = ["online", "in-game"];
 
-const PLATFORM_KEYS = ["web", "ios", "android", "unknown"];
-
-/** Prefer signupPlatform; else last FCM device platform; else unknown. */
+/**
+ * Prefer signupPlatform; else last FCM device platform.
+ * Untracked (pre-instrumentation / no FCM) → treat as web for admin CMS display.
+ */
 function resolveUserPlatform(user) {
   const signed = String(user?.signupPlatform || "")
     .toLowerCase()
@@ -47,7 +48,7 @@ function resolveUserPlatform(user) {
       return { platform: p, platformSource: "device" };
     }
   }
-  return { platform: "unknown", platformSource: null };
+  return { platform: "web", platformSource: "assumed-web" };
 }
 
 // Configure multer for memory storage
@@ -141,10 +142,10 @@ router.get("/users", async (req, res) => {
     };
     for (const doc of platformDocs) {
       const { platform } = resolveUserPlatform(doc);
-      if (PLATFORM_KEYS.includes(platform)) {
+      if (platform === "ios" || platform === "android" || platform === "web") {
         platformBreakdown[platform] += 1;
       } else {
-        platformBreakdown.unknown += 1;
+        platformBreakdown.web += 1;
       }
     }
 
@@ -1077,10 +1078,10 @@ router.get("/metrics", async (req, res) => {
     };
     for (const doc of platformDocs) {
       const { platform } = resolveUserPlatform(doc);
-      if (PLATFORM_KEYS.includes(platform)) {
+      if (platform === "ios" || platform === "android" || platform === "web") {
         platformBreakdown[platform] += 1;
       } else {
-        platformBreakdown.unknown += 1;
+        platformBreakdown.web += 1;
       }
     }
 
