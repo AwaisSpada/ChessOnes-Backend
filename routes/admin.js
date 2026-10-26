@@ -10,6 +10,7 @@ const DailyPuzzleUserProgress = require("../models/DailyPuzzleUserProgress");
 const PuzzleAttempt = require("../models/PuzzleAttempt");
 const PuzzleRushRun = require("../models/PuzzleRushRun");
 const PuzzleWarsMatch = require("../models/PuzzleWarsMatch");
+const LoginEvent = require("../models/LoginEvent");
 const { todayDateKey } = require("../utils/daily-puzzle-dates");
 const MessengerConversation = require("../models/MessengerConversation");
 const MessengerMessage = require("../models/MessengerMessage");
@@ -114,7 +115,7 @@ router.get("/users", async (req, res) => {
 
     const users = await User.find(query)
       .select(
-        "username email fullName avatar status role ratings createdAt isSuspended signupPlatform fcmTokens"
+        "username email fullName avatar status role ratings createdAt isSuspended signupPlatform fcmTokens country puzzleRating"
       )
       .sort({ createdAt: -1 })
       .skip(skip)
@@ -961,6 +962,8 @@ router.get("/metrics", async (req, res) => {
 
     const activeUsersQuery = { isDeleted: false };
 
+    const todayKey = todayDateKey();
+
     const [
       totalUsers,
       onlineCount,
@@ -971,11 +974,12 @@ router.get("/metrics", async (req, res) => {
       registeredThisMonth,
       registeredLastMonth,
       monthAgg,
-      dayAgg,
+      loginDayAgg,
       platformDocs,
       gamesToday,
       gamesThisMonth,
       puzzlesToday,
+      dailyPuzzlesSolvedToday,
       rushThisMonth,
       warsThisMonth,
       recentUsers,
@@ -1021,13 +1025,9 @@ router.get("/metrics", async (req, res) => {
         },
         { $sort: { "_id.y": 1, "_id.m": 1 } },
       ]),
-      User.aggregate([
-        {
-          $match: {
-            isDeleted: false,
-            createdAt: { $gte: daysBackStart },
-          },
-        },
+      // Daily logins (LoginEvent) — fills going forward after deploy
+      LoginEvent.aggregate([
+        { $match: { createdAt: { $gte: daysBackStart } } },
         {
           $group: {
             _id: {
@@ -1046,7 +1046,12 @@ router.get("/metrics", async (req, res) => {
         createdAt: { $gte: thisMonthStart, $lt: nextMonthStart },
       }),
       PuzzleAttempt.countDocuments({
-        createdAt: { $gte: todayStart, $lt: tomorrowStart },
+        solved: true,
+        updatedAt: { $gte: todayStart, $lt: tomorrowStart },
+      }),
+      DailyPuzzleUserProgress.countDocuments({
+        dateKey: todayKey,
+        solved: true,
       }),
       PuzzleRushRun.countDocuments({
         createdAt: { $gte: thisMonthStart, $lt: nextMonthStart },
@@ -1055,7 +1060,9 @@ router.get("/metrics", async (req, res) => {
         createdAt: { $gte: thisMonthStart, $lt: nextMonthStart },
       }),
       User.find(activeUsersQuery)
-        .select("username email avatar createdAt signupPlatform fcmTokens status")
+        .select(
+          "username email avatar createdAt signupPlatform fcmTokens status country"
+        )
         .sort({ createdAt: -1 })
         .limit(8)
         .lean(),
@@ -1065,9 +1072,9 @@ router.get("/metrics", async (req, res) => {
     for (const row of monthAgg) {
       monthMap.set(monthKey(row._id.y, row._id.m), row.count);
     }
-    const dayMap = new Map();
-    for (const row of dayAgg) {
-      dayMap.set(row._id, row.count);
+    const loginDayMap = new Map();
+    for (const row of loginDayAgg) {
+      loginDayMap.set(row._id, row.count);
     }
 
     const platformBreakdown = {
@@ -1115,13 +1122,15 @@ router.get("/metrics", async (req, res) => {
           gamesToday,
           gamesThisMonth,
           puzzleAttemptsToday: puzzlesToday,
+          dailyPuzzlesSolvedToday,
           rushRunsThisMonth: rushThisMonth,
           warsMatchesThisMonth: warsThisMonth,
         },
         platformBreakdown,
         charts: {
           registrationsByMonth: fillMonths(monthsBackStart, now, monthMap),
-          registrationsByDay: fillDays(daysBackStart, todayStart, dayMap),
+          /** Daily login events (not signups). Sparse until LoginEvent tracking is live. */
+          loginsByDay: fillDays(daysBackStart, todayStart, loginDayMap),
         },
         recentUsers: recentUsers.map((u) => {
           const { platform, platformSource } = resolveUserPlatform(u);
@@ -1132,6 +1141,7 @@ router.get("/metrics", async (req, res) => {
             avatar: u.avatar,
             createdAt: u.createdAt,
             status: u.status,
+            country: u.country || "",
             platform,
             platformSource,
           };

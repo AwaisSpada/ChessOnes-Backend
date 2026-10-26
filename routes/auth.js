@@ -14,6 +14,7 @@ const {
 } = require("../utils/sendMail");
 const { resolveHasPassword } = require("../utils/hasPassword");
 const { verifyAppleIdentityToken } = require("../utils/appleAuth");
+const { recordLoginEvent } = require("../utils/recordLoginEvent");
 
 const router = express.Router();
 
@@ -128,6 +129,7 @@ router.post(
       });
 
       await user.save();
+      recordLoginEvent(user._id);
 
       // Create initial stats
       const stats = new Stats({
@@ -308,6 +310,7 @@ router.post(
         await user.save();
         console.log(`✅ Account deletion canceled for user ${user._id} - Welcome back!`);
         // Return a flag to show "Welcome Back! Deletion Canceled" message on frontend
+        recordLoginEvent(user._id);
         return res.json({
           success: true,
           message: "Login successful",
@@ -345,6 +348,7 @@ router.post(
         user.preferences?.privacy?.showOnlineStatus !== false;
       user.status = showOnline ? "online" : "offline";
       await user.updateLastActive()
+      recordLoginEvent(user._id);
 
       // Generate token
       const token = generateToken(user._id)
@@ -911,6 +915,7 @@ router.post("/social", async (req, res) => {
 
     // Generate JWT token
     const token = generateToken(user._id);
+    recordLoginEvent(user._id);
 
     res.json({
       success: true,
