@@ -544,6 +544,162 @@ router.get("/custom-arenas/winners", optionalAuth, async (req, res) => {
   }
 });
 
+// @route   GET /api/tournaments/custom-arenas/leaderboard
+// @desc    Tournament leaderboard (all-time / season) — Player, Rating, win rate, tournaments played
+// @access  Private
+router.get("/custom-arenas/leaderboard", auth, async (req, res) => {
+  try {
+    const periodRaw = String(req.query.period || "allTime").toLowerCase();
+    const period =
+      periodRaw === "season" || periodRaw === "seasonal" ? "season" : "allTime";
+    const rawType = String(
+      req.query.gameType || req.query.category || "blitz"
+    ).toLowerCase();
+    const gameType = GAME_TYPES.includes(rawType) ? rawType : "blitz";
+    const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 30));
+
+    if (period === "season") {
+      return res.json({
+        success: true,
+        data: {
+          period,
+          gameType,
+          leaderboard: [],
+          message: "Season leaderboard coming soon.",
+        },
+      });
+    }
+
+    const io = req.app.get("io");
+    await syncCustomArenaStatuses(io);
+
+    const arenas = await CustomArena.find({
+      status: "ended",
+      gameType,
+    })
+      .select("leaderboard endedAt gameType")
+      .lean();
+
+    /** @type {Map<string, {
+     *  userId: string,
+     *  username: string,
+     *  displayName: string,
+     *  avatar: string,
+     *  country: string,
+     *  wins: number,
+     *  draws: number,
+     *  losses: number,
+     *  gamesPlayed: number,
+     *  tournamentsPlayed: number
+     * }>} */
+    const byUser = new Map();
+
+    for (const arena of arenas) {
+      const board = Array.isArray(arena.leaderboard) ? arena.leaderboard : [];
+      const seenInArena = new Set();
+
+      for (const row of board) {
+        if (!row || row.discarded || !row.userId) continue;
+
+        const games = Number(row.gamesPlayed) || 0;
+        const wins = Number(row.wins) || 0;
+        const draws = Number(row.draws) || 0;
+        const losses = Number(row.losses) || 0;
+        if (games < 1 && wins < 1 && draws < 1 && losses < 1) continue;
+
+        const userId = String(row.userId);
+        if (seenInArena.has(userId)) continue;
+        seenInArena.add(userId);
+
+        const prev = byUser.get(userId);
+        if (prev) {
+          prev.wins += wins;
+          prev.draws += draws;
+          prev.losses += losses;
+          prev.gamesPlayed += games > 0 ? games : wins + draws + losses;
+          prev.tournamentsPlayed += 1;
+          if (row.username) prev.username = row.username;
+          if (row.displayName) prev.displayName = row.displayName;
+          if (row.avatar) prev.avatar = row.avatar;
+          if (row.country) prev.country = row.country;
+        } else {
+          byUser.set(userId, {
+            userId,
+            username: row.username || "Player",
+            displayName: row.displayName || row.username || "Player",
+            avatar: row.avatar || "",
+            country: row.country || "",
+            wins,
+            draws,
+            losses,
+            gamesPlayed: games > 0 ? games : wins + draws + losses,
+            tournamentsPlayed: 1,
+          });
+        }
+      }
+    }
+
+    const userIds = [...byUser.keys()].filter((id) =>
+      mongoose.Types.ObjectId.isValid(id)
+    );
+    const users = await User.find({ _id: { $in: userIds } })
+      .select("username fullName avatar country ratings")
+      .lean();
+    const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+    const leaderboard = [...byUser.values()]
+      .map((row) => {
+        const u = userMap.get(row.userId);
+        const rating = Math.round(
+          Number(u?.ratings?.[gameType]?.rating) || 1500
+        );
+        const gamesPlayed = row.gamesPlayed;
+        const winRate =
+          gamesPlayed > 0
+            ? Math.round((row.wins / gamesPlayed) * 1000) / 10
+            : 0;
+        const username = String(
+          u?.username || row.username || "Player"
+        ).trim();
+        return {
+          userId: row.userId,
+          username,
+          displayName: username,
+          avatar: u?.avatar || row.avatar || "",
+          country: u?.country || row.country || "",
+          rating,
+          winRate,
+          wins: row.wins,
+          gamesPlayed,
+          tournamentsPlayed: row.tournamentsPlayed,
+        };
+      })
+      .sort(
+        (a, b) =>
+          b.rating - a.rating ||
+          b.winRate - a.winRate ||
+          b.tournamentsPlayed - a.tournamentsPlayed
+      )
+      .slice(0, limit)
+      .map((row, index) => ({ ...row, rank: index + 1 }));
+
+    res.json({
+      success: true,
+      data: {
+        period: "allTime",
+        gameType,
+        leaderboard,
+      },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas leaderboard error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to load tournament leaderboard",
+    });
+  }
+});
+
 function normalizeArenaJoinCode(raw) {
   return String(raw || "").trim().toLowerCase();
 }
