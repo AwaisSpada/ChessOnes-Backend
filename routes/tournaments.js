@@ -545,7 +545,7 @@ router.get("/custom-arenas/winners", optionalAuth, async (req, res) => {
 });
 
 // @route   GET /api/tournaments/custom-arenas/leaderboard
-// @desc    Tournament leaderboard (all-time / season) — Player, Rating, win rate, tournaments played
+// @desc    Tournament leaderboard (all-time / season) — ranked by winRate, gamesPlayed, tournamentsPlayed (rating display-only)
 // @access  Private
 router.get("/custom-arenas/leaderboard", auth, async (req, res) => {
   try {
@@ -674,11 +674,13 @@ router.get("/custom-arenas/leaderboard", auth, async (req, res) => {
           tournamentsPlayed: row.tournamentsPlayed,
         };
       })
+      // Rank by tournament performance only — rating is display-only.
       .sort(
         (a, b) =>
-          b.rating - a.rating ||
           b.winRate - a.winRate ||
-          b.tournamentsPlayed - a.tournamentsPlayed
+          b.gamesPlayed - a.gamesPlayed ||
+          b.tournamentsPlayed - a.tournamentsPlayed ||
+          a.username.localeCompare(b.username)
       )
       .slice(0, limit)
       .map((row, index) => ({ ...row, rank: index + 1 }));
