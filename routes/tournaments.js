@@ -4,7 +4,7 @@ const User = require("../models/User");
 const CustomArena = require("../models/CustomArena");
 const auth = require("../middleware/auth");
 const optionalAuth = require("../middleware/optionalAuth");
-const { getPlatformGamesTodayCount } = require("../utils/game-list-enrichment");
+const { getTournamentGamesTodayCount } = require("../utils/game-list-enrichment");
 const { syncCustomArenaStatuses, MATCH_COUNT_MAX_AGE_MS } = require("../utils/customArenaLifecycle");
 const {
   isArenaVisibleToUser,
@@ -403,7 +403,8 @@ router.get("/header-stats", async (req, res) => {
         isDeleted: false,
         status: { $in: ACTIVE_USER_STATUSES },
       }),
-      getPlatformGamesTodayCount(),
+      // Tournament page only — arena games today (not whole platform)
+      getTournamentGamesTodayCount(),
       CustomArena.countDocuments({ status: "live" }),
     ]);
 

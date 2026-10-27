@@ -264,6 +264,33 @@ async function getPlatformGamesTodayCount() {
 }
 
 /**
+ * Completed custom-arena / tournament games finished today.
+ * Scoped to games with arenaId — does not affect platform-wide counts.
+ */
+async function getTournamentGamesTodayCount() {
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const rows = await Game.aggregate([
+    {
+      $match: {
+        status: "completed",
+        arenaId: { $exists: true, $ne: null },
+        $nor: [
+          { hideFromHistory: true },
+          { "passPlay.whiteName": { $type: "string" } },
+        ],
+      },
+    },
+    { $addFields: END_TIME_ADD_FIELDS },
+    { $match: { endTime: { $gte: startOfDay } } },
+    { $count: "total" },
+  ]);
+
+  return rows[0]?.total ?? 0;
+}
+
+/**
  * List user games sorted by when they were actually played (last move time),
  * not document updatedAt — so review generation does not reorder history.
  */
@@ -299,6 +326,7 @@ module.exports = {
   attachRatingChangeToGames,
   getPlayedTodayCounts,
   getPlatformGamesTodayCount,
+  getTournamentGamesTodayCount,
   fetchUserGamesByPlayEndTime,
   userGamesMatch,
   toObjectId,
