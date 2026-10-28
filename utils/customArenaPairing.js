@@ -444,9 +444,12 @@ function buildLeaderboardEntries(hostUser, hostPlays, invitedPlayers) {
 function buildInitialPlayerStates(roster) {
   return roster.map((userId) => ({
     userId: String(userId),
-    status: "idle",
+    // Away / Not in arena until they open tournament-play (lobby-enter).
+    status: "offline",
     matchmakingReady: false,
     currentGameId: null,
+    hasEnteredLobby: false,
+    pendingAway: false,
     lastOpponentUserId: null,
   }));
 }

@@ -158,6 +158,10 @@ const customArenaSchema = new mongoose.Schema(
           },
           matchmakingReady: { type: Boolean, default: false },
           currentGameId: { type: String, default: null },
+          /** False until first tournament-play lobby enter → UI "Not in arena". */
+          hasEnteredLobby: { type: Boolean, default: false },
+          /** Set when leaving hub during an active game; applied as Away after game ends. */
+          pendingAway: { type: Boolean, default: false },
           lastOpponentUserId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",

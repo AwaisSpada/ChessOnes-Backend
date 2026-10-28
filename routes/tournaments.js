@@ -22,6 +22,7 @@ const {
   setArenaMatchmakingReady,
   acceptArenaPairing,
   enterArenaLobby,
+  markArenaPlayerAway,
   addInvitesToLiveArena,
   leaveArenaTournament,
   endArenaByHost,
@@ -1057,6 +1058,39 @@ router.post("/custom-arenas/:id/lobby-enter", auth, async (req, res) => {
   } catch (error) {
     console.error("[Tournaments] custom-arenas lobby-enter error:", error);
     res.status(500).json({ success: false, message: "Failed to enter arena lobby" });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/:id/lobby-leave
+// @desc    Mark Away when closing tournament-play (not a full tournament exit)
+// @access  Private
+router.post("/custom-arenas/:id/lobby-leave", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid arena id" });
+    }
+
+    const arenaLean = await CustomArena.findById(req.params.id).lean();
+    if (!arenaLean) {
+      return res.status(404).json({ success: false, message: "Arena not found" });
+    }
+    if (!isArenaVisibleToUser(arenaLean, req.user)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const { runtime, error } = await markArenaPlayerAway(
+      req.params.id,
+      req.user._id
+    );
+
+    if (error) {
+      return res.status(400).json({ success: false, message: error });
+    }
+
+    res.json({ success: true, data: { runtime } });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas lobby-leave error:", error);
+    res.status(500).json({ success: false, message: "Failed to leave arena lobby" });
   }
 });
 

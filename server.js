@@ -1596,16 +1596,33 @@ io.on("connection", (socket) => {
 
   socket.on("join-arena", (arenaId) => {
     if (!arenaId) return;
-    const room = arenaRoom(arenaId);
+    const id = String(arenaId);
+    const room = arenaRoom(id);
     socket.join(room);
+    if (!socket.data.arenaIds) socket.data.arenaIds = new Set();
+    socket.data.arenaIds.add(id);
     console.log(`[ArenaChat] ${socket.id} joined ${room}`);
   });
 
-  socket.on("leave-arena", (arenaId) => {
+  socket.on("leave-arena", async (arenaId) => {
     if (!arenaId) return;
-    const room = arenaRoom(arenaId);
+    const id = String(arenaId);
+    const room = arenaRoom(id);
     socket.leave(room);
+    if (socket.data.arenaIds) socket.data.arenaIds.delete(id);
     console.log(`[ArenaChat] ${socket.id} left ${room}`);
+    const userId = socket.data.userId;
+    if (userId) {
+      try {
+        const { markArenaPlayerAway } = require("./services/customArenaEngine");
+        await markArenaPlayerAway(id, userId);
+      } catch (err) {
+        console.warn(
+          "[ArenaPresence] leave-arena away mark failed:",
+          err?.message || err
+        );
+      }
+    }
   });
 
   socket.on("arena:chat:send", async (data) => {
@@ -3004,6 +3021,23 @@ io.on("connection", (socket) => {
 
         // Last connection for this user closed -> mark offline, end any active games, and notify friends / opponents
         try {
+          const arenaIds = socket.data.arenaIds
+            ? [...socket.data.arenaIds]
+            : [];
+          if (arenaIds.length) {
+            const { markArenaPlayerAway } = require("./services/customArenaEngine");
+            await Promise.all(
+              arenaIds.map((arenaId) =>
+                markArenaPlayerAway(arenaId, userId).catch((err) => {
+                  console.warn(
+                    "[ArenaPresence] disconnect away mark failed:",
+                    err?.message || err
+                  );
+                })
+              )
+            );
+          }
+
           await User.findByIdAndUpdate(userId, {
             status: "offline",
             lastActive: new Date(),

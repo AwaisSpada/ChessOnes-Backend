@@ -200,10 +200,79 @@ function setPlayerStatus(playerStates, userId, patch) {
       status: plain.status || "idle",
       matchmakingReady: !!plain.matchmakingReady,
       currentGameId: plain.currentGameId || null,
+      hasEnteredLobby: !!plain.hasEnteredLobby,
+      pendingAway: !!plain.pendingAway,
       lastOpponentUserId: plain.lastOpponentUserId || null,
       ...patch,
     };
   });
+}
+
+function findPlayerState(playerStates, userId) {
+  const id = String(userId);
+  return (playerStates || []).find((s) => String(s.userId) === id) || null;
+}
+
+/** After a game / busy slot ends: Away if they left the hub mid-game, else Available. */
+function releaseBusyPresence(playerStates, userId, extra = {}) {
+  const state = findPlayerState(playerStates, userId);
+  const goAway = !!state?.pendingAway;
+  return setPlayerStatus(playerStates, userId, {
+    status: goAway ? "offline" : "idle",
+    matchmakingReady: false,
+    currentGameId: null,
+    pendingAway: false,
+    ...extra,
+  });
+}
+
+/**
+ * Mark player Away when they leave tournament-play / disconnect.
+ * Keeps in_game / matched / left_tournament intact (pendingAway if mid-game).
+ */
+async function markArenaPlayerAway(arenaId, userId) {
+  const arena = await CustomArena.findById(arenaId);
+  if (!arena || arena.status === "ended" || arena.status === "draft") {
+    return { runtime: null, error: null };
+  }
+
+  const uid = String(userId);
+  const roster = (arena.participantUserIds || []).map(String);
+  if (!roster.includes(uid)) {
+    return { runtime: serializeArenaRuntime(arena), error: null };
+  }
+
+  let playerStates = [...(arena.playerStates || [])];
+  const myState = findPlayerState(playerStates, uid);
+  if (!myState || myState.status === "left_tournament") {
+    return { runtime: serializeArenaRuntime(arena), error: null };
+  }
+
+  if (myState.status === "in_game" || myState.status === "matched") {
+    if (!myState.pendingAway) {
+      playerStates = setPlayerStatus(playerStates, uid, {
+        matchmakingReady: false,
+        pendingAway: true,
+      });
+      arena.playerStates = playerStates;
+      await saveArenaDoc(arena);
+    }
+    return { runtime: serializeArenaRuntime(arena), error: null };
+  }
+
+  if (myState.status === "offline" && !myState.matchmakingReady) {
+    return { runtime: serializeArenaRuntime(arena), error: null };
+  }
+
+  playerStates = setPlayerStatus(playerStates, uid, {
+    status: "offline",
+    matchmakingReady: false,
+    currentGameId: null,
+    pendingAway: false,
+  });
+  arena.playerStates = playerStates;
+  await saveArenaDoc(arena);
+  return { runtime: serializeArenaRuntime(arena), error: null };
 }
 
 function arenaTimeControlToGame(timeControl) {
@@ -493,16 +562,10 @@ async function recordArenaGameResult(arenaId, { pairingId, gameId, winner }) {
   }
 
   let playerStates = [...(arena.playerStates || [])];
-  playerStates = setPlayerStatus(playerStates, whiteUserId, {
-    status: "idle",
-    matchmakingReady: false,
-    currentGameId: null,
+  playerStates = releaseBusyPresence(playerStates, whiteUserId, {
     lastOpponentUserId: blackUserId,
   });
-  playerStates = setPlayerStatus(playerStates, blackUserId, {
-    status: "idle",
-    matchmakingReady: false,
-    currentGameId: null,
+  playerStates = releaseBusyPresence(playerStates, blackUserId, {
     lastOpponentUserId: whiteUserId,
   });
   arena.playerStates = playerStates;
@@ -576,6 +639,8 @@ function serializeArenaRuntime(arena) {
       status: state.status,
       matchmakingReady: !!state.matchmakingReady,
       currentGameId: state.currentGameId || null,
+      hasEnteredLobby: !!state.hasEnteredLobby,
+      pendingAway: !!state.pendingAway,
       lastOpponentUserId: state.lastOpponentUserId
         ? String(state.lastOpponentUserId)
         : null,
@@ -709,6 +774,27 @@ async function enterArenaLobby(arenaId, userId) {
     return { runtime, error: null };
   }
 
+  // Opening the hub → Available (from Away / Not in arena).
+  if (myState.status === "offline") {
+    playerStates = setPlayerStatus(playerStates, uid, {
+      status: "idle",
+      matchmakingReady: false,
+      hasEnteredLobby: true,
+      pendingAway: false,
+    });
+    arena.playerStates = playerStates;
+    await saveArenaDoc(arena);
+    myState = findPlayerState(playerStates, uid) || myState;
+  } else if (!myState.hasEnteredLobby) {
+    playerStates = setPlayerStatus(playerStates, uid, {
+      hasEnteredLobby: true,
+      pendingAway: false,
+    });
+    arena.playerStates = playerStates;
+    await saveArenaDoc(arena);
+    myState = findPlayerState(playerStates, uid) || myState;
+  }
+
   const activeGamePairing = (arena.activePairings || []).find(
     (pairing) =>
       (String(pairing.whiteUserId) === uid ||
@@ -751,14 +837,14 @@ async function enterArenaLobby(arenaId, userId) {
       const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
       return { runtime, error: null };
     }
-    playerStates = setPlayerStatus(playerStates, uid, {
-      status: "idle",
-      matchmakingReady: false,
-      currentGameId: null,
-    });
+    playerStates = releaseBusyPresence(playerStates, uid);
     arena.playerStates = playerStates;
     await saveArenaDoc(arena);
-    myState = { ...myState, status: "idle", currentGameId: null };
+    myState = findPlayerState(playerStates, uid) || {
+      ...myState,
+      status: "idle",
+      currentGameId: null,
+    };
   }
 
   const pendingConfirm = findUserPendingPairing(arena.activePairings, uid);
@@ -1161,9 +1247,11 @@ async function addInvitesToLiveArena(arenaId, resolvedInvites) {
       stateIds.add(userId);
       playerStates.push({
         userId,
-        status: "idle",
+        status: "offline",
         matchmakingReady: false,
         currentGameId: null,
+        hasEnteredLobby: false,
+        pendingAway: false,
         lastOpponentUserId: null,
       });
     }
@@ -1444,6 +1532,7 @@ module.exports = {
   serializeArenaRuntime,
   getArenaRuntimeState,
   enterArenaLobby,
+  markArenaPlayerAway,
   startArenaPairingGame,
   setArenaMatchmakingReady,
   acceptArenaPairing,
