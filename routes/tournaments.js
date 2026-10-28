@@ -1436,6 +1436,56 @@ router.post("/custom-arenas/:id/invites", auth, async (req, res) => {
   }
 });
 
+// @route   DELETE /api/tournaments/custom-arenas/:id
+// @desc    Delete a draft arena (host only)
+// @access  Private
+router.delete("/custom-arenas/:id", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid arena id",
+      });
+    }
+
+    const arena = await CustomArena.findById(req.params.id);
+    if (!arena) {
+      return res.status(404).json({
+        success: false,
+        message: "Arena not found",
+      });
+    }
+
+    if (String(arena.createdBy) !== String(req.user._id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Only the host can delete this arena",
+      });
+    }
+
+    if (arena.status !== "draft") {
+      return res.status(400).json({
+        success: false,
+        message: "Only draft arenas can be deleted",
+      });
+    }
+
+    await CustomArena.deleteOne({ _id: arena._id });
+
+    return res.json({
+      success: true,
+      message: "Draft arena deleted",
+      data: { id: String(arena._id) },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas delete error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to delete arena",
+    });
+  }
+});
+
 // @route   PATCH /api/tournaments/custom-arenas/:id
 router.patch("/custom-arenas/:id", auth, async (req, res) => {
   try {
