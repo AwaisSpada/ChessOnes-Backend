@@ -552,7 +552,7 @@ router.get("/custom-arenas/winners", optionalAuth, async (req, res) => {
 });
 
 // @route   GET /api/tournaments/custom-arenas/leaderboard
-// @desc    Tournament leaderboard (all-time / season) — ranked by winRate, gamesPlayed, tournamentsPlayed (rating display-only)
+// @desc    Tournament leaderboard — ranked by tournament wins, then match win %
 // @access  Private
 router.get("/custom-arenas/leaderboard", auth, async (req, res) => {
   try {
@@ -597,7 +597,8 @@ router.get("/custom-arenas/leaderboard", auth, async (req, res) => {
      *  draws: number,
      *  losses: number,
      *  gamesPlayed: number,
-     *  tournamentsPlayed: number
+     *  tournamentsPlayed: number,
+     *  tournamentWins: number
      * }>} */
     const byUser = new Map();
 
@@ -641,8 +642,28 @@ router.get("/custom-arenas/leaderboard", auth, async (req, res) => {
             losses,
             gamesPlayed: games > 0 ? games : wins + draws + losses,
             tournamentsPlayed: 1,
+            tournamentWins: 0,
           });
         }
+      }
+
+      // Champion of this ended arena → +1 tournament win
+      const active = board.filter((row) => row && !row.discarded);
+      if (active.length === 0) continue;
+      const sorted = [...active].sort((a, b) => {
+        if ((b.points || 0) !== (a.points || 0)) return (b.points || 0) - (a.points || 0);
+        if ((b.wins || 0) !== (a.wins || 0)) return (b.wins || 0) - (a.wins || 0);
+        return (a.losses || 0) - (b.losses || 0);
+      });
+      const champ = sorted[0];
+      if (!champ?.userId) continue;
+      if ((champ.gamesPlayed || 0) < 1 && (champ.points || 0) < 1 && (champ.wins || 0) < 1) {
+        continue;
+      }
+      const champId = String(champ.userId);
+      const champRow = byUser.get(champId);
+      if (champRow) {
+        champRow.tournamentWins += 1;
       }
     }
 
@@ -679,14 +700,15 @@ router.get("/custom-arenas/leaderboard", auth, async (req, res) => {
           wins: row.wins,
           gamesPlayed,
           tournamentsPlayed: row.tournamentsPlayed,
+          tournamentWins: row.tournamentWins || 0,
         };
       })
-      // Rank by tournament performance only — rating is display-only.
+      // 1) most tournament titles  2) match win %  (rating display-only)
       .sort(
         (a, b) =>
+          b.tournamentWins - a.tournamentWins ||
           b.winRate - a.winRate ||
           b.gamesPlayed - a.gamesPlayed ||
-          b.tournamentsPlayed - a.tournamentsPlayed ||
           a.username.localeCompare(b.username)
       )
       .slice(0, limit)
