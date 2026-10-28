@@ -222,6 +222,8 @@ function releaseBusyPresence(playerStates, userId, extra = {}) {
     matchmakingReady: false,
     currentGameId: null,
     pendingAway: false,
+    // They just finished a game — never treat as "Not in arena".
+    hasEnteredLobby: true,
     ...extra,
   });
 }
