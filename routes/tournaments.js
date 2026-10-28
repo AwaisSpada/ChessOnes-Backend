@@ -9,6 +9,8 @@ const { syncCustomArenaStatuses, MATCH_COUNT_MAX_AGE_MS } = require("../utils/cu
 const {
   isArenaVisibleToUser,
   viewerIsInvited,
+  isPlatformArena,
+  isUserInArena,
 } = require("../utils/customArenaVisibility");
 const { enrichLeaderboardRow, buildRuntimeLeaderboard } = require("../utils/customArenaPairing");
 const {
@@ -285,6 +287,9 @@ function serializeCustomArena(arena, viewer) {
     progress,
     isOwner: Boolean(isOwner),
     isInvited: Boolean(isInvited),
+    isMember: Boolean(isUserInArena(arena, viewer)),
+    source: isPlatformArena(arena) ? "platform" : "user",
+    isPlatform: isPlatformArena(arena),
     hostPlays: arena.hostPlays !== false,
     participantCount:
       Array.isArray(arena.participantUserIds) && arena.participantUserIds.length > 0
@@ -1574,7 +1579,22 @@ router.post("/custom-arenas", auth, async (req, res) => {
       joinCode,
       intent,
       hostPlays,
+      source: sourceRaw,
+      isPlatform: isPlatformRaw,
     } = req.body;
+
+    const wantsPlatform =
+      sourceRaw === "platform" ||
+      isPlatformRaw === true ||
+      isPlatformRaw === "true";
+    const isAdmin = String(req.user?.role || "").toUpperCase() === "ADMIN";
+    const arenaSource = wantsPlatform && isAdmin ? "platform" : "user";
+    if (wantsPlatform && !isAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: "Only admins can create platform arenas",
+      });
+    }
 
     const trimmedName = String(name || "").trim();
     if (trimmedName.length < 3) {
@@ -1663,7 +1683,13 @@ router.post("/custom-arenas", auth, async (req, res) => {
       invitedUserIds: resolvedInvites.map((p) => p.userId),
       invitedPlayers: resolvedInvites,
       hostPlays: hostWillPlay,
-      visibility: "link_access",
+      visibility:
+        arenaSource === "platform"
+          ? "public"
+          : visibility === "public" || visibility === "invite_only"
+            ? visibility
+            : "link_access",
+      source: arenaSource,
       startMode: startMode === "schedule" ? "schedule" : "now",
       scheduledAt: !isDraft && startMode === "schedule" ? scheduledAt : null,
       startedAt: !isDraft && startMode === "now" ? startedAt : null,

@@ -74,6 +74,13 @@ const customArenaSchema = new mongoose.Schema(
       enum: ["invite_only", "link_access", "public"],
       default: "invite_only",
     },
+    /** platform = ChessOnes official feed (Active / Upcoming). user = player-created (Custom). */
+    source: {
+      type: String,
+      enum: ["user", "platform"],
+      default: "user",
+      index: true,
+    },
     startMode: {
       type: String,
       enum: ["now", "schedule"],
