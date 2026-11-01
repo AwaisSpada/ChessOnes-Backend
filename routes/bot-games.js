@@ -10,6 +10,7 @@ const { applyFischerIncrementToMover } = require("../utils/clockIncrement");
 const {
   applyServerElapsedClock,
   commitElapsedClock,
+  clearBotClockAnchor,
 } = require("../services/live/ClockManager");
 
 const router = express.Router();
@@ -466,6 +467,7 @@ router.post(
             currentGame.board = botBoard;
             currentGame.moves.push(botMove);
             applyFischerIncrementToMover(currentGame, "white");
+            clearBotClockAnchor(currentGame);
             currentGame.currentTurn = "black";
 
             await currentGame.save();

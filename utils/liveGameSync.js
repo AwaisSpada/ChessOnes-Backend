@@ -36,6 +36,12 @@ function ensureTimeRemaining(game, fallbackMs = 600000) {
 }
 
 function getLastClockAnchorMs(game) {
+  // Timed bot undo: remaining was restored; drain must restart from that instant.
+  // Live/friend games never set clockAnchorAt — same last-move / clockStartedAt path.
+  if (isBotTimedGame(game) && game.clockAnchorAt) {
+    const t = new Date(game.clockAnchorAt).getTime();
+    if (Number.isFinite(t)) return t;
+  }
   if (game.moves && game.moves.length > 0) {
     const lastMove = game.moves[game.moves.length - 1];
     if (lastMove?.timestamp) {
@@ -46,6 +52,64 @@ function getLastClockAnchorMs(game) {
     return new Date(game.clockStartedAt).getTime();
   }
   return null;
+}
+
+function thinkMsForUndoneMove(move, previousTimestamp, clockStartedAt) {
+  if (
+    typeof move?.moveTimeMs === "number" &&
+    Number.isFinite(move.moveTimeMs) &&
+    move.moveTimeMs > 0
+  ) {
+    return move.moveTimeMs;
+  }
+  const prev = previousTimestamp || clockStartedAt;
+  if (!prev || !move?.timestamp) return 0;
+  const delta =
+    new Date(move.timestamp).getTime() - new Date(prev).getTime();
+  return Number.isFinite(delta) && delta > 0 ? delta : 0;
+}
+
+/**
+ * Chess.com-style takeback clocks for timed bot games only.
+ * Call AFTER splicing undone plies. Last undone ply is the opponent (undo is on user's turn).
+ * Then set clockAnchorAt so GET/move do not re-drain the refunded think time.
+ */
+function refundBotClocksAfterTakeback(game, undoneMoves, playerColor) {
+  if (!isBotTimedGame(game)) return;
+  if (!Array.isArray(undoneMoves) || undoneMoves.length === 0) return;
+  if (playerColor !== "white" && playerColor !== "black") return;
+
+  ensureTimeRemaining(game);
+  const { normalizeIncrementToMs } = require("./clockIncrement");
+  const incMs = normalizeIncrementToMs(
+    typeof game.timeControl?.increment === "number"
+      ? game.timeControl.increment
+      : 0
+  );
+
+  let mover = playerColor === "white" ? "black" : "white";
+  for (let i = undoneMoves.length - 1; i >= 0; i--) {
+    const move = undoneMoves[i];
+    const prevTs =
+      i > 0
+        ? undoneMoves[i - 1]?.timestamp
+        : game.moves && game.moves.length > 0
+          ? game.moves[game.moves.length - 1]?.timestamp
+          : game.clockStartedAt;
+    const think = thinkMsForUndoneMove(move, prevTs, game.clockStartedAt);
+    const cur = game.timeRemaining[mover];
+    if (typeof cur === "number" && Number.isFinite(cur)) {
+      game.timeRemaining[mover] = Math.max(0, cur - incMs + think);
+    }
+    mover = mover === "white" ? "black" : "white";
+  }
+
+  game.clockAnchorAt = new Date();
+}
+
+function clearBotClockAnchor(game) {
+  if (!game || !isBotTimedGame(game)) return;
+  if (game.clockAnchorAt) game.clockAnchorAt = null;
 }
 
 /**
@@ -188,4 +252,6 @@ module.exports = {
   getPly,
   buildLiveSyncFields,
   withLiveSync,
+  refundBotClocksAfterTakeback,
+  clearBotClockAnchor,
 };

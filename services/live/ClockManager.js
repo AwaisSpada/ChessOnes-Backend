@@ -18,6 +18,8 @@ module.exports = {
   getPly: liveGameSync.getPly,
   buildLiveSyncFields: liveGameSync.buildLiveSyncFields,
   withLiveSync: liveGameSync.withLiveSync,
+  refundBotClocksAfterTakeback: liveGameSync.refundBotClocksAfterTakeback,
+  clearBotClockAnchor: liveGameSync.clearBotClockAnchor,
 
   normalizeIncrementToMs: clockIncrement.normalizeIncrementToMs,
   applyFischerIncrementToMover: clockIncrement.applyFischerIncrementToMover,

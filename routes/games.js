@@ -33,6 +33,8 @@ const {
   withLiveSync,
   buildLiveSyncFields,
   applyFischerIncrementToMover,
+  refundBotClocksAfterTakeback,
+  clearBotClockAnchor,
 } = require("../services/live/ClockManager");
 const { calculateMoveTime } = require("../services/live/MoveProcessor");
 
@@ -1217,6 +1219,7 @@ router.post(
       game.board = newBoard;
       game.moves.push(move);
       applyFischerIncrementToMover(game, playerColor);
+      clearBotClockAnchor(game);
       const nextTurn = game.currentTurn === "white" ? "black" : "white";
       game.currentTurn = nextTurn;
 
@@ -1930,6 +1933,7 @@ router.post(
             currentGame.board = botBoard;
             currentGame.moves.push(botMove);
             applyFischerIncrementToMover(currentGame, botMoverSide);
+            clearBotClockAnchor(currentGame);
             const nextTurn =
               currentGame.currentTurn === "white" ? "black" : "white";
             currentGame.currentTurn = nextTurn;
@@ -2865,6 +2869,7 @@ router.post("/:gameId/undo", auth, requirePoliciesAccepted, async (req, res) => 
         };
       }
 
+      const undoneMoves = game.moves.slice(-movesToUndo);
       // Remove the last move(s) from history
       game.moves.splice(-movesToUndo);
 
@@ -2959,6 +2964,10 @@ router.post("/:gameId/undo", auth, requirePoliciesAccepted, async (req, res) => 
         game.currentTurn = playerColor === "white" ? "black" : "white";
       }
 
+      if (isBotTimedGame(game)) {
+        refundBotClocksAfterTakeback(game, undoneMoves, playerColor);
+      }
+
       await game.save();
 
       req.app.get("io").to(req.params.gameId).emit("move-undone", {
@@ -3020,6 +3029,9 @@ router.post("/:gameId/undo", auth, requirePoliciesAccepted, async (req, res) => 
             board: game.board,
             currentTurn: game.currentTurn,
             movesRemoved: movesToUndo,
+            ...(isBotTimedGame(game)
+              ? { timeRemaining: getEffectiveTimeRemaining(game) }
+              : {}),
           },
         },
       };

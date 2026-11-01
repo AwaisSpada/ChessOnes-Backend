@@ -199,6 +199,14 @@ const gameSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    /**
+     * Timed bot takeback only: drain from this instant instead of last move timestamp.
+     * Cleared on the next committed bot-game move. Live/friend games never set this.
+     */
+    clockAnchorAt: {
+      type: Date,
+      default: null,
+    },
     /** Find Rival: match create. Friends: invite accept. 30s board-open wait. */
     boardOpenWaitStartedAt: {
       type: Date,
