@@ -3,6 +3,7 @@ const path = require("path");
 const fs = require("fs");
 
 const { resolveStockfishBinary } = require("./resolveStockfishBinary");
+const { mapRatingToStockfishConfig } = require("./bot-ai/difficultyMapper");
 
 function getStockfishPath() {
   const resolved = resolveStockfishBinary(path.join(__dirname, "..", "stockfish"));
@@ -45,63 +46,30 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
       ? customConfig.elo
       : elo;
 
-  // Site Elo is always clamped to the bot roster range.
   const siteElo = Math.max(
     500,
     Math.min(2800, typeof requestedElo === "number" ? Math.round(requestedElo) : 1500)
   );
-  // Stockfish UCI_Elo floor ~1320; below that weaken via Skill Level + depth/nodes.
-  const engineElo = Math.max(1320, siteElo);
-  let skillLevel = Math.round(((siteElo - 500) / 2300) * 20);
-  skillLevel = Math.max(0, Math.min(20, skillLevel));
+  const mapped = mapRatingToStockfishConfig(siteElo, timeRemaining);
+  let engineElo = mapped.engineElo;
+  let skillLevel = mapped.skillLevel;
+  let depth = mapped.depth;
+  let movetime = mapped.movetime;
+  let nodes = mapped.nodes;
 
-  let depth;
-  if (siteElo <= 600) depth = 2;
-  else if (siteElo <= 800) depth = 3;
-  else if (siteElo <= 1000) depth = 4;
-  else if (siteElo <= 1150) depth = 5;
-  else if (siteElo < 1320) depth = 6;
-  else if (siteElo < 1600) depth = Math.floor(siteElo / 100) - 1; // 1550 → 14
-  else if (siteElo < 2000) depth = Math.floor(siteElo / 100); // 1700 → 17
-  else depth = Math.floor(siteElo / 100) + 1;
-  depth = Math.max(2, Math.min(28, depth));
-
-  let movetime;
-  if (siteElo < 1000) movetime = 700;
-  else if (siteElo < 1300) movetime = 1200;
-  else if (siteElo < 1600) movetime = 2400;
-  else if (siteElo < 1900) movetime = 2800;
-  else if (siteElo < 2200) movetime = 3200;
-  else movetime = 4000;
-
-  let nodes;
-  if (siteElo < 1000) nodes = 25000;
-  else if (siteElo < 1300) nodes = 80000;
-  else if (siteElo < 1600) nodes = 400000;
-  else if (siteElo < 1900) nodes = 650000;
-  else if (siteElo < 2200) nodes = 900000;
-  else if (siteElo < 2500) nodes = 1200000;
-  else nodes = 1800000;
-
-  // Match mobile: LimitStrength only ≥1400; weak bots use Skill Level + MultiPV 3.
   let useLimitStrength = siteElo >= 1400;
-  let multipv = siteElo < 1400 ? 3 : 2;
+  let multipv = siteElo <= 1250 ? 1 : siteElo < 1400 ? 3 : 2;
 
   const delayT = (siteElo - 500) / 2300;
   let artificialDelay = Math.round(3000 - delayT * 2000);
+  if (siteElo <= 1250) {
+    artificialDelay = Math.min(artificialDelay, 280);
+  }
 
-  // Keep enough reserve in timed games and reduce human-delay progressively.
   if (typeof timeRemaining === "number" && timeRemaining > 0) {
-    const reserve = Math.max(50, Math.min(800, Math.floor(timeRemaining * 0.04)));
-    const maxThinkBudget = Math.max(120, timeRemaining - reserve);
-    movetime = Math.min(movetime, maxThinkBudget);
     if (timeRemaining < 30000) {
-      nodes = Math.max(40000, Math.round(nodes * 0.35));
-      depth = Math.max(2, depth - 3);
       artificialDelay = 0;
     } else if (timeRemaining < 60000) {
-      nodes = Math.max(60000, Math.round(nodes * 0.55));
-      depth = Math.max(3, depth - 2);
       artificialDelay = Math.min(artificialDelay, Math.floor(timeRemaining * 0.12));
     } else if (timeRemaining < 180000) {
       artificialDelay = Math.min(artificialDelay, 700);
@@ -120,7 +88,7 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
       movetime = Math.max(50, Math.min(6000, Math.round(customConfig.movetime)));
     }
     if (typeof customConfig.nodes === "number") {
-      nodes = Math.max(1000, Math.round(customConfig.nodes));
+      nodes = Math.max(siteElo <= 1250 ? 200 : 1000, Math.round(customConfig.nodes));
     }
     if (typeof customConfig.multipv === "number") {
       multipv = Math.max(1, Math.min(3, Math.round(customConfig.multipv)));

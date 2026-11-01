@@ -1,5 +1,7 @@
 /** Port of mobile `src/bot/BotMistakeGenerator.ts` */
 
+const { Chess } = require("chess.js");
+
 const cpScore = (line) =>
   line.mate != null ? (line.mate > 0 ? 100000 : -100000) : line.centipawns;
 
@@ -60,10 +62,43 @@ const blunderChance = (profile, complexity, clockMs) => {
 };
 
 const protectedAdvantageCp = (rating, phase) => {
-  if (rating <= 900) return phase === "endgame" ? 280 : 380;
+  // Weak club: still blunder while winning (Chess.com 500–1200).
+  if (rating <= 1250) return 999999;
   if (rating <= 1400) return phase === "endgame" ? 180 : 260;
   return phase === "endgame" ? 100 : 150;
 };
+
+const clubWeakChance = (rating) => {
+  if (rating <= 500) return 0.58;
+  if (rating <= 750) return 0.45;
+  if (rating <= 900) return 0.34;
+  if (rating <= 1100) return 0.22;
+  if (rating <= 1250) return 0.14;
+  return 0;
+};
+
+/** Random legal (often a hang) — not 2nd-best engine, which is still strong. */
+function applyClubWeakMove(selected, fen, profile) {
+  const chance = clubWeakChance(profile?.rating);
+  if (chance <= 0 || !selected?.uci || Math.random() >= chance) return selected;
+  try {
+    const chess = new Chess(fen);
+    const moves = chess.moves({ verbose: true });
+    if (moves.length < 2) return selected;
+    const others = moves.filter((move) => {
+      const uci = `${move.from}${move.to}${move.promotion || ""}`;
+      return uci !== selected.uci;
+    });
+    const pool = others.length ? others : moves;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    return {
+      uci: `${pick.from}${pick.to}${pick.promotion || ""}`,
+      rank: 99,
+    };
+  } catch {
+    return selected;
+  }
+}
 
 function applyMistakeLayer(selected, lines, profile, context) {
   const ordered = [...lines].filter((l) => l.uci).sort((a, b) => a.rank - b.rank);
@@ -72,9 +107,9 @@ function applyMistakeLayer(selected, lines, profile, context) {
   if (profile.rating >= 2200) return selected;
 
   const top = ordered[0];
-  if (top.mate != null) return selected;
+  if (top.mate != null && profile.rating > 1250) return selected;
   const protectAt = protectedAdvantageCp(profile.rating, context.phase);
-  if (top.centipawns >= protectAt) return selected;
+  if (profile.rating > 1250 && top.centipawns >= protectAt) return selected;
 
   const complexity = Math.min(
     1,
@@ -118,4 +153,5 @@ function applyMistakeLayer(selected, lines, profile, context) {
 
 module.exports = {
   applyMistakeLayer,
+  applyClubWeakMove,
 };

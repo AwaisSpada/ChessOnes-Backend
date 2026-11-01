@@ -12,20 +12,24 @@ function configureEngineForBot(profile, context, botColor) {
   const pieceCount = pieceCountFromFen(context.fen);
   const base = mapRatingToStockfishConfig(profile.rating, context.botClockMs);
 
+  const rating = profile.rating;
+  const weakClub = rating <= 1250;
+
   const endgameAdjusted = endgameSearchBoost(
     base.depth,
     base.movetime,
     phase,
     pieceCount,
-    profile.personality.endgameStrength
+    weakClub ? 0 : profile.personality.endgameStrength
   );
 
   const tacticalBoost =
-    phase === "middlegame" ? profile.personality.tacticalStrength * 0.15 : 0;
+    weakClub || phase !== "middlegame"
+      ? 0
+      : profile.personality.tacticalStrength * 0.15;
   const depth = Math.min(40, Math.round(endgameAdjusted.depth + tacticalBoost * 3));
 
-  const rating = profile.rating;
-  const multipv = rating < 1400 ? 3 : 2;
+  const multipv = weakClub ? 1 : rating < 1400 ? 3 : 2;
   const useLimitStrength = rating >= 1400;
   const minDepthForMultipv = multipv > 1 ? 2 : 1;
   const searchDepth = Math.max(depth, minDepthForMultipv);

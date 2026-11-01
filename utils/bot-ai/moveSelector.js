@@ -87,6 +87,14 @@ function selectEngineMove(lines, profile, options = {}) {
 function shouldUseKillerInstinct(lines, phase, rating = 2000) {
   const top = lines[0];
   if (!top) return false;
+  // Weak club bots must still be able to hang pieces / miss mates.
+  if (rating <= 1250) {
+    if (top.mate != null && top.mate > 0) {
+      const miss = rating <= 900 ? 0.45 : 0.22;
+      return Math.random() >= miss;
+    }
+    return false;
+  }
   if (top.mate != null) return true;
 
   const topCp = Math.abs(top.centipawns);

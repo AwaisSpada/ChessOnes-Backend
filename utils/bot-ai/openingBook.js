@@ -85,7 +85,10 @@ const pickWeighted = (candidates, weight) => {
 };
 
 function tryOpeningBookMove(profile, context) {
-  if (context.moveNumber > MAX_BOOK_PLY) return null;
+  const rating = typeof profile?.rating === "number" ? profile.rating : 1500;
+  if (rating <= 900) return null;
+  const maxPly = rating <= 1250 ? 2 : MAX_BOOK_PLY;
+  if (context.moveNumber > maxPly) return null;
 
   const key = context.uciHistory.join(",");
   const node = OPENING_TREE[key];

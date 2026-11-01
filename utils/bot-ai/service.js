@@ -5,7 +5,7 @@
 
 const { Chess } = require("chess.js");
 const { configureEngineForBot } = require("./engineConfigurator");
-const { applyMistakeLayer } = require("./mistakeGenerator");
+const { applyMistakeLayer, applyClubWeakMove } = require("./mistakeGenerator");
 const { selectEngineMove, shouldUseKillerInstinct } = require("./moveSelector");
 const { tryOpeningBookMove } = require("./openingBook");
 const {
@@ -129,6 +129,7 @@ async function pickBotMove({ profile, context, botColor, searchEngine }) {
       botClockMs: context.botClockMs,
       phase,
     });
+    selected = applyClubWeakMove(selected, context.fen, profile);
   }
 
   if (!selected.uci) {
