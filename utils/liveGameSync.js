@@ -1,11 +1,18 @@
 /**
  * Live human games (matchmaking / friends / arena) — server clock + sync metadata.
- * Bot games intentionally keep the older client-driven clock path.
+ * Timed bot games use the same remaining/anchor formula on move + GET; they do
+ * not use LiveGame RAM or client-trusted timeRemaining.
  */
 
 function isLiveHumanGame(game) {
   if (!game) return false;
   return game.type === "multiplayer" || game.type === "friend";
+}
+
+function isBotTimedGame(game) {
+  if (!game || game.type !== "bot") return false;
+  const initial = game.timeControl?.initial;
+  return typeof initial === "number" && initial > 0;
 }
 
 function ensureTimeRemaining(game, fallbackMs = 600000) {
@@ -172,6 +179,7 @@ function withLiveSync(game, payload = {}, overrides = {}) {
 
 module.exports = {
   isLiveHumanGame,
+  isBotTimedGame,
   ensureTimeRemaining,
   getEffectiveTimeRemaining,
   applyServerElapsedClock,

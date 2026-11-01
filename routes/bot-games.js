@@ -7,6 +7,10 @@ const User = require("../models/User");
 const auth = require("../middleware/auth");
 const requirePoliciesAccepted = require("../middleware/requirePoliciesAccepted");
 const { applyFischerIncrementToMover } = require("../utils/clockIncrement");
+const {
+  applyServerElapsedClock,
+  commitElapsedClock,
+} = require("../services/live/ClockManager");
 
 const router = express.Router();
 
@@ -149,6 +153,9 @@ router.post(
         },
         currentTurn: "white", // Always start with white
         status: "active",
+        ...(typeof timeControl.initial === "number" && timeControl.initial > 0
+          ? { clockStartedAt: new Date() }
+          : {}),
       };
 
       const { setGameCategory } = require("../services/ratingEngine");
@@ -229,8 +236,6 @@ router.post(
             console.log("[BOT] Computing first bot move. ELO:", effectiveElo);
 
             // Note: Artificial thinking delay is now handled inherently by getBestMove!
-            const startTime = Date.now();
-
             const preBotClockMs = currentGame.timeRemaining?.white;
 
             // Get bot's move
@@ -293,17 +298,23 @@ router.post(
                 engineClockConfig
               );
 
-              const elapsed = Date.now() - startTime;
-              // Deduct elapsed engine+artificial thinking time from bot's clock
-              if (
-                currentGame.timeRemaining &&
-                typeof currentGame.timeRemaining.white === "number"
-              ) {
-                currentGame.timeRemaining.white = Math.max(
-                  0,
-                  currentGame.timeRemaining.white - elapsed
-                );
+              const firstBotClock = applyServerElapsedClock(currentGame);
+              if (firstBotClock.timedOut) {
+                commitElapsedClock(currentGame, firstBotClock);
+                currentGame.status = "completed";
+                currentGame.result = {
+                  winner: "black",
+                  reason: "timeout",
+                };
+                await currentGame.save();
+                io.to(gameId).emit("game-ended", {
+                  gameId,
+                  result: currentGame.result,
+                  timeRemaining: currentGame.timeRemaining,
+                });
+                return;
               }
+              commitElapsedClock(currentGame, firstBotClock);
             } catch (error) {
               // If getBestMove throws "No legal moves available", check for checkmate/stalemate
               if (

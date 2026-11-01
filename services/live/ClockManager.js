@@ -9,6 +9,7 @@ const clockIncrement = require("../../utils/clockIncrement");
 
 module.exports = {
   isLiveHumanGame: liveGameSync.isLiveHumanGame,
+  isBotTimedGame: liveGameSync.isBotTimedGame,
   ensureTimeRemaining: liveGameSync.ensureTimeRemaining,
   getEffectiveTimeRemaining: liveGameSync.getEffectiveTimeRemaining,
   applyServerElapsedClock: liveGameSync.applyServerElapsedClock,

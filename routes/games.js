@@ -24,6 +24,7 @@ const {
 const { canUserSpectateArenaGame } = require("../utils/arenaSpectateAccess");
 const {
   isLiveHumanGame,
+  isBotTimedGame,
   ensureTimeRemaining,
   getEffectiveTimeRemaining,
   applyServerElapsedClock,
@@ -864,9 +865,10 @@ router.post(
         playerColor === "white" ? game.timeRemaining?.white : game.timeRemaining?.black;
 
       const liveHuman = isLiveHumanGame(game);
+      const botTimed = isBotTimedGame(game);
       let pendingClockCommit = null;
 
-      if (liveHuman) {
+      if (liveHuman || botTimed) {
         // Server-authoritative clocks — do not trust client timeRemaining.
         if (!game.clockStartedAt && (!game.moves || game.moves.length === 0)) {
           game.clockStartedAt = game.clockStartedAt || new Date();
@@ -912,8 +914,8 @@ router.post(
           });
         }
         pendingClockCommit = clockResult;
-      } else if (timeRemaining && typeof timeRemaining === "object") {
-        // Bot / legacy: optional client clock sync (unchanged behavior).
+      } else if (timeRemaining && typeof timeRemaining === "object" && game.type !== "bot") {
+        // Legacy non-bot client clock sync. Timed bots use server elapsed above.
         if (typeof timeRemaining.white === "number") {
           game.timeRemaining.white = timeRemaining.white;
         }
@@ -1884,38 +1886,24 @@ router.post(
                 ? currentGame.timeRemaining?.white
                 : currentGame.timeRemaining?.black;
 
-            if (
-              currentGame.timeRemaining &&
-              typeof currentGame.timeRemaining.white === "number" &&
-              typeof currentGame.timeRemaining.black === "number"
-            ) {
-              const now = Date.now();
-
-              // Last move should be the human move that just triggered the bot turn
-              let lastMoveTime = currentGame.updatedAt
-                ? currentGame.updatedAt.getTime()
-                : now;
-              if (currentGame.moves && currentGame.moves.length > 0) {
-                const lastMove =
-                  currentGame.moves[currentGame.moves.length - 1];
-                if (lastMove.timestamp) {
-                  lastMoveTime = new Date(lastMove.timestamp).getTime();
-                }
+            {
+              const botClock = applyServerElapsedClock(currentGame);
+              if (botClock.timedOut) {
+                commitElapsedClock(currentGame, botClock);
+                currentGame.status = "completed";
+                currentGame.result = {
+                  winner: currentGame.botSide === "white" ? "black" : "white",
+                  reason: "timeout",
+                };
+                await currentGame.save();
+                io.to(req.params.gameId).emit("game-ended", {
+                  gameId: req.params.gameId,
+                  result: currentGame.result,
+                  timeRemaining: currentGame.timeRemaining,
+                });
+                return;
               }
-
-              const elapsed = Math.max(0, now - lastMoveTime);
-
-              if (currentGame.currentTurn === "white") {
-                currentGame.timeRemaining.white = Math.max(
-                  0,
-                  currentGame.timeRemaining.white - elapsed
-                );
-              } else if (currentGame.currentTurn === "black") {
-                currentGame.timeRemaining.black = Math.max(
-                  0,
-                  currentGame.timeRemaining.black - elapsed
-                );
-              }
+              commitElapsedClock(currentGame, botClock);
             }
 
             const postBotClockMs =
@@ -2589,10 +2577,11 @@ router.post(
           result.reason = "insufficient-material";
         }
       } else if (
-        isLiveHumanGame(game) &&
+        (isLiveHumanGame(game) || isBotTimedGame(game)) &&
         result.reason !== "first-move-abandon"
       ) {
-        // Resign / draw / etc. — freeze both sides' effective remaining at end.
+        // Resign / draw / checkmate / bot leave — freeze effective remaining at end
+        // (stored clocks are last-move snapshots; think-time after that must be applied).
         const now = Date.now();
         const { LIVE_MEMORY_SNAPSHOT } = require("../services/live/flags");
         const LiveGameManager = require("../services/live/LiveGameManager");
