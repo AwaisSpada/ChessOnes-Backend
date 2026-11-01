@@ -1390,7 +1390,10 @@ io.on("connection", (socket) => {
       current[normalizedId] = !!ready;
 
       const Game = require("./models/Game");
-      const game = await Game.findOne({ gameId }).select("players").lean();
+      const { isBotTimedGame, isLiveHumanGame } = require("./services/live/ClockManager");
+      const game = await Game.findOne({ gameId })
+        .select("players type timeControl status")
+        .lean();
 
       let state = current;
       let allReady = false;
@@ -1404,6 +1407,15 @@ io.on("connection", (socket) => {
         const readyValues = Object.values(current);
         allReady =
           readyValues.length >= 2 && readyValues.every((val) => val === true);
+      }
+
+      // Bot: one human. Don't wait for the bot seat to emit ready.
+      if (isBotTimedGame(game) && ready) {
+        const whiteId = String(game.players?.white?._id || game.players?.white || "");
+        const blackId = String(game.players?.black?._id || game.players?.black || "");
+        if (normalizedId === whiteId || normalizedId === blackId) {
+          allReady = true;
+        }
       }
 
       gameReadyState.set(gameId, state);
@@ -1422,7 +1434,9 @@ io.on("connection", (socket) => {
             {
               gameId,
               status: "active",
-              type: { $in: ["multiplayer", "friend"] },
+              type: isBotTimedGame(game)
+                ? "bot"
+                : { $in: ["multiplayer", "friend"] },
               $or: [{ clockStartedAt: null }, { clockStartedAt: { $exists: false } }],
             },
             { $set: { clockStartedAt: startedAt } }
@@ -1458,7 +1472,7 @@ io.on("connection", (socket) => {
             const { LIVE_MEMORY_SNAPSHOT, LIVE_SERVER_TIMEOUTS } = require(
               "./services/live/flags"
             );
-            if (LIVE_MEMORY_SNAPSHOT) {
+            if (LIVE_MEMORY_SNAPSHOT && isLiveHumanGame(liveDoc)) {
               const LiveGameManager = require("./services/live/LiveGameManager");
               let mem = LiveGameManager.get(gameId);
               if (!mem) {

@@ -153,9 +153,8 @@ router.post(
         },
         currentTurn: "white", // Always start with white
         status: "active",
-        ...(typeof timeControl.initial === "number" && timeControl.initial > 0
-          ? { clockStartedAt: new Date() }
-          : {}),
+        // clockStartedAt is stamped when the human board paints (player-ready),
+        // not at create — otherwise White burns during the loading overlay.
       };
 
       const { setGameCategory } = require("../services/ratingEngine");
