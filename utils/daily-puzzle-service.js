@@ -131,6 +131,11 @@ async function markSolved({ userId, dateKey, timeSpent = 0 }) {
   });
 
   if (progress?.solved) {
+    const nextTime = Number(timeSpent);
+    if (Number.isFinite(nextTime) && nextTime >= 0) {
+      progress.timeSpent = nextTime;
+      await progress.save();
+    }
     return { progress, alreadySolved: true };
   }
 

@@ -104,6 +104,7 @@ router.get("/", optionalAuth, async (req, res) => {
         puzzle: serializePuzzle(populated.puzzle),
         solved: Boolean(progress?.solved),
         solvedAt: progress?.solvedAt || null,
+        timeSpent: progress?.solved ? Number(progress.timeSpent) || 0 : 0,
         streak,
       },
     });
@@ -167,6 +168,7 @@ router.post("/:dateKey/solve", auth, async (req, res) => {
         solved: true,
         alreadySolved,
         solvedAt: progress.solvedAt,
+        timeSpent: Number(progress.timeSpent) || 0,
         streak: await computeDisplayStreak(user),
         todayDateKey: todayDateKey(),
       },
