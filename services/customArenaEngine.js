@@ -202,6 +202,8 @@ function setPlayerStatus(playerStates, userId, patch) {
       currentGameId: plain.currentGameId || null,
       hasEnteredLobby: !!plain.hasEnteredLobby,
       pendingAway: !!plain.pendingAway,
+      pendingKick: !!plain.pendingKick,
+      leaveReason: plain.leaveReason || undefined,
       lastOpponentUserId: plain.lastOpponentUserId || null,
       ...patch,
     };
@@ -216,6 +218,18 @@ function findPlayerState(playerStates, userId) {
 /** After a game / busy slot ends: Away if they left the hub mid-game, else Available. */
 function releaseBusyPresence(playerStates, userId, extra = {}) {
   const state = findPlayerState(playerStates, userId);
+  if (state?.pendingKick) {
+    return setPlayerStatus(playerStates, userId, {
+      status: "left_tournament",
+      matchmakingReady: false,
+      currentGameId: null,
+      pendingAway: false,
+      pendingKick: false,
+      leaveReason: "host_kick",
+      hasEnteredLobby: true,
+      ...extra,
+    });
+  }
   const goAway = !!state?.pendingAway;
   return setPlayerStatus(playerStates, userId, {
     status: goAway ? "offline" : "idle",
@@ -643,6 +657,8 @@ function serializeArenaRuntime(arena) {
       currentGameId: state.currentGameId || null,
       hasEnteredLobby: !!state.hasEnteredLobby,
       pendingAway: !!state.pendingAway,
+      pendingKick: !!state.pendingKick,
+      leaveReason: state.leaveReason || undefined,
       lastOpponentUserId: state.lastOpponentUserId
         ? String(state.lastOpponentUserId)
         : null,
@@ -771,7 +787,7 @@ async function enterArenaLobby(arenaId, userId) {
 
   let myState = playerStates[stateIndex];
 
-  if (myState.status === "left_tournament") {
+  if (myState.status === "left_tournament" || myState.pendingKick) {
     const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
     return { runtime, error: null };
   }
@@ -1071,11 +1087,13 @@ async function setArenaMatchmakingReady(arenaId, userId, ready) {
   }
 
   const state = playerStates[index];
-  if (state.status === "left_tournament") {
+  if (state.status === "left_tournament" || state.pendingKick) {
     return {
       arena,
       runtime: null,
-      error: "You left this tournament",
+      error: state.pendingKick
+        ? "You have been removed from this tournament"
+        : "You left this tournament",
     };
   }
   if (state.status === "matched" || state.status === "in_game") {
@@ -1408,6 +1426,165 @@ async function leaveArenaTournament(arenaId, userId) {
 }
 
 /**
+ * Host removes a player from the arena.
+ * Live chess games are not aborted: in-game kick sets pendingKick and
+ * becomes left_tournament after that game is recorded.
+ */
+async function kickArenaPlayer(arenaId, hostUserId, targetUserId) {
+  let arena = await syncStaleArenaPairings(arenaId);
+  if (!arena) {
+    arena = await CustomArena.findById(arenaId);
+  }
+  if (!arena) {
+    return { arena: null, runtime: null, error: "Arena not found", code: null, deferred: false };
+  }
+  if (arena.status !== "live") {
+    return {
+      arena,
+      runtime: serializeArenaRuntime(arena),
+      error: "Arena is not live",
+      code: null,
+      deferred: false,
+    };
+  }
+
+  const hostId = String(arena.createdBy?._id || arena.createdBy || "");
+  if (!hostId || hostId !== String(hostUserId)) {
+    return {
+      arena,
+      runtime: null,
+      error: "Only the arena host can remove a player",
+      code: "FORBIDDEN",
+      deferred: false,
+    };
+  }
+
+  const uid = String(targetUserId || "");
+  if (!uid) {
+    return {
+      arena,
+      runtime: null,
+      error: "Player is required",
+      code: null,
+      deferred: false,
+    };
+  }
+  if (uid === hostId) {
+    return {
+      arena,
+      runtime: null,
+      error: "You cannot remove the host",
+      code: "FORBIDDEN",
+      deferred: false,
+    };
+  }
+
+  const roster = (arena.participantUserIds || []).map(String);
+  if (!roster.includes(uid)) {
+    return {
+      arena,
+      runtime: null,
+      error: "That player is not in this arena",
+      code: null,
+      deferred: false,
+    };
+  }
+
+  let playerStates = [...(arena.playerStates || [])];
+  const state = playerStates.find((s) => String(s.userId) === uid);
+  if (!state) {
+    return {
+      arena,
+      runtime: null,
+      error: "Player state not found",
+      code: null,
+      deferred: false,
+    };
+  }
+
+  if (state.status === "left_tournament") {
+    const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+    return { arena, runtime, error: null, code: null, deferred: false };
+  }
+
+  if (state.pendingKick) {
+    const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+    return { arena, runtime, error: null, code: null, deferred: true };
+  }
+
+  let liveGameId =
+    state.status === "in_game" && state.currentGameId
+      ? String(state.currentGameId)
+      : null;
+  if (!liveGameId) {
+    const activePairing = (arena.activePairings || []).find(
+      (pairing) =>
+        (String(pairing.whiteUserId) === uid ||
+          String(pairing.blackUserId) === uid) &&
+        pairing.status === "active" &&
+        pairing.gameId
+    );
+    if (activePairing?.gameId) liveGameId = String(activePairing.gameId);
+  }
+
+  if (liveGameId) {
+    const stillLive = await isGameStillActive(liveGameId);
+    if (stillLive) {
+      playerStates = setPlayerStatus(playerStates, uid, {
+        matchmakingReady: false,
+        pendingKick: true,
+      });
+      arena.playerStates = playerStates;
+      arena.leaderboard = markLeaderboardRowDiscarded(arena.leaderboard, uid);
+      markArenaDirty(arena);
+      await saveArenaDoc(arena);
+      const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
+      return { arena, runtime, error: null, code: null, deferred: true };
+    }
+  }
+
+  const { pairings: nextPairings, removed } = removeOpenPairingsForUser(
+    arena.activePairings,
+    uid
+  );
+  arena.activePairings = nextPairings;
+
+  for (const pairing of removed) {
+    const oppId =
+      String(pairing.whiteUserId) === uid
+        ? String(pairing.blackUserId)
+        : String(pairing.whiteUserId);
+    const oppState = playerStates.find((s) => String(s.userId) === oppId);
+    if (oppState && oppState.status !== "left_tournament") {
+      playerStates = setPlayerStatus(playerStates, oppId, {
+        status: "idle",
+        matchmakingReady: false,
+        currentGameId: null,
+      });
+    }
+  }
+
+  playerStates = setPlayerStatus(playerStates, uid, {
+    status: "left_tournament",
+    matchmakingReady: false,
+    currentGameId: null,
+    pendingKick: false,
+    pendingAway: false,
+    leaveReason: "host_kick",
+    lastOpponentUserId: state.lastOpponentUserId || null,
+  });
+  arena.playerStates = playerStates;
+  arena.leaderboard = markLeaderboardRowDiscarded(arena.leaderboard, uid);
+
+  arena = maybeEndMatchCountArena(arena);
+  markArenaDirty(arena);
+  await saveArenaDoc(arena);
+
+  const runtime = await getArenaRuntimeState(arenaId, { autoTick: true });
+  return { arena, runtime, error: null, code: null, deferred: false };
+}
+
+/**
  * Host ends a live/scheduled arena for everyone.
  * Stops new pairings immediately. In-progress games keep running; standings
  * update when those games complete (`recordArenaGameResult` already allows ended).
@@ -1540,6 +1717,7 @@ module.exports = {
   acceptArenaPairing,
   addInvitesToLiveArena,
   leaveArenaTournament,
+  kickArenaPlayer,
   endArenaByHost,
   ensureArenaClocksStarted,
 };

@@ -162,6 +162,14 @@ const customArenaSchema = new mongoose.Schema(
           hasEnteredLobby: { type: Boolean, default: false },
           /** Set when leaving hub during an active game; applied as Away after game ends. */
           pendingAway: { type: Boolean, default: false },
+          /** Host kick while still in a live game — applied as left after that game ends. */
+          pendingKick: { type: Boolean, default: false },
+          /** Why they left: omitted/null = voluntary leave; host_kick = removed by host. */
+          leaveReason: {
+            type: String,
+            enum: ["voluntary", "host_kick"],
+            default: undefined,
+          },
           lastOpponentUserId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",

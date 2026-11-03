@@ -25,6 +25,7 @@ const {
   markArenaPlayerAway,
   addInvitesToLiveArena,
   leaveArenaTournament,
+  kickArenaPlayer,
   endArenaByHost,
 } = require("../services/customArenaEngine");
 const { getArenaChatMessages } = require("../utils/arenaChat");
@@ -1150,6 +1151,54 @@ router.post("/custom-arenas/:id/leave", auth, async (req, res) => {
   } catch (error) {
     console.error("[Tournaments] custom-arenas leave error:", error);
     res.status(500).json({ success: false, message: "Failed to leave arena" });
+  }
+});
+
+// @route   POST /api/tournaments/custom-arenas/:id/kick
+// @desc    Host removes a player (live games are not aborted)
+// @access  Private (host only)
+router.post("/custom-arenas/:id/kick", auth, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid arena id" });
+    }
+
+    const targetUserId = req.body?.userId;
+    if (!targetUserId || !mongoose.Types.ObjectId.isValid(String(targetUserId))) {
+      return res.status(400).json({ success: false, message: "Invalid player id" });
+    }
+
+    const arenaLean = await CustomArena.findById(req.params.id).lean();
+    if (!arenaLean) {
+      return res.status(404).json({ success: false, message: "Arena not found" });
+    }
+    if (!isArenaVisibleToUser(arenaLean, req.user)) {
+      return res.status(403).json({ success: false, message: "Access denied" });
+    }
+
+    const { arena, runtime, error, code, deferred } = await kickArenaPlayer(
+      req.params.id,
+      req.user._id,
+      targetUserId
+    );
+
+    if (error) {
+      const status = code === "FORBIDDEN" ? 403 : 400;
+      return res.status(status).json({
+        success: false,
+        message: error,
+        code: code || undefined,
+        data: { runtime: runtime || undefined },
+      });
+    }
+
+    res.json({
+      success: true,
+      data: { runtime, arenaEnded: arena?.status === "ended", deferred: !!deferred },
+    });
+  } catch (error) {
+    console.error("[Tournaments] custom-arenas kick error:", error);
+    res.status(500).json({ success: false, message: "Failed to remove player" });
   }
 });
 
