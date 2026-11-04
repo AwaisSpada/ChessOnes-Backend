@@ -765,7 +765,6 @@ async function enterArenaLobby(arenaId, userId) {
     arena = await CustomArena.findById(arenaId);
   }
   if (!arena) {
-    return { runtime: null, error: "Arena not found" };
     return { runtime: null, error: "Arena not found", justEnteredLobby: false };
   }
   if (arena.status !== "live") {
@@ -773,18 +772,18 @@ async function enterArenaLobby(arenaId, userId) {
       runtime: serializeArenaRuntime(arena),
       error: null,
       justEnteredLobby: false,
+    };
   }
 
   const uid = String(userId);
   const roster = (arena.participantUserIds || []).map(String);
   if (!roster.includes(uid)) {
-    return { runtime: null, error: "You are not in this arena" };
     return { runtime: null, error: "You are not in this arena", justEnteredLobby: false };
+  }
 
   let playerStates = [...(arena.playerStates || [])];
   const stateIndex = playerStates.findIndex((s) => String(s.userId) === uid);
   if (stateIndex === -1) {
-    return { runtime: null, error: "Player state not found" };
     return { runtime: null, error: "Player state not found", justEnteredLobby: false };
   }
 
@@ -810,6 +809,7 @@ async function enterArenaLobby(arenaId, userId) {
     myState = findPlayerState(playerStates, uid) || myState;
   } else if (!myState.hasEnteredLobby) {
     justEnteredLobby = true;
+    playerStates = setPlayerStatus(playerStates, uid, {
       hasEnteredLobby: true,
       pendingAway: false,
     });
@@ -841,7 +841,6 @@ async function enterArenaLobby(arenaId, userId) {
         await saveArenaDoc(arena);
       }
       const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
-      return { runtime, error: null };
       return { runtime, error: null, justEnteredLobby };
     }
     arena = (await syncStaleArenaPairings(arenaId)) || arena;
@@ -851,6 +850,7 @@ async function enterArenaLobby(arenaId, userId) {
     );
     if (stateIndexAfterSync === -1) {
       return { runtime: null, error: "Player state not found", justEnteredLobby };
+    }
     myState = playerStates[stateIndexAfterSync];
   }
 
@@ -858,8 +858,8 @@ async function enterArenaLobby(arenaId, userId) {
     const stillLive = await isGameStillActive(myState.currentGameId);
     if (stillLive) {
       const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
-      return { runtime, error: null };
       return { runtime, error: null, justEnteredLobby };
+    }
     playerStates = releaseBusyPresence(playerStates, uid);
     arena.playerStates = playerStates;
     await saveArenaDoc(arena);
@@ -896,7 +896,6 @@ async function enterArenaLobby(arenaId, userId) {
         await saveArenaDoc(arena);
       }
       const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
-      return { runtime, error: null };
       return { runtime, error: null, justEnteredLobby };
     }
 
@@ -918,6 +917,7 @@ async function enterArenaLobby(arenaId, userId) {
   if (myState.status === "matched" && pendingConfirm) {
     const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
     return { runtime, error: null, justEnteredLobby };
+  }
 
   if (myState.matchmakingReady) {
     playerStates = setPlayerStatus(playerStates, uid, {
@@ -930,7 +930,6 @@ async function enterArenaLobby(arenaId, userId) {
   }
 
   const runtime = await getArenaRuntimeState(arenaId, { autoTick: false });
-  return { runtime, error: null };
   return { runtime, error: null, justEnteredLobby };
 }
 
@@ -949,6 +948,7 @@ async function ackArenaRules(arenaId, userId) {
   });
   await saveArenaDoc(arena);
   return { runtime: serializeArenaRuntime(arena), error: null };
+}
 
 async function recordArenaResultForGame(gameId, result) {
   if (!gameId || !result) return { arena: null, error: null };
