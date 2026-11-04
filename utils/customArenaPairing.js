@@ -449,6 +449,7 @@ function buildInitialPlayerStates(roster) {
     matchmakingReady: false,
     currentGameId: null,
     hasEnteredLobby: false,
+    hasAckedRules: false,
     pendingAway: false,
     lastOpponentUserId: null,
   }));

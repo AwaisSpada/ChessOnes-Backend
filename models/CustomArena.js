@@ -160,6 +160,8 @@ const customArenaSchema = new mongoose.Schema(
           currentGameId: { type: String, default: null },
           /** False until first tournament-play lobby enter → UI "Not in arena". */
           hasEnteredLobby: { type: Boolean, default: false },
+          /** True after they confirm Tournament Rules on first join. */
+          hasAckedRules: { type: Boolean, default: false },
           /** Set when leaving hub during an active game; applied as Away after game ends. */
           pendingAway: { type: Boolean, default: false },
           /** Host kick while still in a live game — applied as left after that game ends. */
