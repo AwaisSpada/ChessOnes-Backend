@@ -64,6 +64,15 @@ class SocketIOTransport {
     if (!gameId || !payload) return;
     const room = String(gameId);
     const connected = payload.connected !== false && payload.status !== "reconnecting";
+    const extra =
+      payload.reconnectUntil != null || payload.graceMs != null
+        ? {
+            ...(payload.reconnectUntil != null
+              ? { reconnectUntil: payload.reconnectUntil }
+              : {}),
+            ...(payload.graceMs != null ? { graceMs: payload.graceMs } : {}),
+          }
+        : {};
     if (connected) {
       this.io.to(room).emit("player-reconnected", {
         gameId: room,
@@ -81,12 +90,14 @@ class SocketIOTransport {
         gameId: room,
         userId: payload.userId,
         connected: false,
+        ...extra,
       });
       this.io.to(room).emit("connection-status", {
         gameId: room,
         userId: payload.userId,
         connected: false,
         status: payload.status || "reconnecting",
+        ...extra,
       });
     }
   }

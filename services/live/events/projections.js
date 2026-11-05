@@ -95,6 +95,8 @@ function projectPlayerConnection(event) {
       connected: event.eventType === "PLAYER_RECONNECTED",
       status:
         event.eventType === "PLAYER_RECONNECTED" ? "online" : "reconnecting",
+      ...(p.reconnectUntil != null ? { reconnectUntil: p.reconnectUntil } : {}),
+      ...(p.graceMs != null ? { graceMs: p.graceMs } : {}),
     },
   });
 }

@@ -156,6 +156,8 @@ async function publishPlayerConnection({
   userId,
   connected,
   origin,
+  reconnectUntil,
+  graceMs,
 }) {
   return publishEvent({
     eventType: connected
@@ -164,7 +166,7 @@ async function publishPlayerConnection({
     gameId,
     syncVersion: 0,
     origin: origin || ORIGIN.Reconnect,
-    payload: { userId, connected },
+    payload: { userId, connected, reconnectUntil, graceMs },
   });
 }
 

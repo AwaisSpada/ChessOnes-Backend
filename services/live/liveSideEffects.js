@@ -202,13 +202,22 @@ async function afterServerSync({
   }
 }
 
-async function afterPlayerConnection({ gameId, userId, connected, origin }) {
+async function afterPlayerConnection({
+  gameId,
+  userId,
+  connected,
+  origin,
+  reconnectUntil,
+  graceMs,
+}) {
   if (LIVE_DOMAIN_EVENTS) {
     await events.publishPlayerConnection({
       gameId,
       userId,
       connected,
       origin,
+      reconnectUntil,
+      graceMs,
     });
     return;
   }
@@ -220,6 +229,8 @@ async function afterPlayerConnection({ gameId, userId, connected, origin }) {
       userId,
       connected,
       status: connected ? "online" : "reconnecting",
+      ...(reconnectUntil != null ? { reconnectUntil } : {}),
+      ...(graceMs != null ? { graceMs } : {}),
     },
   });
 }

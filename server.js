@@ -288,15 +288,13 @@ void liveFlags;
 
 const {
   init: initReconnectManager,
-  DISCONNECT_GAME_END_GRACE_MS,
-  DISCONNECT_ARENA_GAME_END_GRACE_MS,
   cancelPendingDisconnectGameEnd,
   cancelPendingDisconnectEndsForUser,
   emitPlayerReconnected,
   emitPlayerDisconnected,
   clearGameHeartbeat,
   touchGameHeartbeat,
-  scheduleDisconnectGameEnd,
+  beginDisconnectGrace,
 } = require("./services/live/ReconnectManager");
 
 initReconnectManager(io);
@@ -1364,8 +1362,8 @@ io.on("connection", (socket) => {
 
       // Only notify when this user has fully left the board
       if (!hasOtherSockets) {
-        emitPlayerDisconnected(io, gameId, userId);
         clearGameHeartbeat(gameId, userId);
+        void beginDisconnectGrace(gameId, userId);
         void FindRivalJoinWait.onLeft(gameId);
         broadcastGameRoomOccupants(io, gameId);
       }
@@ -2989,8 +2987,8 @@ io.on("connection", (socket) => {
               }
               // Opponent should see connection loss even if this user stays
               // online elsewhere (another tab) outside this game room.
-              emitPlayerDisconnected(io, gameId, userId);
               clearGameHeartbeat(gameId, userId);
+              void beginDisconnectGrace(gameId, userId);
               void FindRivalJoinWait.onLeft(gameId);
               broadcastGameRoomOccupants(io, gameId);
             }
@@ -3066,21 +3064,16 @@ io.on("connection", (socket) => {
           }).populate("players.white players.black");
 
           for (const game of activeGames) {
-            emitPlayerDisconnected(io, game.gameId, userId);
-
             const gameHasMoves =
               Array.isArray(game.moves) && game.moves.length > 0;
             if (!gameHasMoves) {
+              emitPlayerDisconnected(io, game.gameId, userId);
               console.log(
                 `⏸️ Skipping auto-end for game ${game.gameId} (no moves made yet)`
               );
               continue;
             }
-
-            const graceMs = game.arenaId
-              ? DISCONNECT_ARENA_GAME_END_GRACE_MS
-              : DISCONNECT_GAME_END_GRACE_MS;
-            scheduleDisconnectGameEnd(userId, game.gameId, graceMs);
+            await beginDisconnectGrace(game.gameId, userId);
           }
 
           if (userDoc?.friends?.length) {
