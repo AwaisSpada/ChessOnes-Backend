@@ -32,6 +32,16 @@ const { getReplayEvaluation } = require("../utils/game-review/replay-eval");
 const router = express.Router();
 const reviewJobsInProgress = new Set();
 const customReviewJobs = new Map();
+
+/** One Stockfish job per gameId (Chess.com: either player click shares the same review). */
+function startOnDemandReview(gameId, engineOptions = {}) {
+  if (!gameId) return;
+  if (reviewJobsInProgress.has(gameId)) {
+    console.log(`[GameReview] shared in-flight job for ${gameId} — not starting a second`);
+    return;
+  }
+  runQuickReviewInBackground(gameId, engineOptions);
+}
 const CUSTOM_REVIEW_JOB_TTL_MS = 10 * 60 * 1000;
 
 function cleanupCustomReviewJob(jobId) {
@@ -752,22 +762,19 @@ router.post("/:gameId", auth, async (req, res) => {
       );
     }
     
-    // Stale `pending` (process restart / auto-queue killed): click starts this game only.
-    if (existingReview && existingReview.status === "pending") {
-      if (!reviewJobsInProgress.has(gameId)) {
-        console.log(`[GameReview] Pending review for ${gameId} — starting on click`);
-        runQuickReviewInBackground(gameId);
-      }
+    if (
+      existingReview &&
+      (existingReview.status === "pending" || existingReview.status === "failed")
+    ) {
+      console.log(
+        `[GameReview] POST ${gameId} status=${existingReview.status} — on-demand start`
+      );
+      startOnDemandReview(gameId);
       return res.status(202).json({
         success: false,
         message: "Review is being generated. Please wait and use GET to fetch it when ready.",
         status: "in_progress",
       });
-    }
-    
-    // Failed reviews are eligible for retry.
-    if (existingReview && existingReview.status === "failed") {
-      console.log(`[GameReview] Review exists with failed status for game ${gameId}. Allowing retry.`);
     }
     
     // Find game with bot info
@@ -866,6 +873,11 @@ router.get("/:gameId", auth, async (req, res) => {
       });
     }
     
+    const docStatus = reviewDoc ? String(reviewDoc.status || "") : "missing";
+    console.log(
+      `[GameReview] GET ${gameId} dbStatus=${docStatus} inFlight=${reviewJobsInProgress.has(gameId)}`
+    );
+
     // If no review document exists, return 404
     if (!reviewDoc) {
       return res.status(404).json({
@@ -874,12 +886,10 @@ router.get("/:gameId", auth, async (req, res) => {
       });
     }
     
-    // Pending + no worker: Review page GET starts this one game (not the whole queue).
-    if (reviewDoc.status === "pending") {
-      if (!reviewJobsInProgress.has(gameId)) {
-        console.log(`[GameReview] Pending review for ${gameId} — starting on review open`);
-        runQuickReviewInBackground(gameId);
-      }
+    // Pending/failed: Review page polls GET only — start the one shared job here
+    // (no FE/mobile change). Second player joins the same job.
+    if (reviewDoc.status === "pending" || reviewDoc.status === "failed") {
+      startOnDemandReview(gameId);
       return res.status(202).json({
         success: false,
         message: "Review is being generated. Please wait and try again later.",
