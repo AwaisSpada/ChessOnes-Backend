@@ -165,7 +165,13 @@ function convertGameMovesToUCI(moves, context = {}) {
  * This runs asynchronously and does not block game completion
  * @param {string} gameId - Game ID
  */
+/** Game-end auto-queue off: reviews start only via POST/GET /api/game-review/:gameId. */
+const AUTO_REVIEW_ON_GAME_END = false;
+
 async function triggerReviewGeneration(gameId) {
+  if (!AUTO_REVIEW_ON_GAME_END) {
+    return;
+  }
   // Run asynchronously - don't block
   setImmediate(async () => {
     try {

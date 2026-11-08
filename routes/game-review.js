@@ -752,10 +752,12 @@ router.post("/:gameId", auth, async (req, res) => {
       );
     }
     
-    // ✅ CRITICAL: If review is pending, return "in_progress" - NEVER start new generation
+    // Stale `pending` (process restart / auto-queue killed): click starts this game only.
     if (existingReview && existingReview.status === "pending") {
-      console.log(`[GameReview] ✅ SAFEGUARD: Review is already being generated (status: pending) for game ${gameId}. Returning in_progress.`);
-      
+      if (!reviewJobsInProgress.has(gameId)) {
+        console.log(`[GameReview] Pending review for ${gameId} — starting on click`);
+        runQuickReviewInBackground(gameId);
+      }
       return res.status(202).json({
         success: false,
         message: "Review is being generated. Please wait and use GET to fetch it when ready.",
@@ -872,8 +874,12 @@ router.get("/:gameId", auth, async (req, res) => {
       });
     }
     
-    // Any pending document means generation in flight (with or without stale reviewData).
+    // Pending + no worker: Review page GET starts this one game (not the whole queue).
     if (reviewDoc.status === "pending") {
+      if (!reviewJobsInProgress.has(gameId)) {
+        console.log(`[GameReview] Pending review for ${gameId} — starting on review open`);
+        runQuickReviewInBackground(gameId);
+      }
       return res.status(202).json({
         success: false,
         message: "Review is being generated. Please wait and try again later.",
