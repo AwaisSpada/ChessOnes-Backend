@@ -462,6 +462,25 @@ function isInvalidCompletedReviewStub(reviewData) {
   return typeof o.error === "string" && o.error.length > 0;
 }
 
+/** Completed in DB but FE still polls (analyzedMoves 0 / empty moves). */
+function isUnusableCompletedReview(reviewData) {
+  if (!reviewData) return true;
+  if (isInvalidCompletedReviewStub(reviewData)) return true;
+  const moves = reviewData.moves;
+  if (!Array.isArray(moves) || moves.length === 0) return true;
+  const o = reviewData.overview;
+  if (
+    o &&
+    typeof o.totalMoves === "number" &&
+    o.totalMoves > 0 &&
+    typeof o.analyzedMoves === "number" &&
+    o.analyzedMoves === 0
+  ) {
+    return true;
+  }
+  return false;
+}
+
 /**
  * POST /api/game-review/:gameId/custom-review
  * Starts a temporary custom review run (not persisted to Review collection).
@@ -889,6 +908,22 @@ router.get("/:gameId", auth, async (req, res) => {
     // Pending/failed: Review page polls GET only — start the one shared job here
     // (no FE/mobile change). Second player joins the same job.
     if (reviewDoc.status === "pending" || reviewDoc.status === "failed") {
+      startOnDemandReview(gameId);
+      return res.status(202).json({
+        success: false,
+        message: "Review is being generated. Please wait and try again later.",
+        status: "in_progress",
+      });
+    }
+
+    if (
+      reviewDoc.status === "completed" &&
+      isUnusableCompletedReview(reviewDoc.reviewData)
+    ) {
+      console.log(
+        `[GameReview] GET ${gameId} completed but unusable — on-demand regenerate`
+      );
+      await markReviewPending(gameId);
       startOnDemandReview(gameId);
       return res.status(202).json({
         success: false,
