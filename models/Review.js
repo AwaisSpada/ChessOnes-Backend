@@ -57,6 +57,12 @@ const reviewSchema = new mongoose.Schema(
         type: Number,
         default: 2000,
       },
+      nodes: {
+        type: Number,
+      },
+      preset: {
+        type: String,
+      },
       engineType: {
         type: String,
         enum: ["FULL", "LITE"], // Allow both FULL and LITE engines

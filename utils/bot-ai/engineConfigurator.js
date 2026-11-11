@@ -5,6 +5,8 @@ const {
   endgameSearchBoost,
   mapRatingToStockfishConfig,
   pieceCountFromFen,
+  UCI_ELO_MIN,
+  UCI_ELO_NODES,
 } = require("./difficultyMapper");
 
 function configureEngineForBot(profile, context, botColor) {
@@ -29,8 +31,10 @@ function configureEngineForBot(profile, context, botColor) {
       : profile.personality.tacticalStrength * 0.15;
   const depth = Math.min(40, Math.round(endgameAdjusted.depth + tacticalBoost * 3));
 
-  const multipv = weakClub ? 1 : rating < 1400 ? 3 : 2;
-  const useLimitStrength = rating >= 1400;
+  const useLimitStrength = rating >= UCI_ELO_MIN;
+  const { getWeakClubPlayConfig } = require("./weakClubPlay");
+  const weakPlay = weakClub ? getWeakClubPlayConfig(rating) : null;
+  const multipv = useLimitStrength ? 1 : weakClub ? weakPlay.multipv : 3;
   const minDepthForMultipv = multipv > 1 ? 2 : 1;
   const searchDepth = Math.max(depth, minDepthForMultipv);
 
@@ -48,9 +52,9 @@ function configureEngineForBot(profile, context, botColor) {
       hashMb: 16,
     },
     search: {
-      depth: searchDepth,
-      movetime: endgameAdjusted.movetime,
-      nodes: base.nodes,
+      depth: useLimitStrength || weakClub ? 0 : searchDepth,
+      movetime: useLimitStrength || weakClub ? 0 : endgameAdjusted.movetime,
+      nodes: useLimitStrength ? UCI_ELO_NODES : base.nodes,
       wtime,
       btime,
       winc: context.incrementMs,

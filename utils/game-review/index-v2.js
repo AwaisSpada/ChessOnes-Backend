@@ -7,6 +7,7 @@
 
 const analyzerV2 = require("./analyzer-v2");
 const moveSuggestions = require("./move-suggestions");
+const { lookupOpeningFromUci } = require("./opening-book");
 
 /**
  * Generate complete game review
@@ -14,20 +15,17 @@ const moveSuggestions = require("./move-suggestions");
  * @returns {Promise<Object>} - Complete review object
  */
 async function generateGameReview(options = {}) {
-  const { moves, optionalPgn, depth = 12, movetime = 600, engineType = 'lite' } = options;
+  const { moves, optionalPgn, depth = 12, movetime = 600, nodes, engineType = 'lite' } = options;
 
   try {
     console.log(`[GameReview] ========================================`);
     console.log(`[GameReview] Starting game review generation`);
-    console.log(`[GameReview] Moves: ${moves?.length || 0}, Depth: ${depth}, Movetime: ${movetime}ms`);
+    console.log(
+      `[GameReview] Moves: ${moves?.length || 0}, nodes=${nodes || "legacy"}, Depth: ${depth}, Movetime: ${movetime}ms`
+    );
     console.log(`[GameReview] ========================================`);
 
-    // Initialize engine based on type
-    const engine = require("./engine");
-    // Quick Review only: always use LITE engine.
-    await engine.ensureLiteEngineReady();
-    await engine.sendLiteCommand("ucinewgame", { timeout: 1000 });
-    await engine.sendLiteCommand("isready", { timeout: 5000 });
+    // Review uses the lite worker pool (not the single LITE process / live play).
 
     // Parse moves if PGN provided
     let uciMoves = moves;
@@ -41,7 +39,12 @@ async function generateGameReview(options = {}) {
     }
 
     // Analyze all moves (pass engineType to analyzer)
-    const analyzedMoves = await analyzerV2.analyzeGame(uciMoves, { depth, movetime, engineType: "lite" });
+    const analyzedMoves = await analyzerV2.analyzeGame(uciMoves, {
+      depth,
+      movetime,
+      nodes,
+      engineType: "lite",
+    });
 
     // Build evaluationGraph (Chess.com–style): leading 0.0 at start position, then one White-POV
     // value per ply (side-to-move scores after White's moves are negated so + = better for White).
@@ -141,7 +144,7 @@ async function generateGameReview(options = {}) {
     const summary = generateSummary(movesWithSuggestions);
 
     // Detect opening
-    const opening = detectOpening(uciMoves.slice(0, 12));
+    const opening = lookupOpeningFromUci(uciMoves);
 
     // Detect endgame
     const finalEval = movesWithSuggestions.length > 0 
@@ -352,38 +355,6 @@ function generateSummary(analyzedMoves) {
 }
 
 /**
- * Detect opening from first moves
- */
-function detectOpening(moves) {
-  if (moves.length === 0) return { name: "Unknown", eco: null };
-
-  const firstMove = moves[0]?.toLowerCase();
-  
-  if (firstMove === "e2e4") {
-    if (moves.length > 1 && moves[1]?.toLowerCase() === "e7e5") {
-      if (moves.length > 2 && moves[2]?.toLowerCase() === "g1f3") {
-        return { name: "King's Knight Opening", eco: "C20" };
-      }
-      return { name: "King's Pawn Game", eco: "C20" };
-    }
-    if (moves.length > 1 && moves[1]?.toLowerCase() === "c7c5") {
-      return { name: "Sicilian Defense", eco: "B20" };
-    }
-    return { name: "King's Pawn Opening", eco: "B00" };
-  }
-  
-  if (firstMove === "d2d4") {
-    return { name: "Queen's Pawn Opening", eco: "D00" };
-  }
-  
-  if (firstMove === "c2c4") {
-    return { name: "English Opening", eco: "A10" };
-  }
-
-  return { name: "Unknown", eco: null };
-}
-
-/**
  * Detect endgame phase
  */
 function detectEndgame(moves, finalEvaluation) {
@@ -450,7 +421,7 @@ module.exports = {
   generateGameReview,
   calculatePlayerStats,
   generateSummary,
-  detectOpening,
+  detectOpening: lookupOpeningFromUci,
   detectEndgame,
   generateSuggestions,
   getQualityRating,

@@ -13,7 +13,9 @@
  * 6. Tactical swing detection
  */
 
-const engine = require("./engine"); // Uses FULL engine by default
+const engine = require("./engine"); // replay / legacy single-move path
+const { liteReviewPool, nodesFromReviewOptions } = require("./lite-review-pool");
+const { isBookFen, lookupOpeningAtFen } = require("./opening-book");
 const classifier = require("./classifier");
 const { Chess } = require("chess.js");
 
@@ -60,6 +62,13 @@ function evaluationToCp(evaluation) {
 function resultScoreCp(result) {
   if (!result || !result.evaluation || !result.depth || result.depth <= 0) return null;
   return evaluationToCp(result.evaluation);
+}
+
+function negateEval(evaluation) {
+  if (!evaluation) return { cp: 0 };
+  if (typeof evaluation.mate === "number") return { mate: -evaluation.mate };
+  if (typeof evaluation.cp === "number") return { cp: -evaluation.cp };
+  return { cp: 0 };
 }
 
 function verboseMoveToUci(move) {
@@ -621,61 +630,134 @@ function formatEvaluation(evaluation, isWhiteMove) {
 }
 
 /**
- * Analyze entire game
+ * Analyze entire game: N+1 positions (start + after each ply), Chess.com-style
+ * consecutive evals. Same move-object shape as before for web/mobile.
  */
 async function analyzeGame(moves, options = {}) {
   if (!moves || moves.length === 0) {
     throw new Error("No moves provided for analysis");
   }
 
-  const { depth = 12, movetime = 600, engineType = 'lite' } = options;
-  const analyzedMoves = [];
+  const { depth = 12, movetime = 600 } = options;
   const totalMoves = moves.length;
+  const nodes = nodesFromReviewOptions({ depth, movetime });
 
   console.log(`[GameReview] ========================================`);
-  console.log(`[GameReview] Starting game analysis`);
-  console.log(`[GameReview] Total moves to analyze: ${totalMoves}`);
-  console.log(`[GameReview] Depth: ${depth}, Movetime: ${movetime}ms`);
-  console.log(`[GameReview] Moves array:`, moves.slice(0, 10).join(", "), totalMoves > 10 ? "..." : "");
+  console.log(`[GameReview] Starting game analysis (N+1 positions)`);
+  console.log(
+    `[GameReview] Moves=${totalMoves} mappedNodes=${nodes} (depth=${depth}, movetime=${movetime}ms)`
+  );
   console.log(`[GameReview] ========================================`);
 
-  // Analyze each move sequentially
+  const positions = [];
+  for (let ply = 0; ply <= totalMoves; ply++) {
+    positions.push({ ply, moves: moves.slice(0, ply) });
+  }
+
+  const { results } = await liteReviewPool.analyzePositions(positions, { depth, movetime });
+  const analyzedMoves = [];
+  const bookBoard = new Chess();
+  let lastOpening = null;
+
   for (let i = 0; i < totalMoves; i++) {
-    // Move number in chess notation: both White and Black share the same move number
-    // Move 1: White's first move (index 0) and Black's first move (index 1)
-    // Move 2: White's second move (index 2) and Black's second move (index 3)
     const moveNumber = Math.floor(i / 2) + 1;
-    const movesUpToBefore = moves.slice(0, i);
     const playedMove = moves[i];
+    const before = results[i];
+    const after = results[i + 1];
+    const isWhiteMove = i % 2 === 0;
 
+    let isBookMove = false;
     try {
-      const moveAnalysis = await analyzeMove(
-        movesUpToBefore,
-        playedMove,
-        moveNumber,
-        totalMoves,
-        { depth, movetime, engineType }
-      );
+      const played = bookBoard.move(playedMove);
+      if (played) {
+        const fen = bookBoard.fen();
+        isBookMove = isBookFen(fen);
+        const named = lookupOpeningAtFen(fen);
+        if (named) lastOpening = named;
+      }
+    } catch (_e) {
+      isBookMove = false;
+    }
+    const opening = lastOpening
+      ? { name: lastOpening.name, eco: lastOpening.eco || null }
+      : undefined;
 
-      analyzedMoves.push(moveAnalysis);
-    } catch (error) {
-      console.error(`[GameReview] Failed to analyze move ${moveNumber}:`, error.message);
+    if (!before || before.error || !after || after.error) {
       analyzedMoves.push({
         moveNumber,
         playedMove,
-        error: error.message,
+        error: (before && before.error) || (after && after.error) || "position eval failed",
         label: "unknown",
+        isBookMove,
+        opening,
       });
+      continue;
     }
 
-    // Small delay to prevent overwhelming the engine
-    if (i < totalMoves - 1) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+    const evalBefore = before.evaluation || { cp: 0 };
+    const evalAfterRaw = after.evaluation || { cp: 0 };
+    const evalBestAfterRaw = negateEval(evalBefore);
+    const evalBestAfter = evalBefore;
+    const evalAfter = negateEval(evalAfterRaw);
+    const bestMove = before.bestMove || null;
+    const pvBest = Array.isArray(before.pv) ? before.pv : [];
+
+    const centipawnLoss = calculateCentipawnLoss(evalBestAfter, evalAfter, isWhiteMove);
+    const missedMate = detectMissedMate(evalBefore, evalBestAfter, evalAfter, isWhiteMove);
+    const tacticalSwing = detectTacticalSwing(evalBefore, evalAfter, isWhiteMove);
+    const isBestMove =
+      (bestMove || "").toLowerCase() === (playedMove || "").toLowerCase();
+    const hadMate = typeof evalBestAfter.mate === "number" && evalBestAfter.mate > 0;
+
+    const label = classifier.classifyMove(centipawnLoss, {
+      hadMate,
+      isBestMove,
+      isBookMove,
+      missedMate,
+    });
+
+    const playedCp = evaluationToCp(evalBefore);
+    const alternativeLines = normalizeAlternativeLines(
+      (before.alternativeLines || []).map((line) => ({
+        move: line.move,
+        pv: line.pv,
+        evaluation: line.evaluation,
+        gainCp:
+          typeof playedCp === "number" && line.evaluation
+            ? evaluationToCp(line.evaluation) - playedCp
+            : undefined,
+      }))
+    );
+
+    let parsedEvalForGraph = 0;
+    if (typeof evalAfterRaw.mate === "number") {
+      parsedEvalForGraph = evalAfterRaw.mate > 0 ? 10 : -10;
+    } else if (typeof evalAfterRaw.cp === "number") {
+      parsedEvalForGraph = Math.max(-10, Math.min(10, evalAfterRaw.cp / 100));
     }
+
+    analyzedMoves.push({
+      moveNumber,
+      playedMove,
+      bestMove: bestMove || null,
+      evalBefore: formatEvaluation(evalBefore, isWhiteMove),
+      evalAfter: formatEvaluation(evalAfterRaw, true),
+      evalBestAfter: formatEvaluation(evalBestAfterRaw, true),
+      evalAfterNumeric: parsedEvalForGraph,
+      centipawnLoss: Math.round(centipawnLoss),
+      label,
+      pv: pvBest.slice(0, 5),
+      alternativeLines,
+      missedMate,
+      tacticalSwing,
+      isBestMove,
+      isBookMove,
+      isWhiteMove,
+      opening,
+    });
   }
 
   console.log(`[GameReview] Completed analysis of ${analyzedMoves.length} moves`);
-
   return analyzedMoves;
 }
 

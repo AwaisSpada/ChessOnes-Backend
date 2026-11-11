@@ -34,10 +34,12 @@ function computeQuickReviewTimeoutMs(_moveCount, _options = {}) {
  * @returns {Promise<Object>} - Quick review object (same structure as full review)
  */
 async function generateQuickReview(moves, options = {}) {
-  const { depth = 12, movetime = 600 } = options;
+  const { depth = 12, movetime = 600, nodes } = options;
   try {
     console.log(`[QuickReview] Starting quick review generation with LITE engine`);
-    console.log(`[QuickReview] Moves: ${moves.length}, Depth: ${depth}, Movetime: ${movetime}ms`);
+    console.log(
+      `[QuickReview] Moves: ${moves.length}, nodes=${nodes || "legacy"}, Depth: ${depth}, Movetime: ${movetime}ms`
+    );
 
     const timeout = computeQuickReviewTimeoutMs(moves.length, { movetime, depth });
     console.log(
@@ -48,6 +50,7 @@ async function generateQuickReview(moves, options = {}) {
       moves,
       depth,
       movetime,
+      nodes,
       engineType: "lite", // Use LITE engine
     });
 

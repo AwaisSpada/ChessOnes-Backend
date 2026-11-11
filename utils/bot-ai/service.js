@@ -5,7 +5,12 @@
 
 const { Chess } = require("chess.js");
 const { configureEngineForBot } = require("./engineConfigurator");
-const { applyMistakeLayer, applyClubWeakMove } = require("./mistakeGenerator");
+const { applyMistakeLayer } = require("./mistakeGenerator");
+const { isWeakClubBot } = require("./difficultyMapper");
+const {
+  applyWeakClubBehavior,
+  weakClubCandidateWeights,
+} = require("./weakClubPlay");
 const { selectEngineMove, shouldUseKillerInstinct } = require("./moveSelector");
 const { tryOpeningBookMove } = require("./openingBook");
 const {
@@ -115,21 +120,27 @@ async function pickBotMove({ profile, context, botColor, searchEngine }) {
 
   const phase = detectGamePhase(context.fen);
   const lines = Array.isArray(search?.lines) ? search.lines : [];
-  const killer = shouldUseKillerInstinct(lines, phase, profile.rating);
-  let selected = selectEngineMove(lines, profile, { killerInstinct: killer });
+  const weak = isWeakClubBot(profile.rating);
+  const killer = weak ? false : shouldUseKillerInstinct(lines, phase, profile.rating);
+  let selected = selectEngineMove(lines, profile, {
+    killerInstinct: killer,
+    maxCandidates: weak ? 8 : 3,
+    candidateWeights: weak ? weakClubCandidateWeights(profile.rating) : undefined,
+  });
 
   if (!selected.uci && search?.bestMoveUci) {
     selected = { uci: search.bestMoveUci, rank: 1 };
   }
 
-  if (!killer) {
+  if (weak) {
+    selected = applyWeakClubBehavior(selected, context.fen, profile);
+  } else if (!killer && profile.rating < 1320) {
     selected = applyMistakeLayer(selected, lines, profile, {
       inCheck: context.inCheck,
       legalMoveCount: context.legalMoveCount,
       botClockMs: context.botClockMs,
       phase,
     });
-    selected = applyClubWeakMove(selected, context.fen, profile);
   }
 
   if (!selected.uci) {

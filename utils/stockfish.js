@@ -57,8 +57,8 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
   let movetime = mapped.movetime;
   let nodes = mapped.nodes;
 
-  let useLimitStrength = siteElo >= 1400;
-  let multipv = siteElo <= 1250 ? 1 : siteElo < 1400 ? 3 : 2;
+  let useLimitStrength = siteElo >= 1320;
+  let multipv = useLimitStrength ? 1 : siteElo <= 1250 ? 8 : 3;
 
   const delayT = (siteElo - 500) / 2300;
   let artificialDelay = Math.round(3000 - delayT * 2000);
@@ -91,7 +91,7 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
       nodes = Math.max(siteElo <= 1250 ? 200 : 1000, Math.round(customConfig.nodes));
     }
     if (typeof customConfig.multipv === "number") {
-      multipv = Math.max(1, Math.min(3, Math.round(customConfig.multipv)));
+      multipv = Math.max(1, Math.min(8, Math.round(customConfig.multipv)));
     }
     if (typeof customConfig.useLimitStrength === "boolean") {
       useLimitStrength = customConfig.useLimitStrength;
@@ -597,7 +597,7 @@ function initEngine() {
             // Raw MultiPV lines — personality / mistakes select outside the engine I/O.
             const multiPv = Array.from(req.multiPvLines?.values?.() || [])
               .sort((a, b) => a.rank - b.rank)
-              .slice(0, 3);
+              .slice(0, 8);
             const lines = multiPv.map((l) => ({
               rank: l.rank,
               uci: l.uci,
@@ -778,12 +778,15 @@ async function getBestMoveFromEngine(
     effectiveNodes = mapped.nodes;
     const endgameCfg = BOT_INTELLIGENCE_CONFIG.endgame;
     const { phase: egPhase, pieceCount: egPieces } = getBoardPhase(board);
-    if (egPhase === "endgame" || egPieces <= endgameCfg.pieceCountMax) {
+    if (
+      !useLimitStrength &&
+      (egPhase === "endgame" || egPieces <= endgameCfg.pieceCountMax)
+    ) {
       effectiveDepth = Math.min(40, mapped.depth + endgameCfg.depthBonus);
     }
   }
 
-  if (multipv > 1) {
+  if (multipv > 1 && effectiveDepth > 0) {
     effectiveDepth = Math.max(effectiveDepth, 2);
   }
   const { phase, pieceCount } = getBoardPhase(board);
@@ -820,14 +823,18 @@ async function getBestMoveFromEngine(
   engineProcess.stdin.write(`setoption name MultiPV value ${multipv}\n`);
   engineProcess.stdin.write("setoption name Threads value 1\n");
   engineProcess.stdin.write("setoption name Hash value 16\n");
-  // Same go shape as mobile: depth + movetime + nodes (no clock in go).
-  const goParts = [
-    "go",
-    `depth ${effectiveDepth}`,
-    `movetime ${Math.max(80, effectiveMovetime)}`,
-  ];
-  if (effectiveNodes > 0) {
-    goParts.push(`nodes ${Math.round(effectiveNodes)}`);
+  // LimitStrength / weak-club: nodes only. Other bot paths: depth + movetime + nodes.
+  const goParts = ["go"];
+  const nodesOnly =
+    useLimitStrength || (Number(effectiveDepth) <= 0 && Number(effectiveNodes) > 0);
+  if (nodesOnly) {
+    goParts.push(`nodes ${Math.round(effectiveNodes > 0 ? effectiveNodes : 300000)}`);
+  } else {
+    goParts.push(`depth ${effectiveDepth}`);
+    goParts.push(`movetime ${Math.max(80, effectiveMovetime)}`);
+    if (effectiveNodes > 0) {
+      goParts.push(`nodes ${Math.round(effectiveNodes)}`);
+    }
   }
   const goCmd = goParts.join(" ");
   console.log(

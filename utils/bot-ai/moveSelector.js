@@ -48,10 +48,11 @@ const scoreLine = (line, profile, spiceAllowed) => {
 };
 
 function selectEngineMove(lines, profile, options = {}) {
+  const maxCandidates = options.maxCandidates || 3;
   const ordered = [...lines]
     .filter((line) => line.uci)
     .sort((a, b) => a.rank - b.rank)
-    .slice(0, 3);
+    .slice(0, maxCandidates);
 
   if (ordered.length === 0) {
     return { uci: "", rank: 1 };

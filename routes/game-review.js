@@ -28,6 +28,7 @@ const {
   hasReview
 } = require("../utils/game-review/review-storage");
 const { getReplayEvaluation } = require("../utils/game-review/replay-eval");
+const { resolveReviewEngine } = require("../utils/game-review/review-nodes");
 
 const router = express.Router();
 const reviewJobsInProgress = new Set();
@@ -51,18 +52,6 @@ function cleanupCustomReviewJob(jobId) {
   }, CUSTOM_REVIEW_JOB_TTL_MS);
 }
 
-function clampReviewDepth(d) {
-  const n = Number(d);
-  if (!Number.isFinite(n)) return 12;
-  return Math.max(6, Math.min(20, Math.round(n)));
-}
-
-function clampReviewMovetime(ms) {
-  const n = Number(ms);
-  if (!Number.isFinite(n)) return 600;
-  return Math.max(300, Math.min(8000, Math.round(n)));
-}
-
 function createCustomReviewJobId(gameId) {
   const rand = Math.random().toString(36).slice(2, 10);
   return `${gameId}-${Date.now()}-${rand}`;
@@ -70,17 +59,17 @@ function createCustomReviewJobId(gameId) {
 
 /**
  * @param {string} gameId
- * @param {{ depth?: number; movetime?: number }} [engineOptions] Defaults: depth 12, movetime 600 (LITE).
+ * @param {{ nodes?: number; preset?: string; depth?: number; movetime?: number }} [engineOptions]
+ * Defaults: Fast preset (300000 nodes).
  */
 async function runQuickReviewInBackground(gameId, engineOptions = {}) {
   if (reviewJobsInProgress.has(gameId)) {
     return;
   }
-  const depth = clampReviewDepth(engineOptions.depth);
-  const movetime = clampReviewMovetime(engineOptions.movetime);
+  const engine = resolveReviewEngine(engineOptions);
   reviewJobsInProgress.add(gameId);
   console.log(
-    `[GameReview] Background quick review started for game ${gameId} (depth=${depth}, movetime=${movetime}ms)`
+    `[GameReview] Background quick review started for game ${gameId} (preset=${engine.preset}, nodes=${engine.nodes})`
   );
 
   setImmediate(async () => {
@@ -95,9 +84,6 @@ async function runQuickReviewInBackground(gameId, engineOptions = {}) {
       if (!stockfishPathExists) {
         console.warn(`[GameReview] Stockfish candidate path missing: ${candidatePath}`);
       }
-
-      const engine = require("../utils/game-review/engine");
-      await engine.ensureLiteEngineReady();
 
       const game = await Game.findOne({ gameId })
         .populate("players.white players.black", "username fullName avatar rating isDeleted")
@@ -123,8 +109,9 @@ async function runQuickReviewInBackground(gameId, engineOptions = {}) {
       }
       // Timeout is enforced inside generateQuickReview (move-count based); no second race here.
       const review = await generateQuickReview(uciMoves, {
-        depth,
-        movetime,
+        nodes: engine.nodes,
+        depth: engine.depth,
+        movetime: engine.movetime,
       });
 
       if (!review) {
@@ -132,8 +119,10 @@ async function runQuickReviewInBackground(gameId, engineOptions = {}) {
       }
       attachMoveTimingsToReview(review, game);
       await storeReview(gameId, review, {
-        depth,
-        movetime,
+        depth: engine.depth,
+        movetime: engine.movetime,
+        nodes: engine.nodes,
+        preset: engine.preset,
         engineType: "LITE",
       });
       console.log(`[GameReview] Background quick review completed for game ${gameId}`);
@@ -488,8 +477,7 @@ function isUnusableCompletedReview(reviewData) {
 router.post("/:gameId/custom-review", auth, async (req, res) => {
   try {
     const { gameId } = req.params;
-    const depth = clampReviewDepth(req.body?.depth);
-    const movetime = clampReviewMovetime(req.body?.movetime);
+    const engine = resolveReviewEngine(req.body || {});
 
     const game = await Game.findOne({ gameId })
       .populate("players.white players.black", "username fullName avatar rating isDeleted")
@@ -529,8 +517,10 @@ router.post("/:gameId/custom-review", auth, async (req, res) => {
       gameId,
       userId: String(req.user._id),
       startedAt,
-      depth,
-      movetime,
+      nodes: engine.nodes,
+      preset: engine.preset,
+      depth: engine.depth,
+      movetime: engine.movetime,
       review: null,
       error: null,
       completedAt: null,
@@ -543,15 +533,21 @@ router.post("/:gameId/custom-review", auth, async (req, res) => {
           throw new Error("Could not convert game moves to UCI format");
         }
 
-        const review = await generateQuickReview(uciMoves, { depth, movetime });
+        const review = await generateQuickReview(uciMoves, {
+          nodes: engine.nodes,
+          depth: engine.depth,
+          movetime: engine.movetime,
+        });
         const enriched = enrichReviewWithGameData(review, game, req.user._id);
         enriched.reviewMetadata = {
           status: "completed",
           engineType: "LITE",
           isQuickReview: true,
           generatedAt: new Date().toISOString(),
-          depth,
-          movetime,
+          depth: engine.depth,
+          movetime: engine.movetime,
+          nodes: engine.nodes,
+          preset: engine.preset,
         };
 
         customReviewJobs.set(jobId, {
@@ -576,8 +572,10 @@ router.post("/:gameId/custom-review", auth, async (req, res) => {
       success: true,
       status: "in_progress",
       jobId,
-      depth,
-      movetime,
+      nodes: engine.nodes,
+      preset: engine.preset,
+      depth: engine.depth,
+      movetime: engine.movetime,
       startedAt,
     });
   } catch (error) {
@@ -617,6 +615,8 @@ router.get("/:gameId/custom-review/:jobId", auth, async (req, res) => {
         success: true,
         status: "in_progress",
         jobId,
+        nodes: job.nodes,
+        preset: job.preset,
         depth: job.depth,
         movetime: job.movetime,
         startedAt: job.startedAt,
@@ -656,11 +656,10 @@ router.get("/:gameId/custom-review/:jobId", auth, async (req, res) => {
 router.post("/:gameId/regenerate", auth, async (req, res) => {
   try {
     const { gameId } = req.params;
-    const depth = clampReviewDepth(req.body?.depth);
-    const movetime = clampReviewMovetime(req.body?.movetime);
+    const engine = resolveReviewEngine(req.body || {});
 
     console.log(
-      `[GameReview] Regenerate (user) gameId=${gameId} user=${req.user._id} depth=${depth} movetime=${movetime}ms`
+      `[GameReview] Regenerate (user) gameId=${gameId} user=${req.user._id} preset=${engine.preset} nodes=${engine.nodes}`
     );
 
     const regenerationStartedAt = new Date().toISOString();
@@ -670,8 +669,10 @@ router.post("/:gameId/regenerate", auth, async (req, res) => {
         success: true,
         status: "in_progress",
         message: "Review generation is already in progress for this game.",
-        depth,
-        movetime,
+        nodes: engine.nodes,
+        preset: engine.preset,
+        depth: engine.depth,
+        movetime: engine.movetime,
         regenerationStartedAt,
       });
     }
@@ -708,14 +709,16 @@ router.post("/:gameId/regenerate", auth, async (req, res) => {
     }
 
     await markReviewPending(gameId);
-    runQuickReviewInBackground(gameId, { depth, movetime });
+    runQuickReviewInBackground(gameId, { nodes: engine.nodes, preset: engine.preset });
 
     return res.status(202).json({
       success: true,
       status: "in_progress",
       message: "Review is being regenerated with your engine settings",
-      depth,
-      movetime,
+      nodes: engine.nodes,
+      preset: engine.preset,
+      depth: engine.depth,
+      movetime: engine.movetime,
       regenerationStartedAt,
     });
   } catch (error) {
@@ -1001,11 +1004,22 @@ router.get("/:gameId", auth, async (req, res) => {
     }
     
     // Add metadata about review type
+    const ec = reviewDoc.engineConfig || {};
+    const resolved = resolveReviewEngine({
+      nodes: ec.nodes,
+      preset: ec.preset,
+      depth: ec.depth,
+      movetime: ec.movetime,
+    });
     enrichedReview.reviewMetadata = {
       status: reviewDoc.status,
-      engineType: reviewDoc.engineConfig?.engineType || "LITE",
-      isQuickReview: reviewDoc.engineConfig?.engineType === "LITE",
+      engineType: ec.engineType || "LITE",
+      isQuickReview: ec.engineType === "LITE",
       generatedAt: reviewDoc.generatedAt,
+      depth: resolved.depth,
+      movetime: resolved.movetime,
+      nodes: resolved.nodes,
+      preset: resolved.preset,
     };
     
     res.json({
@@ -1135,6 +1149,14 @@ router.get("/:gameId/replay-eval", auth, async (req, res) => {
       message: error.message || "Failed to get replay evaluation",
       error: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
+  }
+});
+
+setImmediate(() => {
+  try {
+    require("../utils/game-review/opening-book").loadBook();
+  } catch (err) {
+    console.warn("[OpeningBook] preload failed:", err.message);
   }
 });
 
