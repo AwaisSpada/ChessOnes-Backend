@@ -3114,6 +3114,17 @@ app.use("*", (req, res) => {
 const PORT = process.env.PORT || 5050;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const engineVersionPath = path.join(__dirname, "stockfish", "ENGINE_VERSION");
+    const engineVersion = fs.existsSync(engineVersionPath)
+      ? fs.readFileSync(engineVersionPath, "utf8").trim()
+      : "unknown";
+    console.log(`[Stockfish] ENGINE_VERSION file: ${engineVersion}`);
+  } catch (err) {
+    console.warn(`[Stockfish] Could not read ENGINE_VERSION: ${err.message}`);
+  }
 });
 
 module.exports = { app, io };

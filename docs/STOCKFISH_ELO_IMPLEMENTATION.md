@@ -202,4 +202,4 @@ back/
 ---
 
 **Last Updated**: Based on current codebase state  
-**Stockfish Version**: Stockfish 17
+**Stockfish Version**: Stockfish 19

@@ -21,6 +21,8 @@ function isUsableStockfishBinary(filePath) {
 
 /**
  * Resolve a real Stockfish binary for the current OS.
+ * Linux/Windows files are official Stockfish 19 universal builds, kept at the
+ * legacy avx2 filenames so Render/Windows paths stay unchanged.
  * @param {string} stockfishDir Absolute path to project `stockfish/` folder
  */
 function resolveStockfishBinary(stockfishDir) {

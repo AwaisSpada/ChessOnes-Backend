@@ -4,7 +4,7 @@
   "description": "Chess application backend with Express and MongoDB",
   "main": "server.js",
   "scripts": {
-    "start": "ls -lh ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2 && node server.js",
+    "start": "ls -lh ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2; (printf 'uci\\nquit\\n' | ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2 2>/dev/null | grep -E 'Stockfish |^id name' || true); node server.js",
     "dev": "ls -lh ./stockfish/Linux/stockfish-ubuntu-x86-64-avx2 || dir stockfish\\Linux && nodemon server.js",
     "test": "jest",
     "postinstall": "node scripts/setup-stockfish.js"

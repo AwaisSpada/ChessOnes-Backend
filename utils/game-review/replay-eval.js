@@ -7,7 +7,7 @@
  * Configuration (defaults align with stored game review):
  * - Depth: 12 (default)
  * - Movetime: 600ms
- * - Uses Stockfish 17.1 (same binary as FULL, different process)
+ * - Uses Stockfish 19 (same binary as FULL, different process)
  */
 
 const engine = require("./engine");
