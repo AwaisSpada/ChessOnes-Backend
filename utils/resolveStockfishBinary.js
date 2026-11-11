@@ -50,7 +50,71 @@ function resolveStockfishBinary(stockfishDir) {
   return "stockfish";
 }
 
+/** Print UCI `id name` on boot so Render `npm run dev` logs show the engine. */
+function logStockfishIdentity() {
+  const { spawn } = require("child_process");
+  const bin = resolveStockfishBinary(path.join(__dirname, "..", "stockfish"));
+  console.log(`[Stockfish] Boot probe binary: ${bin}`);
+
+  let child;
+  try {
+    child = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"] });
+  } catch (err) {
+    console.warn(`[Stockfish] Boot probe spawn failed: ${err.message}`);
+    return;
+  }
+
+  let buf = "";
+  let printed = false;
+  const done = () => {
+    if (printed) return;
+    printed = true;
+    const lines = buf.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const identity = lines.filter(
+      (l) => l.startsWith("id name") || l.startsWith("Stockfish ")
+    );
+    if (identity.length) {
+      identity.forEach((l) => console.log(`[Stockfish] ${l}`));
+    } else {
+      console.warn("[Stockfish] Boot probe got no id name");
+    }
+    try {
+      child.stdin.write("quit\n");
+    } catch {
+      /* ignore */
+    }
+    try {
+      child.kill();
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const timer = setTimeout(done, 4000);
+  child.stdout.on("data", (chunk) => {
+    buf += chunk.toString();
+    if (buf.includes("id name") || buf.includes("uciok")) {
+      clearTimeout(timer);
+      done();
+    }
+  });
+  child.stderr.on("data", (chunk) => {
+    buf += chunk.toString();
+  });
+  child.on("error", (err) => {
+    clearTimeout(timer);
+    console.warn(`[Stockfish] Boot probe error: ${err.message}`);
+  });
+  try {
+    child.stdin.write("uci\n");
+  } catch (err) {
+    clearTimeout(timer);
+    console.warn(`[Stockfish] Boot probe stdin failed: ${err.message}`);
+  }
+}
+
 module.exports = {
   isUsableStockfishBinary,
   resolveStockfishBinary,
+  logStockfishIdentity,
 };

@@ -3122,6 +3122,8 @@ server.listen(PORT, () => {
       ? fs.readFileSync(engineVersionPath, "utf8").trim()
       : "unknown";
     console.log(`[Stockfish] ENGINE_VERSION file: ${engineVersion}`);
+    const { logStockfishIdentity } = require("./utils/resolveStockfishBinary");
+    logStockfishIdentity();
   } catch (err) {
     console.warn(`[Stockfish] Could not read ENGINE_VERSION: ${err.message}`);
   }
