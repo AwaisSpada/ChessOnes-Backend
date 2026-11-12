@@ -6,8 +6,22 @@ const clampElo = (elo) => Math.max(500, Math.min(2800, Math.round(elo)));
 const WEAK_CLUB_MAX_ELO = 1250;
 /** Stockfish 19 UCI_Elo floor. At/above this, LimitStrength + UCI_Elo is the handicap. */
 const UCI_ELO_MIN = 1320;
-/** Search budget for LimitStrength bots: nodes only (no depth/movetime). */
-const UCI_ELO_NODES = 300000;
+/** Tina starts at 4 lac; each catalog step +1 lac. */
+const UCI_ELO_NODES = 400000;
+
+function limitStrengthNodes(elo) {
+  const siteElo = clampElo(elo);
+  if (siteElo < 1550) return 400000;
+  if (siteElo < 1700) return 500000;
+  if (siteElo < 1900) return 600000;
+  if (siteElo < 2100) return 700000;
+  if (siteElo < 2300) return 800000;
+  if (siteElo < 2450) return 900000;
+  if (siteElo < 2600) return 1000000;
+  if (siteElo < 2750) return 1100000;
+  if (siteElo < 2800) return 1200000;
+  return 1300000;
+}
 
 function isWeakClubBot(elo) {
   return clampElo(elo) <= WEAK_CLUB_MAX_ELO;
@@ -35,6 +49,7 @@ function mapRatingToStockfishConfig(elo, timeRemainingMs = null) {
   let depth;
   let movetime;
   let nodes;
+  let multipv = siteElo >= UCI_ELO_MIN ? 1 : 3;
 
   if (weak) {
     const w = weakClubSearch(siteElo);
@@ -42,6 +57,11 @@ function mapRatingToStockfishConfig(elo, timeRemainingMs = null) {
     depth = w.depth;
     nodes = w.nodes;
     movetime = w.movetime;
+    multipv = w.multipv;
+  } else if (siteElo >= UCI_ELO_MIN) {
+    depth = 0;
+    movetime = 0;
+    nodes = limitStrengthNodes(siteElo);
   } else {
     if (siteElo <= 600) depth = 2;
     else if (siteElo <= 800) depth = 3;
@@ -65,7 +85,7 @@ function mapRatingToStockfishConfig(elo, timeRemainingMs = null) {
     else nodes = 1800000;
   }
 
-  if (!weak && typeof timeRemainingMs === "number" && timeRemainingMs > 0) {
+  if (!weak && siteElo < UCI_ELO_MIN && typeof timeRemainingMs === "number" && timeRemainingMs > 0) {
     const reserve = Math.max(50, Math.min(800, Math.floor(timeRemainingMs * 0.04)));
     const maxThinkBudget = Math.max(80, timeRemainingMs - reserve);
     movetime = Math.min(movetime, maxThinkBudget);
@@ -78,7 +98,7 @@ function mapRatingToStockfishConfig(elo, timeRemainingMs = null) {
     }
   }
 
-  return { siteElo, engineElo, skillLevel, depth, movetime, nodes };
+  return { siteElo, engineElo, skillLevel, depth, movetime, nodes, multipv };
 }
 
 function pieceCountFromFen(fen) {
@@ -113,4 +133,5 @@ module.exports = {
   WEAK_CLUB_MAX_ELO,
   UCI_ELO_MIN,
   UCI_ELO_NODES,
+  limitStrengthNodes,
 };

@@ -1,5 +1,5 @@
 /**
- * Weak-club bots (≤1250): Skill 0, nodes-only, MultiPV 8, table dice.
+ * Weak-club bots (≤1250): Skill 0, nodes-only, MultiPV 8→4, table dice.
  * Mate / free piece / hanging / random-legal — not the old 2nd-PV mistake layer.
  */
 
@@ -7,10 +7,10 @@ const { Chess } = require("chess.js");
 
 const PRESETS = [
   { maxElo: 500, skill: 0, nodes: 2000, multipv: 8, randomLegal: 0.2, mateIn1: 0.55, takeFree: 0.65, noticeHang: 0.5 },
-  { maxElo: 750, skill: 0, nodes: 3000, multipv: 8, randomLegal: 0.14, mateIn1: 0.65, takeFree: 0.75, noticeHang: 0.6 },
-  { maxElo: 900, skill: 0, nodes: 5000, multipv: 8, randomLegal: 0.09, mateIn1: 0.75, takeFree: 0.85, noticeHang: 0.7 },
-  { maxElo: 1100, skill: 0, nodes: 8000, multipv: 8, randomLegal: 0.05, mateIn1: 0.85, takeFree: 0.92, noticeHang: 0.8 },
-  { maxElo: 1250, skill: 0, nodes: 12000, multipv: 8, randomLegal: 0.035, mateIn1: 0.9, takeFree: 0.95, noticeHang: 0.86 },
+  { maxElo: 750, skill: 0, nodes: 3000, multipv: 7, randomLegal: 0.14, mateIn1: 0.65, takeFree: 0.75, noticeHang: 0.6 },
+  { maxElo: 900, skill: 0, nodes: 5000, multipv: 6, randomLegal: 0.09, mateIn1: 0.75, takeFree: 0.85, noticeHang: 0.7 },
+  { maxElo: 1100, skill: 0, nodes: 8000, multipv: 5, randomLegal: 0.05, mateIn1: 0.85, takeFree: 0.92, noticeHang: 0.8 },
+  { maxElo: 1250, skill: 0, nodes: 12000, multipv: 4, randomLegal: 0.035, mateIn1: 0.9, takeFree: 0.95, noticeHang: 0.86 },
 ];
 
 const LOOSE_WEIGHTS = [0.22, 0.18, 0.14, 0.12, 0.11, 0.09, 0.08, 0.06];
@@ -23,8 +23,12 @@ function getWeakClubPlayConfig(elo) {
 }
 
 function weakClubCandidateWeights(elo) {
+  const play = getWeakClubPlayConfig(elo);
+  const n = Math.max(1, Math.min(8, play.multipv || 8));
   const t = Math.max(0, Math.min(1, (Math.round(Number(elo) || 500) - 500) / 750));
-  const w = LOOSE_WEIGHTS.map((a, i) => a + (TIGHT_WEIGHTS[i] - a) * t);
+  const w = LOOSE_WEIGHTS.slice(0, n).map(
+    (a, i) => a + (TIGHT_WEIGHTS[i] - a) * t
+  );
   const sum = w.reduce((s, x) => s + x, 0) || 1;
   return w.map((x) => x / sum);
 }

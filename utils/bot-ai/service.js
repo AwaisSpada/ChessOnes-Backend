@@ -9,6 +9,7 @@ const { applyMistakeLayer } = require("./mistakeGenerator");
 const { isWeakClubBot } = require("./difficultyMapper");
 const {
   applyWeakClubBehavior,
+  getWeakClubPlayConfig,
   weakClubCandidateWeights,
 } = require("./weakClubPlay");
 const { selectEngineMove, shouldUseKillerInstinct } = require("./moveSelector");
@@ -121,10 +122,11 @@ async function pickBotMove({ profile, context, botColor, searchEngine }) {
   const phase = detectGamePhase(context.fen);
   const lines = Array.isArray(search?.lines) ? search.lines : [];
   const weak = isWeakClubBot(profile.rating);
+  const weakPlay = weak ? getWeakClubPlayConfig(profile.rating) : null;
   const killer = weak ? false : shouldUseKillerInstinct(lines, phase, profile.rating);
   let selected = selectEngineMove(lines, profile, {
     killerInstinct: killer,
-    maxCandidates: weak ? 8 : 3,
+    maxCandidates: weak ? weakPlay.multipv : 3,
     candidateWeights: weak ? weakClubCandidateWeights(profile.rating) : undefined,
   });
 

@@ -58,7 +58,7 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
   let nodes = mapped.nodes;
 
   let useLimitStrength = siteElo >= 1320;
-  let multipv = useLimitStrength ? 1 : siteElo <= 1250 ? 8 : 3;
+  let multipv = mapped.multipv || (useLimitStrength ? 1 : 3);
 
   const delayT = (siteElo - 500) / 2300;
   let artificialDelay = Math.round(3000 - delayT * 2000);
@@ -799,7 +799,14 @@ async function getBestMoveFromEngine(
         pendingRequest = null;
       }
       reject(new Error("Stockfish move timeout"));
-    }, Math.min(45000, Math.max(8000, effectiveMovetime * 4 + 2000)));
+    }, Math.min(
+      45000,
+      Math.max(
+        8000,
+        effectiveMovetime * 4 + 2000,
+        Number(effectiveNodes) > 0 ? Math.ceil(Number(effectiveNodes) / 40) + 5000 : 0
+      )
+    ));
 
     pendingRequest = {
       resolve,

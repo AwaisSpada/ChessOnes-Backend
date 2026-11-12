@@ -6,7 +6,7 @@ const {
   mapRatingToStockfishConfig,
   pieceCountFromFen,
   UCI_ELO_MIN,
-  UCI_ELO_NODES,
+  limitStrengthNodes,
 } = require("./difficultyMapper");
 
 function configureEngineForBot(profile, context, botColor) {
@@ -54,7 +54,7 @@ function configureEngineForBot(profile, context, botColor) {
     search: {
       depth: useLimitStrength || weakClub ? 0 : searchDepth,
       movetime: useLimitStrength || weakClub ? 0 : endgameAdjusted.movetime,
-      nodes: useLimitStrength ? UCI_ELO_NODES : base.nodes,
+      nodes: useLimitStrength ? limitStrengthNodes(rating) : base.nodes,
       wtime,
       btime,
       winc: context.incrementMs,
