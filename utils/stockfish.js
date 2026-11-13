@@ -101,6 +101,14 @@ function getStockfishConfig(elo, timeRemaining = null, customConfig = null) {
     } else if (typeof customConfig.artificialDelayMs === "number") {
       artificialDelay = Math.max(0, Math.round(customConfig.artificialDelayMs));
     }
+    // Hints are coaching, not the bot ladder: full skill, depth+movetime, no LimitStrength nodes.
+    if (customConfig.hintMode === true) {
+      useLimitStrength = false;
+      nodes = 0;
+      multipv = 1;
+      skillLevel = 20;
+      artificialDelay = 0;
+    }
   }
 
   return {
@@ -832,8 +840,10 @@ async function getBestMoveFromEngine(
   engineProcess.stdin.write("setoption name Hash value 16\n");
   // LimitStrength / weak-club: nodes only. Other bot paths: depth + movetime + nodes.
   const goParts = ["go"];
+  const hintMode = Boolean(customConfig && customConfig.hintMode);
   const nodesOnly =
-    useLimitStrength || (Number(effectiveDepth) <= 0 && Number(effectiveNodes) > 0);
+    !hintMode &&
+    (useLimitStrength || (Number(effectiveDepth) <= 0 && Number(effectiveNodes) > 0));
   if (nodesOnly) {
     goParts.push(`nodes ${Math.round(effectiveNodes > 0 ? effectiveNodes : 300000)}`);
   } else {
@@ -914,6 +924,7 @@ async function getBestMove(
       return getFallbackMove(board, currentTurn);
     } catch (err) {
       console.error("Stockfish hint error, using fallback move:", err.message);
+      if (cfg.hintMode === true) throw err;
       return getFallbackMove(board, currentTurn);
     }
   }

@@ -7,8 +7,8 @@ const requirePoliciesAccepted = require("../middleware/requirePoliciesAccepted")
 const router = express.Router();
 const HINT_CACHE_TTL_MS = 30000;
 const HINT_STALE_TTL_MS = 180000;
-const HINT_ENGINE_TIMEOUT_MS = 700;
-const HINT_FALLBACK_TIMEOUT_MS = 1300;
+const HINT_ENGINE_TIMEOUT_MS = 2500;
+const HINT_FALLBACK_TIMEOUT_MS = 4000;
 const hintCache = new Map();
 
 function getHintCacheKey(board, currentTurn, moveHistory) {
@@ -343,8 +343,10 @@ router.post("/hint", auth, requirePoliciesAccepted, async (req, res) => {
     const hintElo = 2200;
     const hintConfig = {
       elo: hintElo,
-      depth: 8,
-      movetime: 140,
+      depth: 12,
+      movetime: 250,
+      skillLevel: 20,
+      useLimitStrength: false,
       disableArtificialDelay: true,
       hintMode: true,
     };
@@ -396,8 +398,10 @@ router.post("/hint", auth, requirePoliciesAccepted, async (req, res) => {
         bestMove = await Promise.race([
           getBestMove(board, currentTurn, moveHistory, 2200, null, {
             elo: 2200,
-            depth: 9,
-            movetime: 220,
+            depth: 12,
+            movetime: 400,
+            skillLevel: 20,
+            useLimitStrength: false,
             disableArtificialDelay: true,
             hintMode: true,
           }),
