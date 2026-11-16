@@ -112,12 +112,52 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // MongoDB connection
-const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/chessones";
+const mongoUriRaw = process.env.MONGODB_URI || "mongodb://localhost:27017/chessones";
+function rewriteSrvUriWithDig(mongoUri) {
+  if (!mongoUri.startsWith("mongodb+srv://")) return mongoUri;
+  try {
+    const { execFileSync } = require("child_process");
+    const withoutProtocol = mongoUri.slice("mongodb+srv://".length);
+    const at = withoutProtocol.lastIndexOf("@");
+    if (at < 0) return mongoUri;
+    const creds = withoutProtocol.slice(0, at);
+    const rest = withoutProtocol.slice(at + 1);
+    const slash = rest.indexOf("/");
+    const hostPort = slash >= 0 ? rest.slice(0, slash) : rest;
+    const pathAndQuery = slash >= 0 ? rest.slice(slash) : "/";
+    const host = hostPort.split(":")[0].split("?")[0];
+    const out = execFileSync("dig", ["+short", "SRV", `_mongodb._tcp.${host}`], {
+      encoding: "utf8",
+      timeout: 8000,
+    });
+    const seeds = out
+      .trim()
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const parts = line.split(/\s+/);
+        return `${parts[3].replace(/\.$/, "")}:${parts[2]}`;
+      });
+    if (!seeds.length) return mongoUri;
+    const qIdx = pathAndQuery.indexOf("?");
+    const dbPath =
+      (qIdx >= 0 ? pathAndQuery.slice(0, qIdx) : pathAndQuery.split("?")[0]) || "/chessones";
+    return `mongodb://${creds}@${seeds.join(",")}${dbPath}?tls=true&authSource=admin&retryWrites=true&w=majority`;
+  } catch (err) {
+    console.warn("Mongo SRV dig fallback skipped:", err.message);
+    return mongoUri;
+  }
+}
+const mongoUri =
+  process.env.NODE_ENV === "development" ? rewriteSrvUriWithDig(mongoUriRaw) : mongoUriRaw;
 console.log("🔌 Connecting to MongoDB:", mongoUri.replace(/\/\/.*@/, "//***:***@")); // Hide credentials
 mongoose
   .connect(mongoUri, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
+    family: 4,
+    serverSelectionTimeoutMS: 20000,
   })
   .then(() => {
     console.log("✅ MongoDB connected successfully");
@@ -191,6 +231,7 @@ app.use("/api/bot-stats", require("./routes/bot-stats")); // Bot training record
 app.use("/api/pass-play", require("./routes/pass-play")); // Pass-and-play import for review
 app.use("/api/invitations", require("./routes/invitations"));
 app.use("/api/game-review", require("./routes/game-review")); // Game review analysis
+app.use("/fishnet", require("./routes/fishnet")); // Lichess Fishnet protocol (local + rust clients)
 app.use("/api/puzzles", require("./routes/puzzles")); // Puzzles endpoints
 app.use("/api/daily-puzzle", require("./routes/daily-puzzle")); // Daily puzzle (isolated)
 app.use("/api/puzzle-rush", require("./routes/puzzle-rush")); // Puzzle Rush (3/5 min)
@@ -3114,6 +3155,11 @@ app.use("*", (req, res) => {
 const PORT = process.env.PORT || 5050;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  try {
+    require("./utils/fishnet/worker").start();
+  } catch (err) {
+    console.error("[Fishnet] failed to start local worker:", err.message);
+  }
   try {
     const fs = require("fs");
     const path = require("path");

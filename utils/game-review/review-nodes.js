@@ -4,16 +4,16 @@
  */
 
 const PRESETS = [
-  { id: "fast", label: "Fast", nodes: 300000 },
-  { id: "standard", label: "Standard", nodes: 500000 },
-  { id: "deep", label: "Deep", nodes: 1000000 },
-  { id: "extra_deep", label: "Extra deep", nodes: 1500000 },
-  { id: "maximum", label: "Maximum", nodes: 2000000 },
+  { id: "fast", label: "Fast", nodes: 300000 }, // lila Work.Origin.autoHunter
+  { id: "standard", label: "Standard", nodes: 1000000 }, // Origin.manualRequest (Request computer analysis)
+  { id: "deep", label: "Deep", nodes: 1500000 },
+  { id: "extra_deep", label: "Extra deep", nodes: 2000000 },
+  { id: "maximum", label: "Maximum", nodes: 5000000 }, // Origin.officialBroadcast
 ];
 
 const PRESET_BY_ID = Object.fromEntries(PRESETS.map((p) => [p.id, p]));
 const PRESET_NODES = PRESETS.map((p) => p.nodes);
-const DEFAULT_NODES = 300000;
+const DEFAULT_NODES = 1000000;
 
 function snapToPresetNodes(raw) {
   const n = Number(raw);
@@ -34,17 +34,17 @@ function presetFromNodes(nodes) {
 function legacyKnobsFromNodes(nodes) {
   const n = snapToPresetNodes(nodes);
   if (n <= 300000) return { depth: 12, movetime: 600 };
-  if (n <= 500000) return { depth: 14, movetime: 800 };
   if (n <= 1000000) return { depth: 16, movetime: 2000 };
   if (n <= 1500000) return { depth: 18, movetime: 2000 };
-  return { depth: 20, movetime: 2000 };
+  if (n <= 2000000) return { depth: 20, movetime: 2000 };
+  return { depth: 22, movetime: 4000 };
 }
 
 function nodesFromLegacyDepthMovetime(depth, movetime) {
   const d = Math.max(6, Math.min(20, Math.round(Number(depth) || 12)));
   const t = Math.max(300, Math.min(8000, Math.round(Number(movetime) || 600)));
   const raw = Math.round(300000 * (d / 12) * Math.sqrt(t / 600));
-  return snapToPresetNodes(Math.max(100000, Math.min(2000000, raw)));
+  return snapToPresetNodes(Math.max(100000, Math.min(5000000, raw)));
 }
 
 /**

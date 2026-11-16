@@ -216,7 +216,8 @@ function getTacticalSuggestion(moveData) {
  * @returns {Object} - { comment: string, tip: string, bestMove: string, engineContinuation: string }
  */
 function generateComprehensiveMoveSuggestion(moveData, moveIndex, allMoves) {
-  const baseComment = generateMoveSuggestion(moveData, moveIndex, allMoves);
+  const baseComment =
+    moveData.lichessComment || generateMoveSuggestion(moveData, moveIndex, allMoves);
   
   // Format best move and engine continuation
   const bestMoveFormatted = moveData.bestMove ? formatMoveForDisplay(moveData.bestMove) : null;

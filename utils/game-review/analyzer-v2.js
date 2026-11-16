@@ -17,6 +17,9 @@ const engine = require("./engine"); // replay / legacy single-move path
 const { liteReviewPool, nodesFromReviewOptions } = require("./lite-review-pool");
 const { isBookFen, lookupOpeningAtFen } = require("./opening-book");
 const classifier = require("./classifier");
+const lichess = require("./lichess-accuracy");
+const fishnetQueue = require("../fishnet/queue");
+const { analysisToResults } = require("../fishnet/ingest");
 const { Chess } = require("chess.js");
 
 /**
@@ -638,23 +641,38 @@ async function analyzeGame(moves, options = {}) {
     throw new Error("No moves provided for analysis");
   }
 
-  const { depth = 12, movetime = 600 } = options;
+  const { depth = 12, movetime = 600, nodes: nodesOpt, gameId } = options;
   const totalMoves = moves.length;
-  const nodes = nodesFromReviewOptions({ depth, movetime });
+  const nodes = nodesFromReviewOptions({ depth, movetime, nodes: nodesOpt });
 
   console.log(`[GameReview] ========================================`);
-  console.log(`[GameReview] Starting game analysis (N+1 positions)`);
+  console.log(`[GameReview] Starting Fishnet game analysis (N+1 positions)`);
   console.log(
     `[GameReview] Moves=${totalMoves} mappedNodes=${nodes} (depth=${depth}, movetime=${movetime}ms)`
   );
   console.log(`[GameReview] ========================================`);
 
-  const positions = [];
-  for (let ply = 0; ply <= totalMoves; ply++) {
-    positions.push({ ply, moves: moves.slice(0, ply) });
+  let results;
+  if (Array.isArray(options.engineResults) && options.engineResults.length) {
+    results = options.engineResults;
+  } else if (process.env.FISHNET_INLINE === "1") {
+    const positions = [];
+    for (let ply = 0; ply <= totalMoves; ply++) {
+      positions.push({ ply, moves: moves.slice(0, ply) });
+    }
+    ({ results } = await liteReviewPool.analyzePositions(positions, { depth, movetime, nodes }));
+  } else {
+    if (process.env.FISHNET_DISABLE_LOCAL_WORKER !== "1") {
+      await require("../fishnet/worker").start();
+    }
+    const job = await fishnetQueue.enqueueAndWait(moves, {
+      nodes,
+      depth,
+      movetime,
+      gameId,
+    });
+    results = analysisToResults(job.analysis, totalMoves);
   }
-
-  const { results } = await liteReviewPool.analyzePositions(positions, { depth, movetime });
   const analyzedMoves = [];
   const bookBoard = new Chess();
   let lastOpening = null;
@@ -687,7 +705,7 @@ async function analyzeGame(moves, options = {}) {
         moveNumber,
         playedMove,
         error: (before && before.error) || (after && after.error) || "position eval failed",
-        label: "unknown",
+        label: null,
         isBookMove,
         opening,
       });
@@ -702,19 +720,64 @@ async function analyzeGame(moves, options = {}) {
     const bestMove = before.bestMove || null;
     const pvBest = Array.isArray(before.pv) ? before.pv : [];
 
-    const centipawnLoss = calculateCentipawnLoss(evalBestAfter, evalAfter, isWhiteMove);
     const missedMate = detectMissedMate(evalBefore, evalBestAfter, evalAfter, isWhiteMove);
     const tacticalSwing = detectTacticalSwing(evalBefore, evalAfter, isWhiteMove);
     const isBestMove =
       (bestMove || "").toLowerCase() === (playedMove || "").toLowerCase();
     const hadMate = typeof evalBestAfter.mate === "number" && evalBestAfter.mate > 0;
 
-    const label = classifier.classifyMove(centipawnLoss, {
-      hadMate,
+    const prevWhite = lichess.stmToWhite(evalBefore, i);
+    const nextWhite = lichess.stmToWhite(after.evaluation, i + 1);
+    const advice = lichess.adviseMoveFull(prevWhite, nextWhite, isWhiteMove);
+    const judgement = advice ? advice.judgement : null;
+    const qualityDelta = lichess.moverWinChanceDelta(prevWhite, nextWhite, isWhiteMove);
+    const whiteWinBefore = lichess.winPercentFromWhiteEval(prevWhite);
+    const whiteWinAfter = lichess.winPercentFromWhiteEval(nextWhite);
+    const playerWinBefore = lichess.playerWinPercent(whiteWinBefore, isWhiteMove);
+    const playerWinAfter = lichess.playerWinPercent(whiteWinAfter, isWhiteMove);
+    const moveAccuracy =
+      playerWinBefore != null && playerWinAfter != null
+        ? lichess.round1(lichess.accuracyFromWinPercents(playerWinBefore, playerWinAfter))
+        : null;
+    const whiteCpBefore = lichess.forceAsCp(prevWhite);
+    const whiteCpAfter = lichess.forceAsCp(nextWhite);
+    const centipawnLoss = lichess.plyCentipawnLoss(whiteCpBefore, whiteCpAfter, isWhiteMove);
+
+    const label = lichess.qualityLabel({
+      judgement,
       isBestMove,
       isBookMove,
-      missedMate,
+      delta: qualityDelta,
     });
+
+    let bestMoveSan = null;
+    if (bestMove) {
+      try {
+        const sanBoard = new Chess();
+        for (const uci of moves.slice(0, i)) {
+          const played = sanBoard.move({
+            from: uci.slice(0, 2),
+            to: uci.slice(2, 4),
+            promotion: uci.length > 4 ? uci[4] : undefined,
+          });
+          if (!played) break;
+        }
+        const bestPlayed = sanBoard.move({
+          from: bestMove.slice(0, 2),
+          to: bestMove.slice(2, 4),
+          promotion: bestMove.length > 4 ? bestMove[4] : undefined,
+        });
+        if (bestPlayed) bestMoveSan = bestPlayed.san;
+      } catch (_e) {
+        bestMoveSan = null;
+      }
+    }
+    const commentAdvice =
+      advice || (label === "excellent" ? { judgement: "excellent", sequence: null } : null);
+    const lichessComment =
+      commentAdvice && !isBestMove
+        ? lichess.makeComment(commentAdvice, prevWhite, nextWhite, bestMoveSan)
+        : "";
 
     const playedCp = evaluationToCp(evalBefore);
     const alternativeLines = normalizeAlternativeLines(
@@ -744,8 +807,14 @@ async function analyzeGame(moves, options = {}) {
       evalAfter: formatEvaluation(evalAfterRaw, true),
       evalBestAfter: formatEvaluation(evalBestAfterRaw, true),
       evalAfterNumeric: parsedEvalForGraph,
-      centipawnLoss: Math.round(centipawnLoss),
+      centipawnLoss: centipawnLoss == null ? undefined : centipawnLoss,
       label,
+      lichessComment: lichessComment || undefined,
+      winPercentBefore: playerWinBefore != null ? lichess.round1(playerWinBefore) : undefined,
+      winPercentAfter: playerWinAfter != null ? lichess.round1(playerWinAfter) : undefined,
+      moveAccuracy: moveAccuracy != null ? moveAccuracy : undefined,
+      whiteCpBefore,
+      whiteCpAfter,
       pv: pvBest.slice(0, 5),
       alternativeLines,
       missedMate,

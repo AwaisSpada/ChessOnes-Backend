@@ -60,7 +60,7 @@ function createCustomReviewJobId(gameId) {
 /**
  * @param {string} gameId
  * @param {{ nodes?: number; preset?: string; depth?: number; movetime?: number }} [engineOptions]
- * Defaults: Fast preset (300000 nodes).
+ * Defaults: Lichess manualRequest (1_000_000 nodes).
  */
 async function runQuickReviewInBackground(gameId, engineOptions = {}) {
   if (reviewJobsInProgress.has(gameId)) {

@@ -8,6 +8,8 @@
 const analyzerV2 = require("./analyzer-v2");
 const moveSuggestions = require("./move-suggestions");
 const { lookupOpeningFromUci } = require("./opening-book");
+const lichess = require("./lichess-accuracy");
+const { divideUci } = require("./lichess-divider");
 
 /**
  * Generate complete game review
@@ -46,29 +48,19 @@ async function generateGameReview(options = {}) {
       engineType: "lite",
     });
 
-    // Build evaluationGraph (Chess.com–style): leading 0.0 at start position, then one White-POV
-    // value per ply (side-to-move scores after White's moves are negated so + = better for White).
-    // Never hard-fail the whole review due to a few move-eval gaps.
-    const evaluationGraph = [0];
+    // White-POV pawns from Lichess forceAsCp (±10.00 = mate ceiling). FE plots Win% from this.
+    const evaluationGraph = [];
+    const startCp = analyzedMoves.find((m) => !m.error && m.whiteCpBefore != null);
+    evaluationGraph.push(
+      startCp && typeof startCp.whiteCpBefore === "number" ? startCp.whiteCpBefore / 100 : 0
+    );
     for (let i = 0; i < analyzedMoves.length; i++) {
       const move = analyzedMoves[i];
-
-      // evalAfterNumeric is a float in pawns (engine side-to-move at leaf); fallback to last point.
-      const raw = move && move.evalAfterNumeric !== undefined ? Number(move.evalAfterNumeric) : NaN;
-      const fallback = evaluationGraph[evaluationGraph.length - 1];
-      const evalFloat = Number.isFinite(raw) ? raw : fallback;
-
-      if (!Number.isFinite(raw)) {
-        console.warn(
-          `[GameReview] Move ${i + 1} has missing/invalid evalAfterNumeric (${move?.evalAfterNumeric}); using fallback ${fallback}`
-        );
+      if (move && typeof move.whiteCpAfter === "number") {
+        evaluationGraph.push(move.whiteCpAfter / 100);
+      } else {
+        evaluationGraph.push(evaluationGraph[evaluationGraph.length - 1]);
       }
-
-      const whitePov = i % 2 === 0 ? -evalFloat : evalFloat;
-      evaluationGraph.push(whitePov);
-      console.log(
-        `[GameReview] Move ${i + 1}: evalAfterNumeric=${move.evalAfterNumeric} → White-POV graph=${whitePov}`
-      );
     }
 
     // MANDATORY VALIDATION before proceeding (graph = start + one point per move)
@@ -123,6 +115,7 @@ async function generateGameReview(options = {}) {
       return {
         ...move,
         comment: suggestion.comment,
+        commentary: suggestion.comment,
         tip: suggestion.tip,
         bestMoveFormatted: suggestion.bestMove,
         engineContinuation: suggestion.engineContinuation,
@@ -136,12 +129,30 @@ async function generateGameReview(options = {}) {
 
     console.log(`[GameReview] Separated moves: White=${whiteMoves.length}, Black=${blackMoves.length}`);
 
-    // Calculate player statistics
-    const whiteStats = calculatePlayerStats(whiteMoves, "WHITE");
-    const blackStats = calculatePlayerStats(blackMoves, "BLACK");
+    const whiteCps = reconstructWhiteCps(movesWithSuggestions);
+    const gameAcc = lichess.gameAccuracy("white", whiteCps);
+    const acpl = lichess.accuracyCpMean("white", whiteCps);
+    const division = divideUci(uciMoves);
+    const phaseAcc = lichess.phaseAccuracies(division, whiteCps);
+
+    // Lichess AccuracyPercent.gameAccuracy + AccuracyCP.mean + phaseAccuracies
+    const whiteStats = calculatePlayerStats(
+      whiteMoves,
+      "WHITE",
+      gameAcc.white,
+      phaseAcc.white,
+      acpl.white
+    );
+    const blackStats = calculatePlayerStats(
+      blackMoves,
+      "BLACK",
+      gameAcc.black,
+      phaseAcc.black,
+      acpl.black
+    );
 
     // Generate summary
-    const summary = generateSummary(movesWithSuggestions);
+    const summary = generateSummary(movesWithSuggestions, whiteStats, blackStats);
 
     // Detect opening
     const opening = lookupOpeningFromUci(uciMoves);
@@ -193,17 +204,38 @@ async function generateGameReview(options = {}) {
   }
 }
 
+function reconstructWhiteCps(analyzedMoves) {
+  if (!analyzedMoves.length) return [];
+  const first = analyzedMoves.find((m) => !m.error && m.whiteCpBefore != null);
+  const cps = [first ? first.whiteCpBefore : 0];
+  for (const move of analyzedMoves) {
+    if (move.error || move.whiteCpAfter == null) {
+      cps.push(null);
+    } else {
+      cps.push(move.whiteCpAfter);
+    }
+  }
+  return cps;
+}
+
 /**
- * Calculate statistics for a specific player's moves
- * CHESS.COM-STYLE ACCURACY FORMULA
+ * Calculate statistics for a specific player's moves.
+ * Accuracy is Lichess AccuracyPercent.gameAccuracy for that color.
  */
-function calculatePlayerStats(playerMoves, playerColor) {
+function calculatePlayerStats(
+  playerMoves,
+  playerColor,
+  lichessAccuracy,
+  phases = {},
+  lichessAcpl = null
+) {
   const validMoves = playerMoves.filter(m => !m.error && m.centipawnLoss !== undefined);
   
   if (validMoves.length === 0) {
     return {
       totalMoves: playerMoves.length,
       accuracy: 0,
+      phases: phases || {},
       brilliants: 0,
       greats: 0,
       bests: 0,
@@ -215,7 +247,7 @@ function calculatePlayerStats(playerMoves, playerColor) {
       blunders: 0,
       missedMates: 0,
       tacticalSwings: 0,
-      averageCentipawnLoss: 0,
+      averageCentipawnLoss: lichessAcpl == null ? 0 : lichessAcpl,
     };
   }
 
@@ -224,7 +256,7 @@ function calculatePlayerStats(playerMoves, playerColor) {
   const greats = validMoves.filter(m => m.label === "great").length;
   const bests = validMoves.filter(m => m.label === "best").length;
   const excellents = validMoves.filter(m => m.label === "excellent").length;
-  const goods = validMoves.filter(m => m.label === "good").length;
+  const goods = validMoves.filter(m => m.label === "good" || !m.label).length;
   const books = validMoves.filter(m => m.label === "book").length;
   const inaccuracies = validMoves.filter(m => m.label === "inaccuracy").length;
   const mistakes = validMoves.filter(m => m.label === "mistake").length;
@@ -232,47 +264,35 @@ function calculatePlayerStats(playerMoves, playerColor) {
   const missedMates = validMoves.filter(m => m.missedMate).length;
   const tacticalSwings = validMoves.filter(m => m.tacticalSwing).length;
 
-  // Calculate total and average centipawn loss
   const totalCentipawnLoss = validMoves.reduce((sum, m) => sum + (m.centipawnLoss || 0), 0);
-  const averageCentipawnLoss = totalCentipawnLoss / validMoves.length;
+  const fallbackAcpl = totalCentipawnLoss / validMoves.length;
+  const averageCentipawnLoss =
+    lichessAcpl == null || Number.isNaN(lichessAcpl) ? fallbackAcpl : lichessAcpl;
 
-  // CHESS.COM-STYLE ACCURACY FORMULA
-  // Based on average centipawn loss
-  // Formula: accuracy = max(0, 100 - (averageLoss / 10))
-  // This means:
-  // - 0cp average loss → 100% accuracy (perfect play)
-  // - 10cp average loss → 99% accuracy (excellent)
-  // - 50cp average loss → 95% accuracy (very good)
-  // - 100cp average loss → 90% accuracy (good)
-  // - 200cp average loss → 80% accuracy (fair)
-  // - 300cp average loss → 70% accuracy (poor)
-  // - 500cp average loss → 50% accuracy (bad)
-  // - 1000cp average loss → 0% accuracy (terrible)
-  const accuracy = Math.max(0, Math.min(100, 100 - (averageCentipawnLoss / 10)));
+  let accuracy = lichessAccuracy;
+  if (accuracy == null || Number.isNaN(accuracy)) {
+    const moveAccs = validMoves
+      .map((m) => m.moveAccuracy)
+      .filter((n) => typeof n === "number");
+    accuracy = moveAccs.length
+      ? moveAccs.reduce((s, n) => s + n, 0) / moveAccs.length
+      : 0;
+  }
+  accuracy = clampAccuracy(accuracy);
 
-  // Enhanced debug logging
   console.log(`[GameReview] ========================================`);
   console.log(`[GameReview] calculatePlayerStats for ${playerColor}:`);
   console.log(`  - Valid moves: ${validMoves.length}/${playerMoves.length}`);
-  console.log(`  - Total centipawn loss: ${totalCentipawnLoss}cp`);
-  console.log(`  - Average centipawn loss: ${averageCentipawnLoss.toFixed(2)}cp`);
-  console.log(`  - Calculated accuracy: ${accuracy.toFixed(2)}%`);
-  console.log(`  - Move quality breakdown:`);
-  console.log(`    * Brilliant: ${brilliants}, Great: ${greats}, Best: ${bests}`);
-  console.log(`    * Excellent: ${excellents}, Good: ${goods}, Book: ${books}`);
+  console.log(`  - Lichess gameAccuracy: ${accuracy}%`);
+  console.log(`  - Average centipawn loss (info only): ${averageCentipawnLoss.toFixed(2)}cp`);
   console.log(`    * Inaccuracy: ${inaccuracies}, Mistake: ${mistakes}, Blunder: ${blunders}`);
-  if (validMoves.length > 0) {
-    console.log(`  - Sample moves with loss:`);
-    validMoves.slice(0, 5).forEach(m => {
-      console.log(`    * Move ${m.moveNumber} (${m.playedMove}): ${m.centipawnLoss}cp loss → ${m.label}`);
-    });
-  }
   console.log(`[GameReview] ========================================`);
 
   return {
     totalMoves: playerMoves.length,
     accuracy: Math.round(accuracy * 10) / 10,
     averageCentipawnLoss: Math.round(averageCentipawnLoss),
+    phases: phases || {},
     brilliants,
     greats,
     bests,
@@ -287,10 +307,14 @@ function calculatePlayerStats(playerMoves, playerColor) {
   };
 }
 
+function clampAccuracy(n) {
+  return Math.max(0, Math.min(100, n));
+}
+
 /**
  * Generate summary statistics
  */
-function generateSummary(analyzedMoves) {
+function generateSummary(analyzedMoves, whiteStats, blackStats) {
   const validMoves = analyzedMoves.filter(m => !m.error);
   
   if (validMoves.length === 0) {
@@ -311,7 +335,7 @@ function generateSummary(analyzedMoves) {
   const greats = validMoves.filter(m => m.label === "great").length;
   const bests = validMoves.filter(m => m.label === "best").length;
   const excellents = validMoves.filter(m => m.label === "excellent").length;
-  const goods = validMoves.filter(m => m.label === "good").length;
+  const goods = validMoves.filter(m => m.label === "good" || !m.label).length;
   const books = validMoves.filter(m => m.label === "book").length;
   const blunders = validMoves.filter(m => m.label === "blunder").length;
   const mistakes = validMoves.filter(m => m.label === "mistake").length;
@@ -324,8 +348,16 @@ function generateSummary(analyzedMoves) {
   const totalCentipawnLoss = validMoves.reduce((sum, m) => sum + (m.centipawnLoss || 0), 0);
   const averageCentipawnLoss = totalCentipawnLoss / validMoves.length;
 
-  // Overall accuracy (average of all moves)
-  const accuracy = Math.max(0, Math.min(100, 100 - (averageCentipawnLoss / 10)));
+  const whiteAcc = whiteStats && typeof whiteStats.accuracy === "number" ? whiteStats.accuracy : null;
+  const blackAcc = blackStats && typeof blackStats.accuracy === "number" ? blackStats.accuracy : null;
+  const accuracy =
+    whiteAcc != null && blackAcc != null
+      ? (whiteAcc + blackAcc) / 2
+      : whiteAcc != null
+        ? whiteAcc
+        : blackAcc != null
+          ? blackAcc
+          : 0;
 
   return {
     totalMoves: analyzedMoves.length,
