@@ -17,7 +17,7 @@ function makeId() {
 }
 
 function nodesObject(nodes) {
-  const n = Math.max(100000, Math.min(5000000, Number(nodes) || 1000000));
+  const n = Math.max(100000, Math.min(5000000, Number(nodes) || 500000));
   return {
     sf16: n,
     sf15: n,

@@ -284,7 +284,7 @@ class ReviewWorker {
 
   async analyzePosition(moves, { nodes, timeoutMs, multipv }) {
     if (!this.ready) await this.start();
-    const n = Math.max(100000, Math.min(5000000, Number(nodes) || 1000000));
+    const n = Math.max(100000, Math.min(5000000, Number(nodes) || 500000));
     const mpv = Math.max(1, Math.min(3, Number(multipv) || 1));
     this._write(`setoption name MultiPV value ${mpv}`);
 

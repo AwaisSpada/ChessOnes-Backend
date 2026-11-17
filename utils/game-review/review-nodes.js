@@ -4,16 +4,16 @@
  */
 
 const PRESETS = [
-  { id: "fast", label: "Fast", nodes: 300000 }, // lila Work.Origin.autoHunter
-  { id: "standard", label: "Standard", nodes: 1000000 }, // Origin.manualRequest (Request computer analysis)
+  { id: "fast", label: "Fast", nodes: 500000 },
+  { id: "standard", label: "Standard", nodes: 1000000 },
   { id: "deep", label: "Deep", nodes: 1500000 },
   { id: "extra_deep", label: "Extra deep", nodes: 2000000 },
-  { id: "maximum", label: "Maximum", nodes: 5000000 }, // Origin.officialBroadcast
+  { id: "maximum", label: "Maximum", nodes: 5000000 },
 ];
 
 const PRESET_BY_ID = Object.fromEntries(PRESETS.map((p) => [p.id, p]));
 const PRESET_NODES = PRESETS.map((p) => p.nodes);
-const DEFAULT_NODES = 1000000;
+const DEFAULT_NODES = 500000;
 
 function snapToPresetNodes(raw) {
   const n = Number(raw);
@@ -33,7 +33,7 @@ function presetFromNodes(nodes) {
 /** Keep depth/movetime populated so older clients still display something. */
 function legacyKnobsFromNodes(nodes) {
   const n = snapToPresetNodes(nodes);
-  if (n <= 300000) return { depth: 12, movetime: 600 };
+  if (n <= 500000) return { depth: 12, movetime: 600 };
   if (n <= 1000000) return { depth: 16, movetime: 2000 };
   if (n <= 1500000) return { depth: 18, movetime: 2000 };
   if (n <= 2000000) return { depth: 20, movetime: 2000 };
