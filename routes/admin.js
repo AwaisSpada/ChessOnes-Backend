@@ -1,10 +1,11 @@
 const express = require("express");
 const mongoose = require("mongoose");
-const { body, param, validationResult } = require("express-validator");
+const { body, param, query, validationResult } = require("express-validator");
 const multer = require("multer");
 const User = require("../models/User");
 const News = require("../models/News");
 const AppVersionPolicy = require("../models/AppVersionPolicy");
+const AppReleaseCatalog = require("../models/AppReleaseCatalog");
 const Stats = require("../models/Stats");
 const Game = require("../models/Game");
 const DailyPuzzleUserProgress = require("../models/DailyPuzzleUserProgress");
@@ -18,6 +19,10 @@ const MessengerMessage = require("../models/MessengerMessage");
 const AdminMessageAccessLog = require("../models/AdminMessageAccessLog");
 const auth = require("../middleware/auth");
 const isAdmin = require("../middleware/isAdmin");
+const {
+  syncAppVersionFromStores,
+  toStoreSyncAdminPayload,
+} = require("../services/storeSync/syncAppVersionFromStores");
 const {
   uploadImage,
   deleteImage,
@@ -645,7 +650,7 @@ const normalizeAppVersionPlatform = (raw) => {
   return null;
 };
 
-/** Admin-editable fields only — never expose storeSync. */
+/** Admin policy payload — includes storeSync metadata (never credentials / raw store APIs). */
 const toAdminAppVersionPolicyPayload = (doc) => {
   if (!doc) return null;
   return {
@@ -661,8 +666,24 @@ const toAdminAppVersionPolicyPayload = (doc) => {
       "A new version of ChessOnes is available. Please update for the best experience.",
     storeUrl: doc.storeUrl || "",
     isActive: Boolean(doc.isActive),
+    storeSync: toStoreSyncAdminPayload(doc.storeSync),
     createdAt: doc.createdAt || null,
     updatedAt: doc.updatedAt || null,
+  };
+};
+
+/** Admin release catalog entry (never mixed across platforms). */
+const toAdminReleaseCatalogPayload = (doc) => {
+  if (!doc) return null;
+  return {
+    platform: doc.platform,
+    version: doc.version,
+    buildNumber: doc.buildNumber,
+    source: doc.source,
+    firstDetectedAt: doc.firstDetectedAt || null,
+    lastSeenAt: doc.lastSeenAt || null,
+    currentlyLive: Boolean(doc.currentlyLive),
+    storeReleaseStatus: doc.storeReleaseStatus || null,
   };
 };
 
@@ -677,6 +698,10 @@ const isValidStoreUrl = (value) => {
     return false;
   }
 };
+
+/** Technical bootstrap used only when creating a missing policy document. */
+const POLICY_BOOTSTRAP_VERSION = "1.0.0";
+const POLICY_BOOTSTRAP_BUILD = 1;
 
 // @route   GET /api/admin/app-version-policies
 // @desc    List ANDROID + IOS app version policies (includes inactive)
@@ -711,44 +736,67 @@ router.get("/app-version-policies", async (req, res) => {
   }
 });
 
-// @route   PUT /api/admin/app-version-policies/:platform
-// @desc    Upsert ANDROID or IOS app version policy (manual OPTIONAL/MANDATORY)
+// @route   POST /api/admin/app-version-policies/sync-from-stores
+// @desc    Manually fetch live App Store / Play production version+build into storeSync
 // @access  Private (Admin only)
-router.put(
-  "/app-version-policies/:platform",
+// Body (optional): { platforms?: ["IOS","ANDROID"] }
+// On SUCCESS: upserts AppReleaseCatalog + updates latest* + storeSync.
+// Never changes updatePolicy / minimumSupported* automatically.
+router.post("/app-version-policies/sync-from-stores", async (req, res) => {
+  try {
+    const platforms = req.body?.platforms;
+    const { results } = await syncAppVersionFromStores({ platforms });
+
+    const docs = await AppVersionPolicy.find({
+      platform: { $in: ["ANDROID", "IOS"] },
+    })
+      .sort({ platform: 1 })
+      .lean();
+
+    const byPlatform = { ANDROID: null, IOS: null };
+    for (const doc of docs) {
+      if (doc.platform === "ANDROID" || doc.platform === "IOS") {
+        byPlatform[doc.platform] = toAdminAppVersionPolicyPayload(doc);
+      }
+    }
+
+    const anySuccess = Object.values(results).some((r) => r && r.success);
+    const anyConfiguredAttempt = Object.values(results).some(
+      (r) => r && r.configured !== false
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: anySuccess
+        ? "Store sync completed with at least one success."
+        : anyConfiguredAttempt
+          ? "Store sync finished without successes. See per-platform errors."
+          : "Store sync is not fully configured. See missingEnv per platform.",
+      data: {
+        results,
+        policies: byPlatform,
+      },
+    });
+  } catch (error) {
+    console.error("[Admin] Error syncing app version from stores:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to sync app version policies from stores",
+    });
+  }
+});
+
+// @route   GET /api/admin/app-version-policies/:platform/releases
+// @desc    Paginated AppReleaseCatalog for one platform (buildNumber desc)
+// @access  Private (Admin only)
+router.get(
+  "/app-version-policies/:platform/releases",
   [
     param("platform")
       .custom((value) => Boolean(normalizeAppVersionPlatform(value)))
       .withMessage("platform must be android or ios"),
-    body("latestVersion").trim().isLength({ min: 1, max: 32 }),
-    body("latestBuildNumber").isInt({ min: 1 }).toInt(),
-    body("minimumSupportedVersion").trim().isLength({ min: 1, max: 32 }),
-    body("minimumSupportedBuildNumber").isInt({ min: 1 }).toInt(),
-    body("updatePolicy")
-      .trim()
-      .customSanitizer((v) => String(v || "").trim().toUpperCase())
-      .isIn(["OPTIONAL", "MANDATORY"]),
-    body("updateTitle").optional().trim().isLength({ max: 120 }),
-    body("updateMessage").optional().trim().isLength({ max: 1000 }),
-    body("storeUrl")
-      .optional({ nullable: true })
-      .custom((value) => isValidStoreUrl(value))
-      .withMessage("storeUrl must be empty or a valid http(s) URL"),
-    body("isActive").optional().isBoolean().toBoolean(),
-    body().custom((value) => {
-      const latest = Number(value?.latestBuildNumber);
-      const minimum = Number(value?.minimumSupportedBuildNumber);
-      if (
-        Number.isFinite(latest) &&
-        Number.isFinite(minimum) &&
-        minimum > latest
-      ) {
-        throw new Error(
-          "minimumSupportedBuildNumber cannot exceed latestBuildNumber"
-        );
-      }
-      return true;
-    }),
+    query("page").optional().isInt({ min: 1 }).toInt(),
+    query("limit").optional().isInt({ min: 1, max: 100 }).toInt(),
   ],
   async (req, res) => {
     try {
@@ -769,11 +817,113 @@ router.put(
         });
       }
 
-      // Never take platform / storeSync from body (platform locked to URL param).
+      const page = Number(req.query.page) > 0 ? Number(req.query.page) : 1;
+      const limitRaw = Number(req.query.limit);
+      const limit =
+        Number.isInteger(limitRaw) && limitRaw >= 1
+          ? Math.min(limitRaw, 100)
+          : 50;
+      const skip = (page - 1) * limit;
+
+      const filter = { platform };
+      const [total, docs] = await Promise.all([
+        AppReleaseCatalog.countDocuments(filter),
+        AppReleaseCatalog.find(filter)
+          .sort({ buildNumber: -1 })
+          .skip(skip)
+          .limit(limit)
+          .lean(),
+      ]);
+
+      const releases = docs.map(toAdminReleaseCatalogPayload);
+      const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+
+      return res.json({
+        success: true,
+        data: {
+          platform,
+          releases,
+          pagination: {
+            page,
+            limit,
+            total,
+            totalPages,
+            hasMore: page < totalPages,
+          },
+        },
+      });
+    } catch (error) {
+      console.error("[Admin] Error fetching app release catalog:", error);
+      return res.status(500).json({
+        success: false,
+        message: "Failed to fetch app release catalog",
+      });
+    }
+  }
+);
+
+// @route   PUT /api/admin/app-version-policies/:platform
+// @desc    Update ANDROID/IOS policy. Minimum must be a catalog build for this platform.
+//          latest* is store-sync-owned (client latest fields are ignored).
+// @access  Private (Admin only)
+router.put(
+  "/app-version-policies/:platform",
+  [
+    param("platform")
+      .custom((value) => Boolean(normalizeAppVersionPlatform(value)))
+      .withMessage("platform must be android or ios"),
+    // latest* may still be sent by older clients — ignored (store-sync-owned).
+    body("latestVersion").optional({ nullable: true }),
+    body("latestBuildNumber").optional({ nullable: true }),
+    // Free-form minimum version ignored; catalog supplies version for selected build.
+    body("minimumSupportedVersion").optional({ nullable: true }),
+    body("minimumSupportedBuildNumber")
+      .optional({ nullable: true })
+      .isInt({ min: 1 })
+      .withMessage("minimumSupportedBuildNumber must be a positive integer")
+      .toInt(),
+    body("updatePolicy")
+      .optional({ nullable: true })
+      .trim()
+      .customSanitizer((v) => {
+        if (v === undefined || v === null || String(v).trim() === "") {
+          return undefined;
+        }
+        return String(v).trim().toUpperCase();
+      })
+      .custom((v) => v === undefined || v === "OPTIONAL" || v === "MANDATORY")
+      .withMessage("updatePolicy must be OPTIONAL or MANDATORY"),
+    body("updateTitle").optional().trim().isLength({ max: 120 }),
+    body("updateMessage").optional().trim().isLength({ max: 1000 }),
+    body("storeUrl")
+      .optional({ nullable: true })
+      .custom((value) => isValidStoreUrl(value))
+      .withMessage("storeUrl must be empty or a valid http(s) URL"),
+    body("isActive").optional().isBoolean().toBoolean(),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const platform = normalizeAppVersionPlatform(req.params.platform);
+      if (!platform) {
+        return res.status(400).json({
+          success: false,
+          message: "platform must be android or ios",
+        });
+      }
+
+      const existing = await AppVersionPolicy.findOne({ platform }).lean();
+
+      // Never take platform / storeSync / latest* from body.
       const {
-        latestVersion,
-        latestBuildNumber,
-        minimumSupportedVersion,
         minimumSupportedBuildNumber,
         updatePolicy,
         updateTitle,
@@ -782,18 +932,92 @@ router.put(
         isActive,
       } = req.body;
 
-      const $set = {
-        platform,
-        latestVersion: String(latestVersion).trim(),
-        latestBuildNumber: Number(latestBuildNumber),
-        minimumSupportedVersion: String(minimumSupportedVersion).trim(),
-        minimumSupportedBuildNumber: Number(minimumSupportedBuildNumber),
-        // Admin-chosen only — never auto-promoted to MANDATORY.
-        updatePolicy: String(updatePolicy).trim().toUpperCase(),
-      };
+      const $set = { platform };
+      const $setOnInsert = {};
+
+      // latest* only seeded on first insert; afterward store-sync-owned exclusively.
+      if (!existing) {
+        $setOnInsert.latestVersion = POLICY_BOOTSTRAP_VERSION;
+        $setOnInsert.latestBuildNumber = POLICY_BOOTSTRAP_BUILD;
+        $setOnInsert.updatePolicy = "OPTIONAL";
+        $setOnInsert.minimumSupportedVersion = POLICY_BOOTSTRAP_VERSION;
+        $setOnInsert.minimumSupportedBuildNumber = POLICY_BOOTSTRAP_BUILD;
+      }
+
+      const hasMinSelection =
+        minimumSupportedBuildNumber !== undefined &&
+        minimumSupportedBuildNumber !== null &&
+        !(
+          typeof minimumSupportedBuildNumber === "string" &&
+          String(minimumSupportedBuildNumber).trim() === ""
+        );
+
+      if (hasMinSelection) {
+        const selectedBuild = Number(minimumSupportedBuildNumber);
+        if (!Number.isInteger(selectedBuild) || selectedBuild < 1) {
+          return res.status(400).json({
+            success: false,
+            message: "minimumSupportedBuildNumber must be a positive integer",
+          });
+        }
+
+        const catalogRelease = await AppReleaseCatalog.findOne({
+          platform,
+          buildNumber: selectedBuild,
+        }).lean();
+
+        if (!catalogRelease) {
+          return res.status(400).json({
+            success: false,
+            message: `No catalog release for ${platform} build ${selectedBuild}. Select a build from this platform's release catalog.`,
+          });
+        }
+
+        const latestBuild = Number(
+          existing?.latestBuildNumber ?? POLICY_BOOTSTRAP_BUILD
+        );
+        if (selectedBuild > latestBuild) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "minimumSupportedBuildNumber cannot exceed latestBuildNumber",
+          });
+        }
+
+        $set.minimumSupportedBuildNumber = catalogRelease.buildNumber;
+        $set.minimumSupportedVersion = String(catalogRelease.version).trim();
+      } else if (!existing) {
+        // Creating without an explicit catalog selection: require bootstrap in catalog.
+        const bootstrapRelease = await AppReleaseCatalog.findOne({
+          platform,
+          buildNumber: POLICY_BOOTSTRAP_BUILD,
+        }).lean();
+        if (!bootstrapRelease) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "minimumSupportedBuildNumber is required and must match a catalog release for this platform.",
+          });
+        }
+        $set.minimumSupportedBuildNumber = bootstrapRelease.buildNumber;
+        $set.minimumSupportedVersion = String(bootstrapRelease.version).trim();
+      }
+      // else: existing policy, no min selection → leave minimum* unchanged.
+
+      if (updatePolicy !== undefined && updatePolicy !== null) {
+        const normalizedPolicy = String(updatePolicy).trim().toUpperCase();
+        if (normalizedPolicy !== "OPTIONAL" && normalizedPolicy !== "MANDATORY") {
+          return res.status(400).json({
+            success: false,
+            message: "updatePolicy must be OPTIONAL or MANDATORY",
+          });
+        }
+        $set.updatePolicy = normalizedPolicy;
+      }
 
       if (updateTitle !== undefined) {
-        $set.updateTitle = String(updateTitle || "").trim() || "Update available";
+        $set.updateTitle =
+          String(updateTitle || "").trim() || "Update available";
       }
       if (updateMessage !== undefined) {
         $set.updateMessage = String(updateMessage || "").trim();
@@ -805,9 +1029,14 @@ router.put(
         $set.isActive = Boolean(isActive);
       }
 
+      const updateDoc = { $set };
+      if (Object.keys($setOnInsert).length > 0) {
+        updateDoc.$setOnInsert = $setOnInsert;
+      }
+
       const policy = await AppVersionPolicy.findOneAndUpdate(
         { platform },
-        { $set },
+        updateDoc,
         {
           new: true,
           upsert: true,

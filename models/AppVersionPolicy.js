@@ -3,7 +3,14 @@ const mongoose = require("mongoose");
 /**
  * One document per mobile platform (ANDROID / IOS).
  * Build numbers are the primary comparison keys for update enforcement.
- * Store-sync metadata fields are reserved for a later phase (auto Play/App Store sync).
+ *
+ * Separation (Option A):
+ *   - latest*        : automatic from successful store sync
+ *   - minimum*       : admin-selected (never auto-changed by store sync)
+ *   - updatePolicy   : admin-selected (never auto-changed by store sync)
+ *   - storeSync      : detection metadata from manual admin refresh
+ *
+ * Release history lives in AppReleaseCatalog (not embedded here).
  */
 const appVersionPolicySchema = new mongoose.Schema(
   {
@@ -74,12 +81,32 @@ const appVersionPolicySchema = new mongoose.Schema(
       default: true,
       index: true,
     },
-    /** Reserved for future automatic store synchronization (Phase 5+). */
+    /**
+     * Manual store synchronization metadata (Phase 3A).
+     * Never written by the public API. Failed syncs must not clear successful version/build.
+     */
     storeSync: {
+      /** Last successful sync time (unchanged on failure). */
       lastSyncedAt: { type: Date, default: null },
+      /** Last attempt time (success or failure). */
+      lastSyncAttemptedAt: { type: Date, default: null },
+      /** SUCCESS | FAILED | NOT_CONFIGURED | null */
+      lastSyncStatus: {
+        type: String,
+        trim: true,
+        uppercase: true,
+        enum: ["SUCCESS", "FAILED", "NOT_CONFIGURED", null],
+        default: null,
+      },
+      /** Safe admin-facing error message (no credentials / raw secrets). */
+      lastSyncError: { type: String, trim: true, maxlength: 1000, default: null },
+      /** Live store marketing version from last SUCCESS. */
       lastSyncedStoreVersion: { type: String, trim: true, default: null },
+      /** Live store build / versionCode from last SUCCESS. */
       lastSyncedStoreBuild: { type: Number, default: null },
+      /** e.g. READY_FOR_DISTRIBUTION / completed */
       releaseStatus: { type: String, trim: true, default: null },
+      /** e.g. PRODUCTION */
       storeAvailability: { type: String, trim: true, default: null },
     },
   },
