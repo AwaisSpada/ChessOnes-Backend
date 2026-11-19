@@ -1,9 +1,10 @@
 const express = require("express");
 const mongoose = require("mongoose");
-const { body, validationResult } = require("express-validator");
+const { body, param, validationResult } = require("express-validator");
 const multer = require("multer");
 const User = require("../models/User");
 const News = require("../models/News");
+const AppVersionPolicy = require("../models/AppVersionPolicy");
 const Stats = require("../models/Stats");
 const Game = require("../models/Game");
 const DailyPuzzleUserProgress = require("../models/DailyPuzzleUserProgress");
@@ -632,6 +633,209 @@ router.delete("/news/:newsId", async (req, res) => {
     });
   }
 });
+
+// ========== APP VERSION POLICIES (MOBILE UPDATE MANAGEMENT) ==========
+
+const normalizeAppVersionPlatform = (raw) => {
+  const value = String(raw || "")
+    .trim()
+    .toUpperCase();
+  if (value === "ANDROID") return "ANDROID";
+  if (value === "IOS") return "IOS";
+  return null;
+};
+
+/** Admin-editable fields only — never expose storeSync. */
+const toAdminAppVersionPolicyPayload = (doc) => {
+  if (!doc) return null;
+  return {
+    platform: doc.platform,
+    latestVersion: doc.latestVersion,
+    latestBuildNumber: doc.latestBuildNumber,
+    minimumSupportedVersion: doc.minimumSupportedVersion,
+    minimumSupportedBuildNumber: doc.minimumSupportedBuildNumber,
+    updatePolicy: doc.updatePolicy,
+    updateTitle: doc.updateTitle || "Update available",
+    updateMessage:
+      doc.updateMessage ||
+      "A new version of ChessOnes is available. Please update for the best experience.",
+    storeUrl: doc.storeUrl || "",
+    isActive: Boolean(doc.isActive),
+    createdAt: doc.createdAt || null,
+    updatedAt: doc.updatedAt || null,
+  };
+};
+
+const isValidStoreUrl = (value) => {
+  if (value == null) return true;
+  const trimmed = String(value).trim();
+  if (trimmed === "") return true;
+  try {
+    const u = new URL(trimmed);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+};
+
+// @route   GET /api/admin/app-version-policies
+// @desc    List ANDROID + IOS app version policies (includes inactive)
+// @access  Private (Admin only)
+router.get("/app-version-policies", async (req, res) => {
+  try {
+    const docs = await AppVersionPolicy.find({
+      platform: { $in: ["ANDROID", "IOS"] },
+    })
+      .sort({ platform: 1 })
+      .lean();
+
+    const byPlatform = { ANDROID: null, IOS: null };
+    for (const doc of docs) {
+      if (doc.platform === "ANDROID" || doc.platform === "IOS") {
+        byPlatform[doc.platform] = toAdminAppVersionPolicyPayload(doc);
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        policies: byPlatform,
+      },
+    });
+  } catch (error) {
+    console.error("[Admin] Error fetching app version policies:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch app version policies",
+    });
+  }
+});
+
+// @route   PUT /api/admin/app-version-policies/:platform
+// @desc    Upsert ANDROID or IOS app version policy (manual OPTIONAL/MANDATORY)
+// @access  Private (Admin only)
+router.put(
+  "/app-version-policies/:platform",
+  [
+    param("platform")
+      .custom((value) => Boolean(normalizeAppVersionPlatform(value)))
+      .withMessage("platform must be android or ios"),
+    body("latestVersion").trim().isLength({ min: 1, max: 32 }),
+    body("latestBuildNumber").isInt({ min: 1 }).toInt(),
+    body("minimumSupportedVersion").trim().isLength({ min: 1, max: 32 }),
+    body("minimumSupportedBuildNumber").isInt({ min: 1 }).toInt(),
+    body("updatePolicy")
+      .trim()
+      .customSanitizer((v) => String(v || "").trim().toUpperCase())
+      .isIn(["OPTIONAL", "MANDATORY"]),
+    body("updateTitle").optional().trim().isLength({ max: 120 }),
+    body("updateMessage").optional().trim().isLength({ max: 1000 }),
+    body("storeUrl")
+      .optional({ nullable: true })
+      .custom((value) => isValidStoreUrl(value))
+      .withMessage("storeUrl must be empty or a valid http(s) URL"),
+    body("isActive").optional().isBoolean().toBoolean(),
+    body().custom((value) => {
+      const latest = Number(value?.latestBuildNumber);
+      const minimum = Number(value?.minimumSupportedBuildNumber);
+      if (
+        Number.isFinite(latest) &&
+        Number.isFinite(minimum) &&
+        minimum > latest
+      ) {
+        throw new Error(
+          "minimumSupportedBuildNumber cannot exceed latestBuildNumber"
+        );
+      }
+      return true;
+    }),
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: errors.array(),
+        });
+      }
+
+      const platform = normalizeAppVersionPlatform(req.params.platform);
+      if (!platform) {
+        return res.status(400).json({
+          success: false,
+          message: "platform must be android or ios",
+        });
+      }
+
+      // Never take platform / storeSync from body (platform locked to URL param).
+      const {
+        latestVersion,
+        latestBuildNumber,
+        minimumSupportedVersion,
+        minimumSupportedBuildNumber,
+        updatePolicy,
+        updateTitle,
+        updateMessage,
+        storeUrl,
+        isActive,
+      } = req.body;
+
+      const $set = {
+        platform,
+        latestVersion: String(latestVersion).trim(),
+        latestBuildNumber: Number(latestBuildNumber),
+        minimumSupportedVersion: String(minimumSupportedVersion).trim(),
+        minimumSupportedBuildNumber: Number(minimumSupportedBuildNumber),
+        // Admin-chosen only — never auto-promoted to MANDATORY.
+        updatePolicy: String(updatePolicy).trim().toUpperCase(),
+      };
+
+      if (updateTitle !== undefined) {
+        $set.updateTitle = String(updateTitle || "").trim() || "Update available";
+      }
+      if (updateMessage !== undefined) {
+        $set.updateMessage = String(updateMessage || "").trim();
+      }
+      if (storeUrl !== undefined) {
+        $set.storeUrl = String(storeUrl || "").trim();
+      }
+      if (isActive !== undefined) {
+        $set.isActive = Boolean(isActive);
+      }
+
+      const policy = await AppVersionPolicy.findOneAndUpdate(
+        { platform },
+        { $set },
+        {
+          new: true,
+          upsert: true,
+          setDefaultsOnInsert: true,
+          runValidators: true,
+        }
+      ).lean();
+
+      return res.json({
+        success: true,
+        message: "App version policy saved.",
+        data: { policy: toAdminAppVersionPolicyPayload(policy) },
+      });
+    } catch (error) {
+      console.error("[Admin] Error saving app version policy:", error);
+      if (error?.name === "ValidationError") {
+        return res.status(400).json({
+          success: false,
+          message: error.message || "Validation failed",
+        });
+      }
+      return res.status(500).json({
+        success: false,
+        message: "Failed to save app version policy",
+      });
+    }
+  }
+);
 
 // ========== BADGE MANAGEMENT (DEPRECATED) ==========
 // Legacy admin Badge CRUD retired — achievements are code-catalog based.

@@ -82,7 +82,14 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "X-App-Platform",
+      "X-App-Version",
+      "X-App-Build",
+    ],
     exposedHeaders: ["Content-Type", "Authorization"],
   })
 );
